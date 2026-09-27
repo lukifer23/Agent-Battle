@@ -28,7 +28,7 @@ The controller never reads the board from the UI. The React app cannot make a mo
 
 `ChessGame` in `src/games/chess/ChessGame.ts` implements standard two-player chess using chess.js. Its internal state is a chess.js position, move records and optional resignation. Its observation exposes FEN, current side, the upcoming board ply and turn index, legal UCI moves, move history, allowed action schema and the turn deadline. Serialization includes FEN, PGN, per-move FENs and resignation metadata. Reload verifies that saved PGN, FEN, move records and resignation metadata agree.
 
-The game contract also exposes `eventProjection(state)`. Chess returns the latest move record and current FEN so the spectator can update the board and replay one ply at a time without receiving a full match snapshot after every event.
+The game contract also exposes `eventProjection(state)`. Chess returns the latest move record, current FEN and PGN so the spectator can update the board and replay one ply at a time without receiving a full match snapshot after every event.
 
 The UI currently renders the `ChessSnapshot` projection. Adding a game does not require changing the controller or adapter protocol, but it will require a view for the new game's snapshot.
 
@@ -43,7 +43,7 @@ The UI currently renders the `ChessSnapshot` projection. Adding a game does not 
 5. Apply only a valid action, record compact FEN/action telemetry, and continue until the game reports a result.
 6. Persist canonical state checkpoints and publish small activity events.
 
-Pause cancels the in-flight request and preserves the unchanged turn, including a durable in-flight attempt record, so resume keeps the prior rejection feedback and remaining retry budget instead of restarting the turn. Stop cancels the request but marks the match stopped; stop is also a valid, spawn-free command for a ready, paused or interrupted match, and is idempotent once terminal. A `stopped` match keeps its history and has no winner. On an app restart, an interrupted match is restored from the saved game snapshot; resuming asks the current player again and continues any retained in-flight attempt. Creation is blocked while any match is ready, running, paused or interrupted; multiple legacy active records can each be stopped to recover.
+Pause cancels the in-flight request and preserves the unchanged turn and any saved rejection feedback, so resume can continue a recorded retry state. Provider invocation is not yet reserved durably before spawn; a crash can lose evidence of an in-flight request until F2. Stop cancels the request but marks the match stopped; stop is also a valid, spawn-free command for a ready, paused or interrupted match, and is idempotent once terminal. A `stopped` match keeps its history and has no winner. On an app restart, an interrupted match is restored from the saved game snapshot. Creation is blocked while any match is ready, running, paused or interrupted; multiple legacy active records can each be stopped to recover.
 
 ### `AgentAdapter`
 
@@ -61,7 +61,7 @@ All agents receive a new complete observation every turn. No transcript is neede
 - Individual records that fail runtime validation are written to a quarantine file and excluded; valid records are retained.
 - Migration is idempotent and keeps a `.bak` copy; losing a valid record is never used as a recovery path.
 
-A single-writer lock (`matches.json.lock`) is acquired atomically at startup before data is loaded. A recovery guard serializes stale-lock reclamation; uncertain ownership fails closed. Writes use a unique temporary file with `fsync` and an atomic rename with owner-only permissions. The controller commits state and its event before publication. A failed write restores the last committed position in memory, stops further requests, reports a storage error, and prevents a success acknowledgement for the failed transition. The last durable running state is marked interrupted on restart.
+A single-writer lock (`matches.json.lock`) is acquired atomically at startup before data is loaded. A recovery guard serializes stale-lock reclamation; uncertain ownership fails closed. Writes use a unique temporary file with `fsync` and an atomic rename with owner-only permissions. An accepted action commits detached game state, turn telemetry, durable events/revisions, next player and any terminal result together before publication. Retry exhaustion commits invalid evidence and forfeit together. Presentation-only agent/turn activity streams without a durable revision or store write and is not replayed after reconnect. A failed write restores the last committed position in memory, stops further requests, reports a storage error, and prevents a success acknowledgement for the failed transition. The last durable running state is marked interrupted on restart.
 
 Each record contains:
 
@@ -109,17 +109,19 @@ The API binds to `127.0.0.1:4173`; Vite serves the UI on `127.0.0.1:5173` during
 
 Local-host requests are required: a `Host` header outside loopback is rejected, and state-changing requests with a cross-site `Origin` are rejected. Requests with no `Origin` (local CLI clients) are allowed. The event stream detects and drops a client whose socket buffer grows past a bound rather than buffering without limit.
 
-The event stream sends one full `snapshot` on connection and again for match creation, start/resume, pause/stop, terminal results and agent errors. Between those boundaries it emits named domain events such as `turn.started`, `agent.started`, `agent.response`, `move.proposed`, `move.rejected`, `move.applied`, `turn.completed` and `agent.timeout`. A completed turn includes its canonical telemetry record so the client can patch its history without a snapshot, and ordinary activity does not retransmit all saved games. PGN is derived on demand rather than streamed on every event.
+The event stream sends one full `snapshot` on connection and again for match creation, start/resume, pause/stop, terminal results and agent errors. Between those boundaries it emits named domain events such as `turn.started`, `agent.started`, `agent.response`, `move.proposed`, `move.rejected`, `move.applied`, `turn.completed` and `agent.timeout`. Presentation events have no durable sequence or SSE ID and do not advance the client revision. A completed turn includes its canonical telemetry record so the client can patch its history without a snapshot; a chess move includes current PGN and next-player identity. Ordinary activity does not retransmit all saved games.
 
 ## Adding another game
+
+Do not register a second game until the F2 invocation/budget work and F3 private/public/player-state and registry-validation boundaries are complete. The steps below describe the later extension path; they are not sufficient against the current chess-specific store and transport.
 
 1. Implement `GameDefinition<State>` with a canonical state and a per-player observation. Keep hidden/private state inside the game; project only player-allowed facts into `observe()`.
 2. Define a generic action envelope and game-specific action schema. Validate the current player and all payload fields before applying.
 3. Implement terminal/result handling and a versioned serializer/deserializer, plus `plyCount(state)`.
-4. Register the game in `src/server/index.ts` and add a UI view for its serialized snapshot.
+4. Add a safe public projection, game descriptor and UI view, then register the game in `src/server/index.ts`.
 5. Add domain tests for legal/illegal actions, wrong player, player-specific observations, terminal states and persistence reload.
 
-Current chess assumptions to update for a new game: the `POST /api/matches` body nests `white`/`black` player configs, the client board/projection in `src/client/matchEvents.ts` and `src/App.tsx` reads the chess snapshot shape (`fen`, `pgn`, `moves`), and the replay/notation components assume half-move `moves`. The controller and store do not require these assumptions.
+Current chess assumptions to update before a new game: the `POST /api/matches` body nests `white`/`black` player configs, the client board/projection in `src/client/matchEvents.ts` and `src/App.tsx` reads the chess snapshot shape (`fen`, `pgn`, `moves`), and the replay/notation components assume half-move `moves`. `MatchStore` also imports `ChessGame` for replay validation, and `server/schema.ts` hardcodes the chess ruleset. Move game-specific validation behind the registry before registering another game.
 
 ### Current boundaries / limits
 

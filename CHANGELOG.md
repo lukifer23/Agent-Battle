@@ -5,6 +5,7 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+- F1.1: accepted chess actions now commit canonical state, telemetry and event evidence together; retry exhaustion commits the forfeit with its invalid-attempt evidence. Serialized chess snapshots are detached, and presentation events no longer force a full-store write. Crash-boundary reload regressions pass without provider calls.
 - Focused storage durability and recovery repair: transitions commit before
   publication, concurrent store ownership is atomic, unsupported roots stop
   startup, and quarantine or write failure is visible to the UI.

@@ -2,7 +2,7 @@
 
 ## Concurrent work notice
 
-As of 2026-09-27, the focused F1 storage implementation is available for independent review: durable lifecycle publication, store ownership, migration validation, and recovery visibility. Concurrent agents should base changes to the controller, store, schema, startup storage handling, and storage regressions on the F1 implementation commit. Invocation ledgers, budgets, metrics, client convergence, exports, and broader UI workflows remain pending follow-up work.
+As of 2026-09-27, F1 and F1.1 are on `main` through `6e4059d4a1e03000c85c9f24a7cf7c621772b037`. F1.1 makes accepted actions and retry-exhaustion forfeits atomic durable transitions, detaches chess snapshots, and streams presentation events without a store write. Concurrent agents should base changes to the controller, store, schema, startup storage handling, and storage regressions on that commit. Invocation ledgers, per-invocation budgets, usage/provenance, safe public/private contracts, game-neutral infrastructure and UI, and provider qualification remain pending follow-up work.
 
 ## Current state
 
@@ -16,6 +16,7 @@ The implementation has been hardened across lifecycle, provider execution, persi
 - A single cancellable process runner per attempt with one deadline, process-group termination (including after the group leader exits), bounded UTF-8 output, bounded final-file reads, and provider envelope parsing for Codex, Claude Code and OpenCode.
 - Explicit lifecycle transitions: start/resume, pause, stop; stop works for a ready, paused or interrupted match without spawning, and is idempotent once terminal. Saved pending-turn feedback supports resume, but invocation starts still need a durable ledger.
 - A validated, versioned store with quarantine, pre-migration backups, atomic single-writer ownership, `fsync` + rename writes, a configurable data directory, and failure-aware shutdown. Unsupported roots stop startup; storage failures stop requests and are reported rather than acknowledged as saved.
+- Accepted moves save detached canonical game state, turn telemetry, events, revision, next player, and any terminal result in one commit. Retry exhaustion saves invalid-attempt evidence and its forfeit together. Presentation-only SSE activity is transient and does not trigger a full-store write.
 - One snapshot projector for HTTP and SSE with revisions, ordered event ids, idempotent client reduction, gap recovery, and a hardened local API (Host/Origin checks, JSON errors, `/api` 404, request deadlines).
 - Resource budget settings and checks between turns. Per-invocation budget enforcement, complete usage coverage, and observed resolved-model identity remain pending.
 - Bounded transport projections, paginated history/detail/events/attempts endpoints, and `npm run benchmark` / `AGENT_BATTLE_METRICS` measurement.
@@ -29,6 +30,9 @@ The test suite covers:
 - Adapter envelope parsing (Codex file+JSONL, Claude structured/error, OpenCode text/step), timeout and cancellation process-group cleanup, descendant reaping, output caps and diagnostic redaction.
 - Controller alternation, invalid-action correction, timeout/forfeit, provider failure, non-running stop, idempotent start, pending-turn resume, multiple-active recovery, budget stops, and fault-injected move/result/retry/pause/stop/shutdown writes.
 - Store validation, quarantine, supported migration, cross-process lock competition and API recovery notices; parser/API trust checks and SSE snapshot delivery.
+- Accepted-move and retry-forfeit crash-boundary reloads, detached chess serialization, and presentation-event revision behavior.
+
+F1.1 passed 78 local tests, lint, typecheck, build, and [Node 20/22 CI](https://github.com/lukifer23/Agent-Battle/actions/runs/36354254832). The original five-match store was not modified.
 
 The automated suite uses fake CLI executables and does not make paid model requests. A structured-action preflight against the locally authenticated CLIs completed for Codex, Claude Code and OpenCode. A full live acceptance game remains the final, explicitly-pending gate; it is not simulated by fixtures.
 
@@ -36,8 +40,8 @@ The automated suite uses fake CLI executables and does not make paid model reque
 
 1. Run `npm ci`, `npm test`, `npm run lint`, `npm run typecheck`, `npm run build`.
 2. Start `npm run dev` and open `http://127.0.0.1:5173`; confirm local CLI readiness with **Check CLIs** (availability only; sign in separately).
-3. Implement the remaining invocation ledger, per-request budgets and usage coverage before any paid-game qualification.
-4. Complete canonical client state, safe exports, spectator workflows and deterministic provider lifecycle cases; then arrange the bounded live acceptance matrix as a separate user-authorized gate.
+3. Review F1.1, then implement the F2 invocation ledger, per-invocation budgets, usage coverage and model provenance before paid-game qualification.
+4. Separate private game state, public transport and player observation; remove chess validation from generic storage; complete game-neutral setup/view boundaries and the original spectator acceptance work before adding another game. Arrange the bounded live acceptance matrix as a separate user-authorized gate.
 
 ## Implementation notes and known limits
 
