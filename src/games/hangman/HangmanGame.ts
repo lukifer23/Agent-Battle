@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { parseActionEnvelope, isPlainObject } from "../../domain/actions.js";
 import type { GameDefinition, ObservationContext, ActionValidation } from "../../domain/game.js";
-import type { GameAction, GameObservation, MatchResult } from "../../shared.js";
+import type { GameAction, GameObservation, MatchResult, MatchRecord } from "../../shared.js";
 import { selectWord, type WordProvenance } from "./corpus.js";
 
 export type HangmanRole = "player1" | "player2";
@@ -148,6 +148,20 @@ export class HangmanGame implements GameDefinition<HangmanState> {
         return [role, { ...structuredClone(lane), pattern: lane.status === "solved" ? (terminal ? [...state.word].join(" ") : null) : this.pattern(state, role), sealed: lane.status === "solved" && !terminal, missesRemaining: Math.max(0, 7 - lane.misses), correctLetters: lane.guessedLetters.filter((letter) => state.word.includes(letter)).length }];
       })),
     };
+  }
+  validateRecord(record: MatchRecord, state: HangmanState): string | undefined {
+    let index = 0;
+    for (const turn of record.history) {
+      const entry = state.entries[index];
+      if (!turn.valid && entry?.action.type !== "lane_forfeit") continue;
+      if (!entry || entry.playerId !== turn.playerId || turn.matchId !== record.id) return "Hangman telemetry differs from action history";
+      if (turn.valid) {
+        if (!isDeepStrictEqual(turn.action, entry.action) || !turn.attempts.some((attempt) => attempt.status === "valid" && isDeepStrictEqual(attempt.action, entry.action))) return "Accepted Hangman action lacks matching evidence";
+      } else if (turn.attempts.filter((attempt) => attempt.status === "invalid" || attempt.status === "timeout").length < record.settings.maxRetries + 1 || turn.attempts.some((attempt) => attempt.status === "valid")) return "Lane forfeit lacks exhausted correction evidence";
+      index++;
+    }
+    if (index !== state.entries.length) return "Hangman action history lacks telemetry";
+    return undefined;
   }
   publicReplay(state: HangmanState): unknown[] {
     const replay = this.createState(state.provenance.seed);

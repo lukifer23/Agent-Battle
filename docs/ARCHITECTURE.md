@@ -68,19 +68,19 @@ Each record contains:
 - Game ID and game version, protocol/schema versions, participants, model/reasoning selection and timeout/retry settings.
 - The serialized authoritative game state, including chess PGN and replay moves.
 - An event feed and one telemetry record per agent turn, including every retry attempt, FEN before/after, and usage data. The event feed is a bounded recent window, not the complete history.
-- Match result and timestamps, plus an optional pending turn (used to keep saved retry feedback across a pause or restart). Invocation start is not yet durably recorded before provider spawn.
+- Match result and timestamps, plus an optional pending turn (used to keep saved retry feedback across a pause or restart). Invocation identity and deadline are committed before provider spawn.
 
 Token counts and cost are nullable because CLIs expose different metadata. No chain-of-thought is requested or used. Successful responses are stored as canonical action JSON; malformed response excerpts and stderr diagnostics are bounded and token-redacted through `src/server/diagnostics.ts`.
 
-Usage is modeled as reported categories plus a coverage flag (`none`/`partial`/`full`). Coverage and totals remain incomplete: unknown cost can render as zero, and pending or error-path usage can be omitted. The invocation ledger and metric-specific coverage are follow-up work.
+Usage is modeled as reported categories plus a coverage flag (`none`/`partial`/`full`). Unknown cost and tokens are labelled explicitly; pending attempts count toward totals. Provider omissions still limit coverage.
 
 Each match stores an `environment` block (adapter version, prompt/schema versions, provider CLI versions captured at creation) and requested participant settings. Provider parsers do not yet populate resolved model identity, so CLI-default competitors may remain ambiguous across external default changes.
 
-Resource budgets (`maxPlies`, `maxRequests`, `maxWallMinutes`, optional `maxReportedCostUsd`) live in match settings and are currently checked between turns. A retry can cross a threshold; per-invocation enforcement is pending. Reaching a budget stops the match as a non-game outcome.
+Resource budgets (`maxPlies`, `maxRequests`, `maxWallMinutes`, optional `maxReportedCostUsd`) live in match settings. New records include `timeAccounting` with accumulated active milliseconds and the start of any open running segment; pause and terminal transitions close that segment. On restart, an unclosed segment is conservatively charged through recovery. Records without this field retain the former creation-age rule. Request, time, and reported-cost thresholds are checked before each invocation, including retries; the game clock can cancel an in-flight request without adjudicating a chess forfeit. Maximum plies remains a between-turn check. Provider invocation starts are not yet durably reserved, so crash-time request accounting remains incomplete. Reaching a budget stops the match as a non-game outcome.
 
 ### Transport projection and history
 
-The durable store keeps full records, but transports use a projection (`src/domain/projection.ts`). Snapshots carry summaries for history (identity, participants, result, counts) and a full transport projection only for the active match; a selected historical match is fetched through `GET /api/matches/:id`. The projection drops bulky diagnostics (`responseExcerpt`, `stderrExcerpt`, legacy `stateBefore`/`stateAfter`) and bounds the streamed event window. Full diagnostics remain available from the detail, events and attempts endpoints, which read the durable record.
+The durable store keeps full records, but transports use a projection (`src/domain/projection.ts`). Snapshots carry summaries for history (identity, participants, result, counts) and a full transport projection only for the active match; a selected historical match is fetched through `GET /api/matches/:id`. The projection drops bulky diagnostics (`responseExcerpt`, `stderrExcerpt`, legacy `stateBefore`/`stateAfter`) and bounds the streamed event window. Detail, event and attempt endpoints all project public data; full diagnostics remain in private local files.
 
 History is not silently pruned: the store writes every retained record, summaries are paginated, and the readable event feed is explicitly a bounded recent window rather than complete history. Terminal runtime entries are not yet evicted consistently. With `AGENT_BATTLE_METRICS=1` the server logs snapshot and checkpoint sizes and durations; `npm run benchmark` currently uses synthetic data and does not qualify full persistence or browser latency.
 
@@ -121,7 +121,7 @@ Do not register a second game until the F2 invocation/budget work and F3 private
 4. Add a safe public projection, game descriptor and UI view, then register the game in `src/server/index.ts`.
 5. Add domain tests for legal/illegal actions, wrong player, player-specific observations, terminal states and persistence reload.
 
-Current chess assumptions to update before a new game: the `POST /api/matches` body nests `white`/`black` player configs, the client board/projection in `src/client/matchEvents.ts` and `src/App.tsx` reads the chess snapshot shape (`fen`, `pgn`, `moves`), and the replay/notation components assume half-move `moves`. `MatchStore` also imports `ChessGame` for replay validation, and `server/schema.ts` hardcodes the chess ruleset. Move game-specific validation behind the registry before registering another game.
+Match creation accepts a role-keyed `players` map. Legacy `white`/`black` request fields remain accepted for Chess only; mixed formats are rejected. `ArenaRouter` selects game views. Storage delegates game validity to the registry.
 
 ### Current boundaries / limits
 
@@ -130,3 +130,11 @@ Current chess assumptions to update before a new game: the `POST /api/matches` b
 - One match runs at a time in this single-user app.
 - Adapters start a fresh CLI request for each move. Model/provider accounts may bill according to their own plan; the app does not estimate or cap cost yet.
 - Stockfish analysis, human adapters, remote access and additional game views are future work.
+
+## Multi-game projection boundary
+
+`GameRegistry` validates game compatibility and authoritative saved state. The store validates the envelope and common match fields, then delegates game validity through its validator. Game definitions distinguish private `serialize`/`deserialize` from `publicState` and player-specific `observe`. Hangman additionally supplies public action redaction, public replay, and lane-forfeit handling.
+
+`MatchSummary` is an explicit list DTO. `PublicMatchDetail` contains only projected state and telemetry. `AppState.recentMatches` uses summaries. HTTP creation/start/detail, JSON downloads, SSE, attempts, and events use the same projection boundary. Hangman events are sanitized before durable storage as well as before transport. `ArenaRouter` selects the Chess or Hangman arena.
+
+Each new request has a durable invocation UUID and deadline before process invocation. Completion updates that reservation. A restarted unfinished invocation becomes interrupted with unknown usage. Historical attempts retain their original evidence without invented invocation identities. A failed write retains a private recovery candidate and stops requests; the server attempts to write that candidate to a separate private recovery file. If that write also fails, the candidate is memory-only until process exit. Snapshot epochs and state versions protect the browser against stale deliveries.

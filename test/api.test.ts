@@ -170,10 +170,18 @@ test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess c
   try {
     await waitForListening(child, port);
     const player = { provider: "codex", model: "fixture" };
-    const created = await request("/api/matches", { gameId: "hangman", players: { player1: player, player2: player }, turnTimeoutSeconds: 30 });
+    let created;
+    let word = "";
+    for (let candidate = 0; candidate < 50; candidate++) {
+      created = await request("/api/matches", { gameId: "hangman", players: { player1: player, player2: player }, turnTimeoutSeconds: 30 });
+      const privateStore = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
+      word = privateStore.matches[0].gameState.word;
+      // A distinctive canary avoids matching ordinary JSON keys such as status.
+      if (word.length >= 9 && !JSON.stringify(created).includes(word)) break;
+      await request(`/api/matches/${created.match.id}/stop`, {});
+    }
+    assert.equal(created.match.status, "ready");
     const id = created.match.id;
-    const privateStore = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
-    const word = privateStore.matches[0].gameState.word;
     writeFileSync(join(bin, "fixture-config.json"), JSON.stringify({ word, delayMs: 600 }));
     assert.equal(JSON.stringify(created).includes(word), false);
     assert.equal("provenance" in created.match.gameState, false);

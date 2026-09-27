@@ -219,7 +219,7 @@ app.get("/api/matches/:id/events", (request, response) => {
   const match = controller.get(matchIdOf(request));
   if (!match) { response.status(404).json({ error: "Match not found.", code: "not_found" }); return; }
   const { limit, offset } = pageParams(request);
-  response.json({ total: match.events.length, offset, limit, events: match.events.slice(offset, offset + limit) });
+  response.json({ total: match.events.length, offset, limit, events: projectRecord(match, 500).events.slice(offset, offset + limit) });
 });
 
 app.get("/api/matches/:id/attempts", (request, response) => {

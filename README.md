@@ -2,9 +2,9 @@
 
 ## Current repair work
 
-The focused persistence and recovery repair (F1, 2026-09-27) covers commit-before-publication for match transitions, exclusive store ownership, supported-version migrations, validation, and visible recovery errors. F1.1 closes the accepted-move and retry-forfeit crash windows, detaches serialized chess snapshots, and separates presentation events from durable transitions. Agents working on review or features should coordinate changes to the controller, store, schema, or startup storage handling against F1.1 commit `6e4059d4a1e03000c85c9f24a7cf7c621772b037`. Request budgets, invocation accounting, client convergence, exports, and broader UI work remain separate follow-up packages.
+The focused persistence and recovery repair (F1, 2026-09-27) covers commit-before-publication for match transitions, exclusive store ownership, supported-version migrations, validation, and visible recovery errors. F1.1 closes the accepted-move and retry-forfeit crash windows, detaches serialized chess snapshots, and separates presentation events from durable transitions. The time-control follow-up adds 5/10/30/60-minute and custom presets with active-runtime accounting for new matches. Invocation reservation, full usage/provenance, public/private transport, game-neutral infrastructure, and broader UI work remain follow-up packages.
 
-Durable events carry a monotonically increasing match revision and are published only after the corresponding store commit. An accepted action commits its game state, turn history, and move/completion evidence together; a terminal action includes its result in that commit. Retry exhaustion commits the invalid turn and forfeit result together. Match creation, start/resume, pending-turn creation, retry state, pause, stop, and errors are also durable boundaries. Presentation events (`agent.ready`, `agent.thinking`, `agent.started`, `agent.response`, `move.proposed`, `turn.started`, and `agent.timeout`) stream live without a store write or durable revision. They are not replayed after reconnect; the canonical snapshot and durable events restore match state. Provider invocation reservation and per-invocation budgets remain F2 work.
+Durable events carry a monotonically increasing match revision and are published only after the corresponding store commit. An accepted action commits its game state, turn history, and move/completion evidence together; a terminal action includes its result in that commit. Retry exhaustion commits the invalid turn and forfeit result together. Match creation, start/resume, pending-turn creation, retry state, pause, stop, and errors are also durable boundaries. Presentation events (`agent.ready`, `agent.thinking`, `agent.started`, `agent.response`, `move.proposed`, `turn.started`, and `agent.timeout`) stream live without a store write or durable revision. They are not replayed after reconnect; the canonical snapshot and durable events restore match state. Invocation reservations are committed before provider spawn; each retry is checked against the remaining budgets.
 
 Agent Battle is a local-first spectator and control app for AI-versus-AI games. Chess is the first game. The backend owns the board and validates every proposed action; agents receive a private, structured turn observation and return one action. The browser is only the match control and spectator surface.
 
@@ -53,13 +53,13 @@ The development UI runs on `127.0.0.1:5173` and proxies `/api` to the API port. 
 - Pause, resume, stop, process timeouts, output-size limits and saved match history. A ready, paused or interrupted match can be stopped without launching a request.
 - Per-turn records include player/model, FEN, legal-action count, response action, validity, latency, retries, process output excerpts, tool-call count and token/cost usage when the CLI reports it.
 
-The app intentionally starts as a chess arena. Other games, human players, Stockfish analysis, tournaments and remote agents are not implemented yet.
+Chess and Hangman are supported. Human players, Stockfish analysis, tournaments and remote agents are not implemented.
 
 ## Billing, limits and provenance
 
-Every match has configurable limits: maximum plies, maximum requests, maximum wall-clock minutes, and an optional best-effort reported-cost threshold. The current controller checks them between turns; a retry can cross a request, time, or reported-cost threshold before the next check. Per-invocation enforcement is pending. A budget stop is a non-game outcome rather than a fabricated win or draw. Provider-reported cost is not a hard billing cap.
+Every match has configurable limits: maximum plies, maximum requests, game minutes, and an optional best-effort reported-cost threshold. New matches offer 5, 10, 30, 60-minute and custom game-time controls. Their game clock counts accumulated running time, pauses while paused, and survives restart; an unclosed running segment is conservatively charged through restart. The controller checks request, time, and reported-cost thresholds before each invocation and cancels an in-flight request when its game clock expires. Older saved matches without a timer ledger retain their original creation-age semantics. A budget stop is a non-game outcome rather than a fabricated win or draw. A durable reservation counts each invocation conservatively across crashes; provider-reported cost is not a hard billing cap. Keep the per-move timeout separate from the game-time control.
 
-Each match stores requested provider/model/reasoning and provider CLI versions captured at creation. Resolved model identity is not yet populated by the provider parsers. Usage coverage and aggregation need further repair: missing cost can appear as zero in the match header, and pending attempts are omitted from some totals. Treat cost displays as incomplete until that follow-up lands.
+Each match stores requested provider/model/reasoning and provider CLI versions captured at creation. Resolved model identity is not yet populated by the provider parsers. Pending attempts are included in displayed totals. Unknown cost is labelled unknown; reported totals can be incomplete when providers omit usage.
 
 ## Data, backup and recovery
 
@@ -67,7 +67,7 @@ Match history and bounded provider diagnostics live in `data/matches.json`. The 
 
 Before moving or deleting history, copy the whole `data/` directory. If the store cannot be read, the server refuses startup without replacing it. Inspect the original file, any `.bak` backup, and any `.quarantine-*.json` output before recovery. If a stale-lock recovery guard remains after a crash, inspect process ownership and the data before removing it manually.
 
-Match history is kept in full rather than silently pruned. `GET /api/matches` returns paginated summaries for browsing, `GET /api/matches/:id` returns one full record, and `GET /api/matches/:id/events` and `GET /api/matches/:id/attempts` expose the bounded event feed and per-attempt diagnostics. Set `AGENT_BATTLE_METRICS=1` to log snapshot and checkpoint sizes and timings, and run `npm run benchmark` for local projection measurements.
+Match history is kept in full rather than silently pruned. `GET /api/matches` returns paginated summaries for browsing, `GET /api/matches/:id` returns a safe public detail, and `GET /api/matches/:id/events` and `GET /api/matches/:id/attempts` expose projected events and attempts. Raw diagnostics remain in private local persistence. Set `AGENT_BATTLE_METRICS=1` to log snapshot and checkpoint sizes and timings, and run `npm run benchmark` for local projection measurements.
 
 ## Checks
 
@@ -86,3 +86,9 @@ The adapter/controller tests use fake local CLI executables and do not make paid
 - [Architecture](docs/ARCHITECTURE.md): module boundaries, state ownership, persistence and event flow.
 - [Agent protocol](docs/AGENT_PROTOCOL.md): observation and action contract, retry behavior and CLI invocation details.
 - [Handoff](docs/HANDOFF.md): what has been implemented and how another agent should continue.
+
+## Hangman
+
+Select **Hangman** in match setup for two independent lanes using the same private word. Each agent sees only its own lane. The spectator sees both masked lanes; solved words remain sealed until both lanes finish. Completed records include deterministic results, replay, request telemetry, and safe JSON export. See [Hangman rules and privacy](docs/HANGMAN.md).
+
+Store version 4 retains legacy Chess records and time controls. Migration backs up the original store before rewriting; unknown future versions refuse startup. Private seeds, canonical state, provider excerpts, and recovery candidates stay in local data files. Public match-list summaries contain no game state. Request identities are persisted before invocation, and budgets are rechecked before every request, including corrections.

@@ -1,3 +1,4 @@
+import { actionOutputSchema } from "./actionOutputSchema.js";
 import type { ChildProcess } from "node:child_process";
 import { accessSync, constants, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -306,7 +307,7 @@ export class CodexCLIAdapter extends CliAgentAdapter {
   protected invocation(observation: GameObservation, workingDirectory: string): Invocation {
     const schemaPath = join(workingDirectory, "action-schema.json");
     const responsePath = join(workingDirectory, "action.json");
-    writeFileSync(schemaPath, JSON.stringify(observation.actionSchema));
+    writeFileSync(schemaPath, JSON.stringify(actionOutputSchema(observation.actionSchema)));
     const reasoning = this.config.reasoning?.trim().toLowerCase();
     const reasoningArgs = reasoning && ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(reasoning)
       ? ["-c", `model_reasoning_effort=\"${reasoning}\"`]
@@ -332,7 +333,7 @@ export class ClaudeCodeAdapter extends CliAgentAdapter {
     const effortArgs = reasoning && ["low", "medium", "high", "xhigh", "max"].includes(reasoning) ? ["--effort", reasoning] : [];
     return {
       args: [
-        "--print", "--output-format", "json", "--json-schema", JSON.stringify(observation.actionSchema),
+        "--print", "--output-format", "json", "--json-schema", JSON.stringify(actionOutputSchema(observation.actionSchema)),
         "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "",
         "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence",
         ...effortArgs,

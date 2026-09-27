@@ -85,3 +85,26 @@ test("forged Hangman derived result fails registry validation", async () => {
   const forged = structuredClone(done); forged.result = { kind: "win", winnerId: "player1", notation: "1-0", reason: "invented" };
   assert.ok(defaultGames.validateRecord(forged));
 });
+
+test("restart accounts for an unfinished reservation without replaying or forgetting it", async () => {
+  const h = harness(() => ({ type: "invalid", payload: {} }));
+  const match = await h.create();
+  match.status = "running";
+  match.pendingTurn = { turnId: "turn", turnIndex: 1, ply: 1, playerId: "player1", startedAt: new Date().toISOString(), attempts: [{ attempt: 1, invocationId: "00000000-0000-0000-0000-000000000001", startedAt: new Date().toISOString(), status: "started", toolCalls: null, usage: { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" } }] };
+  const saved = structuredClone(match);
+  let commits = 0;
+  const restored = new MatchController(defaultGames, new AgentRegistry(), [saved], async () => providers, (_record, event) => { if (!event) commits++; });
+  assert.equal(restored.get(saved.id)?.status, "interrupted");
+  assert.equal(restored.get(saved.id)?.pendingTurn?.attempts[0].status, "interrupted");
+  assert.equal(matchRequests(restored.get(saved.id)!), 1);
+  assert.equal(commits, 1);
+  assert.equal(restored.get(saved.id)?.pendingTurn?.attempts[0].usage.costUsd, null);
+});
+
+test("a forged lane forfeit requires corresponding invalid request evidence", async () => {
+  const h = harness(() => ({ type: "invalid", payload: {} }));
+  const match = await h.create();
+  const state = game.deserialize(match.gameState); game.forfeit(state, "player1");
+  match.gameState = game.serialize(state);
+  assert.match(defaultGames.validateRecord(match) ?? "", /history lacks telemetry/);
+});

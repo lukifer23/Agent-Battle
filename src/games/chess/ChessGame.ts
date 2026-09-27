@@ -229,23 +229,14 @@ export class ChessGame implements GameDefinition<ChessRuntimeState> {
   }
 
   private schemaFor(legalMoves: string[]): Record<string, unknown> {
-    return {
-      type: "object",
-      required: ["type", "payload"],
-      additionalProperties: false,
-      properties: {
-        type: { type: "string", enum: ["move", "resign"] },
-        payload: {
-          anyOf: [
-            {
-              type: "object", required: ["move"], additionalProperties: false,
-              properties: { move: { type: "string", enum: legalMoves } },
-            },
-            { type: "object", required: [], additionalProperties: false, properties: {} },
-          ],
-        },
-      },
-    };
+    const variant = (type: string, payload: Record<string, unknown>) => ({
+      type: "object", required: ["type", "payload"], additionalProperties: false,
+      properties: { type: { const: type }, payload },
+    });
+    return { type: "object", oneOf: [
+      variant("move", { type: "object", required: ["move"], additionalProperties: false, properties: { move: { type: "string", enum: legalMoves } } }),
+      variant("resign", { type: "object", required: [], additionalProperties: false, properties: {} }),
+    ] };
   }
 }
 

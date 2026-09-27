@@ -96,3 +96,9 @@ The action schema keeps a root object and uses a nested `anyOf` for move payload
 CLI processes run as the local user. Their turn directories isolate temporary action files; they are not OS-level user isolation. Codex runs with its read-only sandbox, and Claude Code/OpenCode have tool use disabled for the match agent. If a deployment needs a hard boundary around local files or credentials, run the app and CLIs under a dedicated OS account or sandbox.
 
 The contract leaves room for a second adapter style that calls a local model/API or uses a small MCP surface (`get_game_state`, `get_legal_moves`, `make_move`, `resign`). Such an adapter must still return a generic `GameAction` and must not bypass the controller's validation/application path.
+
+## Hangman observation and actions
+
+Hangman observations contain only the current player's lane and lane-local counters. Actions are `{"type":"guess_letter","payload":{"letter":"s"}}` or `{"type":"solve","payload":{"word":"example"}}`. Letters must be one lowercase ASCII letter; solutions must be lowercase ASCII and the displayed word length. No extra keys or automatic repair are accepted. Repeated letters use the correction policy. Retry exhaustion forfeits only that lane. See [the rules](HANGMAN.md). Public exports redact solution payloads; private persistence retains authoritative actions.
+
+Game observations use discriminated schemas to pair each action type with its payload. The CLI output-schema guard flattens that union into a root object for provider dialect compatibility. It checks the envelope and payload shapes; the controller then enforces the exact type/payload pairing and game legality. This does not change the direct action protocol or repair invalid responses. Paid-provider acceptance of new schemas remains part of live qualification.

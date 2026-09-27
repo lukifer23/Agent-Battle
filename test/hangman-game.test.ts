@@ -11,6 +11,8 @@ const act = (s: ReturnType<typeof fresh>, action: unknown) => game.applyAction(s
 test("corpus and seeded selection are stable", () => {
   assert.equal(CORPUS.length, 2068);
   assert.equal(CORPUS_HASH, "6d2c031c2f117996772990f9a5655c5e10c9cc93b8a3b82982d89e3fafb702b3");
+  assert.equal(selectWord("00".repeat(32)).word, "night");
+  assert.equal(selectWord("00".repeat(32)).provenance.index, 1212);
   assert.deepEqual(selectWord("00".repeat(32)), selectWord("00".repeat(32)));
   assert.throws(() => selectWord("invalid"));
 });

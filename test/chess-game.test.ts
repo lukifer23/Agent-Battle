@@ -27,12 +27,11 @@ test("observation is player-specific and includes FEN, history, legal actions, a
   assert.ok(white.legalActions.some((action) => action.type === "move" && action.payload.move === "e2e4"));
   assert.ok(white.legalActions.some((action) => action.type === "resign"));
   assert.equal(white.history.length, 0);
-  const actionSchema = white.actionSchema as {
-    oneOf?: unknown;
-    properties: { payload: { anyOf: Array<{ properties: Record<string, { enum?: string[] }> }> } };
-  };
-  assert.equal(actionSchema.oneOf, undefined);
-  assert.equal(actionSchema.properties.payload.anyOf[0]?.properties.move?.enum?.includes("e2e4"), true);
+  const actionSchema = white.actionSchema as { oneOf: Array<{ properties: { type: { const: string }; payload: { properties: Record<string, { enum?: string[] }> } } }> };
+  assert.equal(actionSchema.oneOf[0].properties.type.const, "move");
+  assert.equal(actionSchema.oneOf[0].properties.payload.properties.move.enum?.includes("e2e4"), true);
+  assert.equal(actionSchema.oneOf[1].properties.type.const, "resign");
+  assert.deepEqual(actionSchema.oneOf[1].properties.payload.properties, {});
 
   play(state, "e2e4");
   const black = game.observe(state, { matchId: "m1", turnId: "t2", player: seat("black"), ply: 2, turnIndex: 2, turnTimeoutMs: 60_000 });

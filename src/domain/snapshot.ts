@@ -1,3 +1,4 @@
+import { defaultGames } from "./defaultGames.js";
 import type { AppState, MatchRecord, ProviderInfo } from "../shared.js";
 import { projectRecord, summaryOf } from "./projection.js";
 
@@ -16,13 +17,13 @@ export function isActiveMatch(match: MatchRecord): boolean {
  * `GET /api/matches/:id`. This keeps the initial payload from scaling with every
  * historical attempt.
  */
-export function buildSnapshot(records: MatchRecord[], providers: ProviderInfo[], limit = 50): AppState {
+export function buildSnapshot(records: MatchRecord[], providers: ProviderInfo[], limit = 50, registry = defaultGames): AppState {
   const active = records.find(isActiveMatch) ?? null;
   return {
     revision: records.reduce((maximum, match) => Math.max(maximum, match.revision ?? 0), 0),
     providers,
     activeMatchId: active?.id ?? null,
-    activeMatch: active ? projectRecord(active) : null,
+    activeMatch: active ? projectRecord(active, 40, registry) : null,
     recentMatches: records.slice(0, limit).map(summaryOf),
   };
 }

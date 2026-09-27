@@ -2,6 +2,8 @@ import type { AgentAttempt, MatchRecord } from "../shared.js";
 
 export interface UsageTotal {
   requests: number;
+  costKnown: boolean;
+  tokensKnown: boolean;
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
@@ -21,7 +23,7 @@ function addOptional(total: { cachedInputTokens: number; cacheWriteTokens: numbe
 
 /** Aggregates reported usage across attempts, tracking coverage instead of treating unknown as zero. */
 export function aggregateUsage(attempts: AgentAttempt[]): UsageTotal {
-  const total = { requests: attempts.length, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0 };
+  const total = { requests: attempts.filter((attempt) => attempt.phase !== "initialization").length, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0 };
   let anyData = false;
   let missing = false;
   for (const attempt of attempts) {
@@ -32,7 +34,7 @@ export function aggregateUsage(attempts: AgentAttempt[]): UsageTotal {
     if (addOptional(total, usage)) missing = true; else anyData = true;
   }
   const coverage = attempts.length === 0 ? "none" : !anyData ? "none" : missing ? "partial" : "full";
-  return { ...total, coverage };
+  return { ...total, coverage, costKnown: attempts.some((a) => a.usage.costUsd !== null), tokensKnown: attempts.some((a) => a.usage.inputTokens !== null || a.usage.outputTokens !== null) };
 }
 
 export function allAttempts(match: MatchRecord): AgentAttempt[] {
@@ -42,7 +44,7 @@ export function allAttempts(match: MatchRecord): AgentAttempt[] {
 }
 
 export function matchRequests(match: MatchRecord): number {
-  return allAttempts(match).length;
+  return allAttempts(match).filter((attempt) => attempt.phase !== "initialization").length;
 }
 
 export function matchReportedCost(match: MatchRecord): number | null {

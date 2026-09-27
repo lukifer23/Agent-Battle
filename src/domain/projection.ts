@@ -55,8 +55,8 @@ function projectPending(pending: PendingTurn): PendingTurn {
  * bounded to its most recent window. Full diagnostics remain available from the
  * detail and attempts endpoints, which read the durable record.
  */
-export function projectRecord(record: MatchRecord, eventLimit = 40): PublicMatchDetail {
-  const game = defaultGames.get(record.gameId);
+export function projectRecord(record: MatchRecord, eventLimit = 40, registry = defaultGames): PublicMatchDetail {
+  const game = registry.get(record.gameId);
   const hidden = Boolean(game.publicAction);
   const turn = (value: TurnTelemetry): TurnTelemetry => {
     const safe = projectTurn(value);
@@ -74,10 +74,11 @@ export function projectRecord(record: MatchRecord, eventLimit = 40): PublicMatch
   return {
     ...summaryOf(record),
     settings: structuredClone(record.settings),
+    ...(record.timeAccounting ? { timeAccounting: { ...record.timeAccounting } } : {}),
     gameState: game.publicState(game.deserialize(record.gameState)),
     ...(game.publicReplay ? { replay: game.publicReplay(game.deserialize(record.gameState)) } : {}),
     history: record.history.map(turn),
-    events: record.events.slice(-eventLimit).map((event) => projectEvent(record, event)),
+    events: record.events.slice(-eventLimit).map((event) => projectEvent(record, event, registry)),
     ...(pending ? { pendingTurn: pending } : {}),
     ...(record.currentPlayerId ? { currentPlayerId: record.currentPlayerId } : {}),
     ...(record.error ? { error: hidden ? "Match interrupted. Review private local diagnostics for details." : record.error } : {}),
@@ -86,7 +87,14 @@ export function projectRecord(record: MatchRecord, eventLimit = 40): PublicMatch
 
 export function projectEvent(record: MatchRecord, event: MatchEvent, registry = defaultGames): MatchEvent {
   const game = registry.get(record.gameId);
-  if (!game.publicAction) return structuredClone(event);
+  if (!game.publicAction) {
+    const payload: Record<string, unknown> = {};
+    for (const key of ["turnId", "turnIndex", "ply", "attempt", "retry", "retryCount", "latencyMs", "legalActionCount", "fenBefore", "fen", "pgn", "move", "resignation", "action", "actionLabel", "nextPlayerId", "result", "kind", "winnerId", "reason", "status", "timeoutMs", "toolCalls", "inputTokens", "outputTokens", "usage"]) {
+      if (event.payload?.[key] !== undefined) payload[key] = structuredClone(event.payload[key]);
+    }
+    if (event.payload?.record) payload.record = projectTurn(event.payload.record as TurnTelemetry);
+    return { at: event.at, type: event.type, text: event.text, ...(event.sequence !== undefined ? { sequence: event.sequence } : {}), ...(event.playerId ? { playerId: event.playerId } : {}), ...(event.payload ? { payload } : {}) };
+  }
   // Hidden games publish an explicit event envelope. Raw provider text, actions,
   // arbitrary error strings, and nested telemetry must never enter durable events.
   const payload = event.payload ?? {};
@@ -104,6 +112,7 @@ export function summaryOf(record: MatchRecord): MatchSummary {
   return { id: record.id, gameId: record.gameId, gameVersion: record.gameVersion, protocolVersion: record.protocolVersion,
     createdAt: record.createdAt, updatedAt: record.updatedAt, status: record.status,
     players: record.players.map((p) => ({ id: p.id, label: p.label, agent: { provider: p.agent.provider, model: p.agent.model, name: p.agent.name, ...(p.agent.reasoning ? { reasoning: p.agent.reasoning } : {}) } })) as MatchRecord["players"],
+    timeControl: { maxMinutes: record.settings.budgets.maxWallMinutes, turnSeconds: record.settings.turnTimeoutSeconds, mode: record.timeAccounting ? "active" : "legacy" },
     revision: record.revision, actionCount: record.history.filter((t) => t.valid).length,
     ...(record.result ? { result: { kind: record.result.kind, notation: record.result.notation, reason: record.result.reason, ...(record.result.winnerId ? { winnerId: record.result.winnerId } : {}) } } : {}),
   };

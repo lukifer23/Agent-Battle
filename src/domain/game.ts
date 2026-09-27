@@ -39,6 +39,7 @@ export interface GameDefinition<State> {
   deserialize(saved: unknown): State;
   publicState(state: State): unknown;
   publicReplay?(state: State): unknown[];
+  validateRecord?(record: MatchRecord, state: State): string | undefined;
   publicAction?(action: GameAction): GameAction;
   forfeit?(state: State, playerId: string): State;
   actionLabel(action: GameAction): string;
@@ -66,6 +67,8 @@ export class GameRegistry {
       if (game.version !== record.gameVersion) return "Unsupported game version";
       if (record.players.map((p) => p.id).join() !== game.playerIds.join()) return "Invalid player roles";
       const state = game.deserialize(record.gameState);
+      const gameError = game.validateRecord?.(record, state);
+      if (gameError) return gameError;
       const invocationIds = [...record.history.flatMap((turn) => turn.attempts), ...(record.pendingTurn?.attempts ?? [])].flatMap((a) => a.invocationId ? [a.invocationId] : []);
       if (new Set(invocationIds).size !== invocationIds.length) return "Duplicate invocation identity";
 

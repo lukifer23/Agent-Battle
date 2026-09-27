@@ -1,10 +1,12 @@
+import { acceptSnapshot, type SnapshotCursor } from "./client/snapshotOrder.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArenaRouter } from "./components/ArenaRouter.js";
 import { applyMatchEvent, applyPresentationEvent, matchEventTypes } from "./client/matchEvents.js";
 import { highlightSquares, positionSummary } from "./client/chessView.js";
 import { aggregateUsage } from "./domain/usage.js";
+import { remainingMatchMs } from "./domain/matchTime.js";
 import { ArrowUpRight, BoardMark, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, FlipVertical, RefreshCw, Trophy } from "./components/icons.js";
-import { competitorLabel } from "./shared.js";
+import { competitorId, competitorLabel } from "./shared.js";
 import type { AppState, ChessSnapshot, MatchEvent, PublicMatchDetail, Provider } from "./shared.js";
 
 const initialFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -16,6 +18,7 @@ const reasoningOptions: Record<Provider, string[]> = {
   opencode: [],
 };
 const REPLAYABLE = ["finished", "forfeit", "stopped", "error", "interrupted", "paused"];
+const timePresets = [5, 10, 30, 60] as const;
 
 interface Preferences {
   whiteProvider: Provider;
@@ -29,9 +32,9 @@ interface Preferences {
 
 const PREFERENCES_KEY = "agent-battle.preferences";
 
-function loadPreferences(): Partial<Preferences> {
+function loadPreferences(game = "chess"): Partial<Preferences> {
   try {
-    const raw = window.localStorage.getItem(PREFERENCES_KEY);
+    const raw = window.localStorage.getItem(`${PREFERENCES_KEY}.${game}`) ?? (game === "chess" ? window.localStorage.getItem(PREFERENCES_KEY) : null);
     return raw ? JSON.parse(raw) as Partial<Preferences> : {};
   } catch { return {}; }
 }
@@ -74,6 +77,10 @@ function resultLine(match: PublicMatchDetail): string {
 }
 
 function statusForPlayer(match: PublicMatchDetail, playerId: string, isActiveTurn: boolean): string {
+  if (match.gameId === "hangman") {
+    const lane = (match.gameState as { lanes: Record<string, { status: string }> }).lanes[playerId];
+    if (lane && lane.status !== "active") return lane.status.toUpperCase();
+  }
   const latest = [...match.history].reverse().find((turn) => turn.playerId === playerId);
   if (match.status === "ready") return "READY";
   if (match.status === "running") return isActiveTurn ? "THINKING" : "WAITING";
@@ -105,7 +112,9 @@ function App() {
   const [gameId, setGameId] = useState("chess");
   const [maxPlies, setMaxPlies] = useState(150);
   const [maxRequests, setMaxRequests] = useState(200);
-  const [maxWallMinutes, setMaxWallMinutes] = useState(30);
+  const [timePreset, setTimePreset] = useState<number | "custom">(30);
+  const [customMinutes, setCustomMinutes] = useState(45);
+  const maxWallMinutes = timePreset === "custom" ? customMinutes : timePreset;
   const [maxCost, setMaxCost] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -118,7 +127,7 @@ function App() {
   const [connection, setConnection] = useState<"connecting" | "live" | "reconnecting" | "offline">("connecting");
   const [pendingCommand, setPendingCommand] = useState<null | "create" | "start" | "pause" | "stop">(null);
   const [detailById, setDetailById] = useState<Map<string, PublicMatchDetail>>(() => new Map());
-  const lastSnapshot = useRef<{ epoch?: string; version: number }>({ version: -1 });
+  const lastSnapshot = useRef<SnapshotCursor>({ version: -1, retired: new Set() });
   const revisions = useRef<Map<string, number>>(new Map());
   const moveListRef = useRef<HTMLDivElement | null>(null);
 
@@ -133,9 +142,9 @@ function App() {
 
   useEffect(() => {
     const value: Preferences = { whiteProvider, blackProvider, whiteModel, blackModel, whiteReasoning, blackReasoning, timeoutSeconds };
-    try { window.localStorage.setItem(PREFERENCES_KEY, JSON.stringify(value)); }
+    try { window.localStorage.setItem(`${PREFERENCES_KEY}.${gameId}`, JSON.stringify(value)); }
     catch { /* Preferences are best-effort. */ }
-  }, [whiteProvider, blackProvider, whiteModel, blackModel, whiteReasoning, blackReasoning, timeoutSeconds]);
+  }, [gameId, whiteProvider, blackProvider, whiteModel, blackModel, whiteReasoning, blackReasoning, timeoutSeconds]);
 
   useEffect(() => {
     try { window.localStorage.setItem("agent-battle.selected", selectedId ?? ""); }
@@ -143,16 +152,7 @@ function App() {
   }, [selectedId]);
 
   const rememberSnapshot = useCallback((next: AppState) => {
-    if (next.epoch === lastSnapshot.current.epoch && (next.stateVersion ?? 0) < lastSnapshot.current.version) return false;
-    for (const match of next.recentMatches) {
-      if (next.epoch === lastSnapshot.current.epoch && (revisions.current.get(match.id) ?? 0) > match.revision) return false;
-    }
-    lastSnapshot.current = { epoch: next.epoch, version: next.stateVersion ?? 0 };
-    const map = revisions.current;
-    map.clear();
-    for (const match of next.recentMatches) map.set(match.id, match.revision ?? 0);
-    if (next.activeMatch) map.set(next.activeMatch.id, next.activeMatch.revision ?? 0);
-    return true;
+    return acceptSnapshot(lastSnapshot.current, revisions.current, next);
   }, []);
 
   const refresh = useCallback(async () => {
@@ -248,20 +248,22 @@ function App() {
   }, [viewingPly, totalPlies]);
 
   const standings = useMemo(() => {
-    const rows = new Map<string, { name: string; wins: number; draws: number; losses: number; points: number }>();
+    const rows = new Map<string, { name: string; control: string; wins: number; draws: number; losses: number; points: number }>();
     for (const match of state?.recentMatches ?? []) {
       if (match.gameId !== (selectedMatch?.gameId ?? gameId)) continue;
       if (!match.result || !["finished", "forfeit"].includes(match.status)) continue;
       for (const player of match.players) {
         const side = player.id;
         const name = competitorLabel(player.agent);
-        const row = rows.get(name) ?? { name, wins: 0, draws: 0, losses: 0, points: 0 };
+        const control = `${match.timeControl.maxMinutes}m ${match.timeControl.mode} · ${match.timeControl.turnSeconds}s/turn`;
+        const key = `${competitorId(player.agent)}::${control}`;
+        const row = rows.get(key) ?? { name, control, wins: 0, draws: 0, losses: 0, points: 0 };
         const won = match.result.kind === "win" && match.result.winnerId === side;
         const drawn = match.result.kind === "draw";
         if (won) { row.wins += 1; row.points += 1; }
         else if (drawn) { row.draws += 1; row.points += 0.5; }
         else row.losses += 1;
-        rows.set(name, row);
+        rows.set(key, row);
       }
     }
     return [...rows.values()].sort((a, b) => b.points - a.points || b.wins - a.wins);
@@ -287,6 +289,7 @@ function App() {
   const currentTurnStart = selectedMatch?.pendingTurn?.attempts.at(-1)?.startedAt ?? selectedMatch?.events.filter((event) => event.type === "agent.started" && event.playerId === selectedMatch.currentPlayerId).at(-1)?.at;
   const currentTurnElapsed = currentIsRunning && currentTurnStart ? Math.max(0, Math.floor((now - Date.parse(currentTurnStart)) / 1000)) : 0;
   const turnSecondsLeft = Math.max(0, (selectedMatch?.settings.turnTimeoutSeconds ?? timeoutSeconds) - currentTurnElapsed);
+  const gameSecondsLeft = selectedMatch ? Math.max(0, Math.ceil(remainingMatchMs(selectedMatch, now) / 1000)) : 0;
 
   const startMatch = async () => {
     setPendingCommand("start"); setError("");
@@ -426,7 +429,7 @@ function App() {
         <div>
           <div className="eyebrow"><span className="eyebrow-line" /> THE THINKING MACHINE LEAGUE</div>
           <h1>Let them <em>play.</em></h1>
-          <p>Two agents. One board. Every move is theirs.</p>
+          <p>Two agents. One challenge. Every decision is theirs.</p>
         </div>
         <BoardMark className="intro-mark" />
       </section>
@@ -444,23 +447,39 @@ function App() {
               <span className="active-setup-status">{selectedMatch?.result ? `${selectedMatch.result.notation} · ${selectedMatch.result.reason}` : selectedMatch?.status === "error" ? "Stopped · review match log" : selectedMatch?.currentPlayerId ? `${selectedMatch.players.find((player) => player.id === selectedMatch.currentPlayerId)?.label} to move` : "Resume when ready"}</span>
               {terminalMatchSelected && <button className="active-setup-new" onClick={() => { setGameId(selectedMatch!.gameId); const [a, b] = selectedMatch!.players; setWhiteProvider(a.agent.provider); setWhiteModel(a.agent.model); setWhiteReasoning(a.agent.reasoning ?? ""); setBlackProvider(b.agent.provider); setBlackModel(b.agent.model); setBlackReasoning(b.agent.reasoning ?? ""); setNewMatchOpen(true); }}>PLAY AGAIN <ArrowUpRight className="inline-icon" /></button>}
             </div> : <>
-              <label className="field-label">GAME<select aria-label="Game" value={gameId} onChange={(event) => setGameId(event.target.value)}><option value="chess">Chess</option><option value="hangman">Hangman</option></select></label><div className="players-grid">
+              <label className="field-label">GAME<select aria-label="Game" value={gameId} onChange={(event) => {
+                const nextGame = event.target.value;
+                const saved = loadPreferences(nextGame);
+                setGameId(nextGame);
+                setWhiteProvider(saved.whiteProvider ?? "codex"); setBlackProvider(saved.blackProvider ?? "codex");
+                setWhiteModel(saved.whiteModel ?? ""); setBlackModel(saved.blackModel ?? "");
+                setWhiteReasoning(saved.whiteReasoning ?? ""); setBlackReasoning(saved.blackReasoning ?? "");
+                setTimeoutSeconds(saved.timeoutSeconds ?? 120);
+              }}><option value="chess">Chess</option><option value="hangman">Hangman</option></select></label><div className="players-grid">
                 <PlayerPicker title={gameId === "chess" ? "WHITE PLAYER" : "PLAYER 1"} color="white" provider={whiteProvider} model={whiteModel} reasoning={whiteReasoning} providers={providers} loading={!providersChecked}
                   onProvider={chooseWhiteProvider} onModel={setWhiteModel} onReasoning={setWhiteReasoning} />
                 <div className="versus"><span>VS</span></div>
                 <PlayerPicker title={gameId === "chess" ? "BLACK PLAYER" : "PLAYER 2"} color="black" provider={blackProvider} model={blackModel} reasoning={blackReasoning} providers={providers} loading={!providersChecked}
                   onProvider={chooseBlackProvider} onModel={setBlackModel} onReasoning={setBlackReasoning} />
               </div>
+              <fieldset className="time-control">
+                <legend>GAME TIME · ACTIVE PLAY</legend>
+                <div className="time-presets" role="group" aria-label="Game time limit">
+                  {timePresets.map((minutes) => <button key={minutes} type="button" aria-pressed={timePreset === minutes}
+                    onClick={() => setTimePreset(minutes)}>{minutes} MIN</button>)}
+                  <button type="button" aria-pressed={timePreset === "custom"} onClick={() => setTimePreset("custom")}>CUSTOM</button>
+                  {timePreset === "custom" && <label className="timeout-setting">MINUTES <input type="number" min={1} max={10000} value={customMinutes}
+                    onChange={(event) => setCustomMinutes(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></label>}
+                </div>
+              </fieldset>
               <div className="setup-footer">
                 <div className="budget-settings">
                   <label className="timeout-setting">MOVE TIMEOUT <input type="number" min={30} max={600} step={30} value={timeoutSeconds}
                     onChange={(event) => setTimeoutSeconds(Math.max(30, Math.min(600, Number(event.target.value) || 30)))} /> <span>sec</span></label>
-                  <label className="timeout-setting">MAX PLIES <input type="number" min={1} max={10000} value={maxPlies}
+                  <label className="timeout-setting">MAX ACTIONS <input type="number" min={1} max={10000} value={maxPlies}
                     onChange={(event) => setMaxPlies(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></label>
                   <label className="timeout-setting">MAX REQUESTS <input type="number" min={1} max={100000} value={maxRequests}
                     onChange={(event) => setMaxRequests(Math.max(1, Math.min(100000, Number(event.target.value) || 1)))} /></label>
-                  <label className="timeout-setting">MAX MINUTES <input type="number" min={1} max={10000} value={maxWallMinutes}
-                    onChange={(event) => setMaxWallMinutes(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></label>
                   <label className="timeout-setting">COST LIMIT <input type="number" min={0} step="0.01" placeholder="none" value={maxCost}
                     onChange={(event) => setMaxCost(event.target.value)} /> <span>USD</span></label>
                 </div>
@@ -468,7 +487,7 @@ function App() {
                   {busy || pendingCommand === "start" ? "PREPARING…" : "START MATCH"} <ArrowUpRight className="inline-icon" />
                 </button>
               </div>
-              <div className="inline-note">Limits are checked between requests. The cost limit is a best-effort threshold on reported provider cost, not a hard billing cap; unknown usage still counts against the request and time limits.</div>
+              <div className="inline-note">Game time counts while the match runs, including an active provider request; pause stops its clock. Move timeout is a separate per-request limit. Short presets may stop before a game result. Cost remains a best-effort threshold on reported provider usage.</div>
               {(whiteProvider === blackProvider) && <div className="inline-note">Both sides can use the same CLI with different models.</div>}
               {providersChecked && providers.some((entry) => !entry.installed) && <div className="inline-note">Install a supported CLI and sign in before choosing it. Agent Battle uses its existing login.</div>}
             </>}
@@ -478,7 +497,8 @@ function App() {
 
           <section className="board-panel panel">
             <div className="board-heading">
-              <div><span className="eyebrow">02 / THE ARENA</span><h2>{isReplayMatch ? "Match replay" : selectedMatch ? "Match board" : "Live board"}</h2></div>
+              <div><span className="eyebrow">02 / THE ARENA</span><h2>{isReplayMatch ? "Match replay" : selectedMatch ? selectedMatch.gameId === "hangman" ? "Hangman arena" : "Match board" : "Live board"}</h2></div>
+              {selectedMatch && <span className="game-time-badge">{selectedMatch.settings.budgets.maxWallMinutes} MIN · {selectedMatch.timeAccounting ? "ACTIVE" : "LEGACY WALL"}</span>}
               <div className={`match-state ${currentIsRunning ? "is-live" : ""}`}>
                 <span className="state-dot" />{selectedMatch ? selectedMatch.status.toUpperCase() : "WAITING"}
               </div>
@@ -494,7 +514,7 @@ function App() {
                 return <div className={`player-strip-card ${player.id === "white" ? "strip-white" : "strip-black"}`} key={player.id}>
                   <span className={`strip-piece strip-piece-${player.id}`} aria-hidden="true" />
                   <span className="strip-info"><b>{player.label} · {competitorLabel(player.agent)}</b><small>{statusForPlayer(selectedMatch, player.id, active)}</small></span>
-                  <span className="strip-metric"><b>{latest?.latencyMs != null ? `${(latest.latencyMs / 1000).toFixed(1)}s` : "—"}</b><small>LAST MOVE</small><small>{usage.requests} req · {totalTokens || usage.coverage === "none" ? `${totalTokens} tok${coverageMark(usage.coverage)}` : "tokens n/a"} · {attempts.some((attempt) => attempt.usage.costUsd !== null) ? `$${usage.costUsd.toFixed(4)} reported` : "cost unknown"}</small></span>
+                  <span className="strip-metric"><b>{latest?.latencyMs != null ? `${(latest.latencyMs / 1000).toFixed(1)}s` : "—"}</b><small>LAST MOVE</small><small>{usage.requests} req · {usage.tokensKnown ? `${totalTokens} tok${coverageMark(usage.coverage)}` : "tokens unknown"} · {attempts.some((attempt) => attempt.usage.costUsd !== null) ? `$${usage.costUsd.toFixed(4)} reported` : "cost unknown"}</small></span>
                   {active && <span className="strip-live" />}
                 </div>;
               })}
@@ -516,14 +536,15 @@ function App() {
             </div>
             {selectedMatch?.result && replayPly !== null && <div className="replay-note">Viewing a historical position. Final result: {selectedMatch.result.notation} · {selectedMatch.result.reason}.</div>}
             {selectedMatch && <div className="export-bar">
-              <span className="export-totals">{matchTotals ? `MATCH ${matchTotals.requests} req · ${matchTotals.inputTokens + matchTotals.outputTokens} tok${coverageMark(matchTotals.coverage)} · ${matchTotals.coverage === "none" ? "usage unknown" : `$${matchTotals.costUsd.toFixed(4)} reported`}` : ""}</span>
+              <span className="export-totals">{matchTotals ? `MATCH ${matchTotals.requests} req · ${matchTotals.inputTokens + matchTotals.outputTokens} tok${coverageMark(matchTotals.coverage)} · ${!matchTotals.costKnown ? "cost unknown" : `$${matchTotals.costUsd.toFixed(4)} reported`}` : ""}</span>
               {selectedMatch.gameId === "chess" && <button className="quiet-button" onClick={() => void copyText(boardFen, "FEN")}><Copy className="button-icon" /> FEN</button>}
-              <button className="quiet-button" onClick={downloadPgn} disabled={!totalPlies}><Download className="button-icon" /> PGN</button>
+              {selectedMatch?.gameId !== "hangman" && <button className="quiet-button" onClick={downloadPgn} disabled={!totalPlies}><Download className="button-icon" /> PGN</button>}
               <button className="quiet-button" onClick={() => void downloadJson()}><Download className="button-icon" /> JSON</button>
             </div>}
             {notice && <div className="notice" role="status">{notice}</div>}
             {currentIsRunning && <div className="turn-indicator">
               <span><span className="live-dot" /> THINKING · {currentTurnName ?? "AGENT"}</span>
+              <span className={`turn-clock ${gameSecondsLeft <= 60 ? "is-urgent" : ""}`}>GAME {formatClock(gameSecondsLeft)} LEFT</span>
               <span className={`turn-clock ${turnSecondsLeft <= 10 ? "is-urgent" : ""}`} aria-hidden="true">{formatClock(turnSecondsLeft)} LEFT</span>
             </div>}
             {canReplay && <div className="replay-control">
@@ -565,11 +586,11 @@ function App() {
           <section className="scoreboard panel">
             <div className="section-heading"><div><span className="eyebrow">HALL OF FAME</span><h2>{selectedMatch?.gameId ?? gameId} scoreboard</h2></div><Trophy className="trophy" /></div>
             {standings.length === 0 ? <div className="score-empty">The leaderboard starts after game one.</div> : <table className="score-table">
-              <caption className="sr-only">Scoreboard by competitor across recent matches</caption>
+              <caption className="sr-only">Scoreboard by competitor and time control across recent matches</caption>
               <thead><tr><th scope="col">AGENT</th><th scope="col">W</th><th scope="col">D</th><th scope="col">L</th><th scope="col">PTS</th></tr></thead>
               <tbody>
-                {standings.map((row, index) => <tr key={row.name}>
-                  <th scope="row" className="score-player"><span className={`rank-badge rank-${index + 1}`}>{String(index + 1).padStart(2, "0")}</span><span>{row.name}</span></th>
+                {standings.map((row, index) => <tr key={`${row.name}:${row.control}`}>
+                  <th scope="row" className="score-player"><span className={`rank-badge rank-${index + 1}`}>{String(index + 1).padStart(2, "0")}</span><span>{row.name}<small className="score-control">{row.control}</small></span></th>
                   <td>{row.wins}</td><td>{row.draws}</td><td>{row.losses}</td><td className="score-points">{row.points}</td>
                 </tr>)}
               </tbody>
@@ -579,13 +600,13 @@ function App() {
 
           <section className="moves-panel panel">
             <div className="section-heading">
-              <div><span className="eyebrow">MOVE BY MOVE</span><h2>Notation</h2></div>
+              <div><span className="eyebrow">MOVE BY MOVE</span><h2>{selectedMatch?.gameId === "hangman" ? "Actions" : "Notation"}</h2></div>
               <div className="notation-actions">
-                <button className="quiet-button" onClick={downloadPgn} disabled={!totalPlies}><Download className="button-icon" /> PGN</button>
+                {selectedMatch?.gameId !== "hangman" && <button className="quiet-button" onClick={downloadPgn} disabled={!totalPlies}><Download className="button-icon" /> PGN</button>}
                 <button className="quiet-button" onClick={() => void downloadJson()} disabled={!selectedMatch}><Download className="button-icon" /> JSON</button>
               </div>
             </div>
-            {!selectedSnapshot?.moves?.length ? <div className="score-empty">Moves will appear here as the agents play.</div> : <div className="move-list" ref={moveListRef}>
+            {selectedMatch?.gameId === "hangman" ? <div className="event-list">{selectedMatch.history.length === 0 ? <p>Accepted actions and corrections appear here.</p> : selectedMatch.history.map((turn, index) => <div className="event-row" key={turn.turnId}><span>{index + 1}.</span><span>{turn.playerLabel}: {turn.actionLabel ?? "Lane forfeit or request failure"}<small> · {turn.attempts.length} request(s)</small></span></div>)}</div> : !selectedSnapshot?.moves?.length ? <div className="score-empty">Moves will appear here as the agents play.</div> : <div className="move-list" ref={moveListRef}>
               {Array.from({ length: Math.ceil(selectedSnapshot.moves.length / 2) }, (_, index) => {
                 const white = selectedSnapshot.moves[index * 2];
                 const black = selectedSnapshot.moves[index * 2 + 1];

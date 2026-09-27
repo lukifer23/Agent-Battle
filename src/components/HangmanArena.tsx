@@ -11,6 +11,7 @@ export function HangmanArena({ match }: { match: PublicMatchDetail }) {
     <p className="board-summary">One word. Two independent lanes. Seven misses allowed.</p>
     <div className="hangman-lanes">{match.players.map((player) => {
       const lane = view.lanes[player.id];
+      const pendingAttempts = step === null && match.pendingTurn?.playerId === player.id ? match.pendingTurn.attempts : [];
       const turns = match.history.filter((turn) => turn.playerId === player.id).slice(0, step === null ? undefined : lane.actionsTaken + (lane.status === "forfeit" ? 1 : 0));
       return <section className={`hangman-lane ${match.currentPlayerId === player.id ? "lane-active" : ""}`} key={player.id}>
         <header><h3>{player.label}</h3><span>{lane.status.toUpperCase()}</span></header>
@@ -29,10 +30,10 @@ export function HangmanArena({ match }: { match: PublicMatchDetail }) {
         <dl><div><dt>Actions</dt><dd>{lane.actionsTaken}</dd></div><div><dt>Misses</dt><dd>{lane.misses}</dd></div><div><dt>Correct letters</dt><dd>{lane.correctLetters}</dd></div></dl>
         <p className="guessed-letters">Guessed: {lane.guessedLetters.join(" · ") || "None yet"}</p>
         <p>Latest: {turns.at(-1)?.actionLabel ?? "Awaiting action"}</p>
-        <details><summary>Requests and corrections ({turns.reduce((n, turn) => n + turn.attempts.length, 0)})</summary>{turns.map((turn) => <div key={turn.turnId}>{turn.actionLabel ?? "No accepted action"}{turn.attempts.map((attempt, index) => <p key={index}>Request {attempt.attempt}: {attempt.status} · {attempt.latencyMs == null ? "Time unknown" : `${attempt.latencyMs} ms`} · {attempt.usage.costUsd == null ? "Cost unknown" : `$${attempt.usage.costUsd}`}</p>)}</div>)}</details>
+        <details><summary>Requests and corrections ({turns.reduce((n, turn) => n + turn.attempts.length, pendingAttempts.length)})</summary>{turns.map((turn) => <div key={turn.turnId}>{turn.actionLabel ?? "No accepted action"}{turn.attempts.map((attempt, index) => <p key={index}>Request {attempt.attempt}: {attempt.status} · {attempt.latencyMs == null ? "Time unknown" : `${attempt.latencyMs} ms`} · {attempt.usage.costUsd == null ? "Cost unknown" : `$${attempt.usage.costUsd}`}</p>)}</div>)}{pendingAttempts.map((attempt, index) => <p key={`pending-${index}`}>Current request {attempt.attempt}: {attempt.status} · usage pending or unknown</p>)}</details>
       </section>;
     })}</div>
     {latest.terminal && <div className="hangman-result" role="status"><span className="eyebrow">THE WORD</span><h3>{latest.word}</h3><p>{match.result?.notation} · {match.result?.reason}</p></div>}
-    {frames.length > 0 && match.status !== "running" && <div className="replay-control"><label>Action history <input type="range" aria-label="Hangman replay" min={0} max={frames.length - 1} value={step ?? frames.length - 1} onChange={(event) => setStep(Number(event.target.value))} /></label><button className="quiet-button" onClick={() => setStep(null)}>Return to latest</button></div>}
+    {frames.length > 0 && match.status !== "running" && <div className="replay-control"><p role="status">{step === null ? "Latest position" : `Reviewing action ${step} of ${frames.length - 1}`}</p><label>Action history <input type="range" aria-label="Hangman replay" min={0} max={frames.length - 1} value={step ?? frames.length - 1} onChange={(event) => setStep(Number(event.target.value))} /></label><button className="quiet-button" onClick={() => setStep(null)}>Return to latest</button></div>}
   </div>;
 }

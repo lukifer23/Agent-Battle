@@ -3,7 +3,7 @@ import type { CSSProperties } from "react";
 import type { PublicMatchDetail } from "../shared.js";
 import { HangmanArena } from "./HangmanArena.js";
 export function ArenaRouter({ match, chess }: { match: PublicMatchDetail | null; chess: { boardFen: string; boardOrientation: "white" | "black"; squareStyles: Record<string, CSSProperties>; summary: string } }) {
-  if (match?.gameId === "hangman") return <HangmanArena match={match} />;
+  if (match?.gameId === "hangman") return <HangmanArena key={match.id} match={match} />;
   if (match && match.gameId !== "chess") return <p>Unsupported game view.</p>;
   const ranks = chess.boardOrientation === "white" ? [8,7,6,5,4,3,2,1] : [1,2,3,4,5,6,7,8];
   const files = chess.boardOrientation === "white" ? "abcdefgh" : "hgfedcba";
