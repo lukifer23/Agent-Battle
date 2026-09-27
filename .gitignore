@@ -1,0 +1,47 @@
+# Dependencies and build output
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Local runtime data (match history, provider diagnostics)
+/data/
+*.gle.txt
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# Logs and run artifacts
+*.log
+logs/
+/output/
+/.playwright-cli/
+/.gstack/
+coverage/
+test-results/
+playwright-report/
+blob-report/
+
+# Local backups and private working copies
+/private/
+/backups/
+*.backup
+*.bak
+
+# Private audit material (never publish)
+/AUDIT_AND_IMPLEMENTATION_PLAN.md
+/docs/AUDIT_AND_IMPLEMENTATION_PLAN.md
+/audit-local/
+*.local.md
+
+# OS and editor state
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

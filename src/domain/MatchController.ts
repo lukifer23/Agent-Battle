@@ -1,0 +1,515 @@
+import { randomUUID } from "node:crypto";
+import type { AgentAdapter, AgentRegistry } from "./agent.js";
+import { AgentExecutionError, AgentProtocolError } from "./agent.js";
+import type { ActionValidation, GameDefinition, GameRegistry } from "./game.js";
+import type {
+  AgentAttempt,
+  AppState,
+  GameAction,
+  MatchEvent,
+  MatchRecord,
+  MatchResult,
+  PlayerConfig,
+  PlayerSeat,
+  ProviderInfo,
+  TurnTelemetry,
+} from "../shared.js";
+
+interface RunningMatch {
+  control: "continue" | "pause" | "stop";
+  agents: Map<string, AgentAdapter>;
+}
+
+export interface CreateMatchRequest {
+  gameId: string;
+  players: Record<string, PlayerConfig>;
+  turnTimeoutSeconds: number;
+}
+
+export class MatchController {
+  private readonly runtime = new Map<string, unknown>();
+  private readonly runs = new Map<string, RunningMatch>();
+  private readonly records: MatchRecord[];
+  private creatingMatch = false;
+
+  constructor(
+    private readonly games: GameRegistry,
+    private readonly agents: AgentRegistry,
+    initialRecords: MatchRecord[],
+    private readonly providers: () => Promise<ProviderInfo[]>,
+    private readonly onChange: (record: MatchRecord, event?: MatchEvent) => void,
+  ) {
+    this.records = initialRecords;
+    let migrated = false;
+    for (const match of this.records) {
+      try {
+        const game = this.games.get(match.gameId);
+        this.runtime.set(match.id, game.deserialize(match.gameState));
+        if (match.status === "running") {
+          match.status = "interrupted";
+          match.currentPlayerId = undefined;
+          match.error = "The app restarted during this match. Its saved game state is intact; resume to ask the current player again.";
+          migrated = true;
+        }
+      } catch (error) {
+        match.status = "error";
+        match.error = `Could not restore saved ${match.gameId || "game"} state: ${error instanceof Error ? error.message : "invalid snapshot"}`;
+        migrated = true;
+      }
+    }
+    if (migrated) this.save();
+  }
+
+  get(id: string): MatchRecord | undefined {
+    return this.records.find((match) => match.id === id);
+  }
+
+  list(): MatchRecord[] {
+    return [...this.records];
+  }
+
+  active(): MatchRecord | null {
+    return this.records.find((match) => ["ready", "running", "paused", "interrupted"].includes(match.status)) ?? null;
+  }
+
+  async snapshot(): Promise<AppState> {
+    const activeMatch = this.active();
+    return {
+      providers: await this.providers(),
+      activeMatch,
+      // The active record is already available through activeMatch. Sending it
+      // again in recentMatches doubles the largest payload during live/replay updates.
+      recentMatches: this.records.filter((match) => match.id !== activeMatch?.id).slice(0, 50),
+    };
+  }
+
+  async create(request: CreateMatchRequest): Promise<MatchRecord> {
+    if (this.creatingMatch) throw new Error("A match is already being created.");
+    this.creatingMatch = true;
+    try {
+      return await this.createMatch(request);
+    } finally {
+      this.creatingMatch = false;
+    }
+  }
+
+  private async createMatch(request: CreateMatchRequest): Promise<MatchRecord> {
+    const game = this.games.get(request.gameId);
+    if (game.playerIds.length !== 2) throw new Error("The current match controller requires exactly two players.");
+    if (!Number.isInteger(request.turnTimeoutSeconds) || request.turnTimeoutSeconds < 30 || request.turnTimeoutSeconds > 600) {
+      throw new Error("Move timeout must be between 30 and 600 seconds.");
+    }
+    if (this.records.some((match) => ["ready", "running", "paused", "interrupted"].includes(match.status))) {
+      throw new Error("Resume or stop the current match before creating another.");
+    }
+    const detected = await this.providers();
+    const players: [PlayerSeat, PlayerSeat] = game.playerIds.map((id) => {
+      const config = request.players[id];
+      if (!config) throw new Error(`Missing agent configuration for ${game.playerLabel(id)}.`);
+      if (!detected.find((provider) => provider.provider === config.provider)?.installed) {
+        throw new Error(`${config.provider} CLI is not installed or not available in PATH.`);
+      }
+      const model = config.model.trim();
+      const reasoning = config.reasoning?.trim() ?? "";
+      if (model.length > 140 || reasoning.length > 40 || /[\r\n\0]/.test(model + reasoning)) throw new Error("Model and reasoning settings are invalid.");
+      const reasoningOptions: Record<string, string[]> = {
+        codex: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        claude: ["low", "medium", "high", "xhigh", "max"],
+        opencode: [],
+      };
+      if (reasoning && reasoningOptions[config.provider].length && !reasoningOptions[config.provider].includes(reasoning.toLowerCase())) {
+        throw new Error(`${config.provider} reasoning must be one of: ${reasoningOptions[config.provider].join(", ")}.`);
+      }
+      return {
+        id,
+        label: game.playerLabel(id),
+        agent: { ...config, model, reasoning, name: `${config.provider}${model ? ` · ${model}` : " · CLI default"}` },
+      };
+    }) as [PlayerSeat, PlayerSeat];
+    const now = new Date().toISOString();
+    const state = game.createState();
+    const match: MatchRecord = {
+      id: randomUUID(),
+      gameId: game.id,
+      gameVersion: game.version,
+      protocolVersion: "game-action-v1",
+      createdAt: now,
+      updatedAt: now,
+      status: "ready",
+      players,
+      settings: {
+        turnTimeoutSeconds: request.turnTimeoutSeconds,
+        maxRetries: 1,
+        retryPolicy: "retry-invalid-once-then-forfeit",
+        promptVersion: "observation-contract-v1",
+        toolSchemaVersion: game.actionSchemaVersion,
+      },
+      gameState: game.serialize(state),
+      history: [],
+      events: [],
+    };
+    this.runtime.set(match.id, state);
+    this.records.unshift(match);
+    this.emit(match, "match.created", "Match created", { gameId: game.id, gameVersion: game.version });
+    return match;
+  }
+
+  async start(id: string): Promise<MatchRecord> {
+    const match = this.require(id);
+    if (!["ready", "paused", "interrupted"].includes(match.status)) throw new Error("This match is not ready to start or resume.");
+    if (this.runs.has(id)) throw new Error("This match already has an active controller.");
+    const otherActive = this.records.find((candidate) => candidate.id !== id && ["ready", "running", "paused", "interrupted"].includes(candidate.status));
+    if (otherActive) throw new Error("Another match is already active. Stop or finish it before resuming this match.");
+    const game = this.games.get(match.gameId);
+    if (!this.runtime.has(id)) this.runtime.set(id, game.deserialize(match.gameState));
+    const running: RunningMatch = { control: "continue", agents: new Map() };
+    this.runs.set(id, running);
+    match.status = "running";
+    match.error = undefined;
+    match.currentPlayerId = undefined;
+    this.emit(match, match.history.length === 0 ? "match.started" : "match.resumed", match.history.length === 0 ? "Match started" : "Match resumed");
+    void this.run(id, game, running).catch((error: unknown) => {
+      const current = this.get(id);
+      if (!current) return;
+      current.status = "error";
+      current.error = error instanceof Error ? error.message : "Unexpected match controller failure.";
+      current.currentPlayerId = undefined;
+      try {
+        this.emit(current, "agent.error", `Match controller failed: ${current.error}`);
+      } catch (notificationError) {
+        console.error("Could not report a failed match controller state.", notificationError);
+      }
+      console.error("Unhandled match controller failure.", error);
+    });
+    return match;
+  }
+
+  async pause(id: string): Promise<void> {
+    await this.control(id, "pause");
+  }
+
+  async stop(id: string): Promise<void> {
+    await this.control(id, "stop");
+  }
+
+  private async control(id: string, control: "pause" | "stop"): Promise<void> {
+    const match = this.require(id);
+    const running = this.runs.get(id);
+    if (match.status !== "running" || !running) throw new Error("This match is not running.");
+    running.control = control;
+    for (const agent of running.agents.values()) await agent.shutdown();
+  }
+
+  private require(id: string): MatchRecord {
+    const match = this.get(id);
+    if (!match) throw new Error("Match not found.");
+    return match;
+  }
+
+  private emit(match: MatchRecord, type: string, text: string, payload?: Record<string, unknown>, playerId?: string): void {
+    const event: MatchEvent = {
+      at: new Date().toISOString(),
+      type,
+      text,
+      ...(playerId ? { playerId } : {}),
+      ...(payload ? { payload } : {}),
+    };
+    match.events.push(event);
+    if (match.events.length > 500) match.events.splice(0, match.events.length - 500);
+    match.updatedAt = event.at;
+    this.onChange(match, event);
+  }
+
+  private save(): void {
+    this.onChange(this.records[0] ?? ({} as MatchRecord));
+  }
+
+  private player(match: MatchRecord, playerId: string): PlayerSeat {
+    const player = match.players.find((seat) => seat.id === playerId);
+    if (!player) throw new Error(`No participant found for game player ${playerId}.`);
+    return player;
+  }
+
+  private async run(id: string, game: GameDefinition<unknown>, running: RunningMatch): Promise<void> {
+    const match = this.require(id);
+    const state = this.runtime.get(id);
+    if (state === undefined) {
+      match.status = "error";
+      match.error = "The game state is missing.";
+      this.emit(match, "agent.error", match.error);
+      this.runs.delete(id);
+      return;
+    }
+
+    try {
+      for (const seat of match.players) {
+        const adapter = this.agents.create(seat.agent);
+        running.agents.set(seat.id, adapter);
+        await adapter.initialize();
+        this.emit(match, "agent.ready", `${seat.agent.name} is ready`, { provider: seat.agent.provider, model: seat.agent.model || null }, seat.id);
+        if (running.control !== "continue") break;
+      }
+      while (running.control === "continue") {
+        if (game.isTerminal(state)) {
+          const result = game.result(state);
+          this.finish(match, game, state, result ?? { kind: "draw", notation: "1/2-1/2", reason: "Game ended without a result." });
+          return;
+        }
+        const playerId = game.currentPlayer(state);
+        if (!playerId) throw new Error("The game has no current player but is not terminal.");
+        match.currentPlayerId = playerId;
+        const seat = this.player(match, playerId);
+        const adapter = running.agents.get(playerId);
+        if (!adapter) throw new Error(`Adapter for player ${playerId} was not initialized.`);
+        const turnId = randomUUID();
+        const acceptedPly = match.history.filter((turn) => turn.valid).length + 1;
+        let feedback: string | undefined;
+        let selectedAction: GameAction | undefined;
+        const attempts: AgentAttempt[] = [];
+        const observation = game.observe(state, {
+          matchId: id,
+          turnId,
+          player: seat,
+          moveNumber: acceptedPly,
+          turnTimeoutMs: match.settings.turnTimeoutSeconds * 1000,
+        });
+        const before = game.serialize(state);
+        const beforeObject = before && typeof before === "object" ? before as Record<string, unknown> : {};
+        const fenBefore = typeof beforeObject.fen === "string" ? beforeObject.fen : undefined;
+        this.emit(match, "turn.started", `${seat.agent.name} to act`, { turnId, ply: acceptedPly, legalActionCount: observation.legalActions.length, fenBefore }, playerId);
+        this.emit(match, "agent.thinking", `${seat.agent.name} is considering the observation`, { turnId }, playerId);
+
+        for (let attemptNumber = 1; attemptNumber <= match.settings.maxRetries + 1; attemptNumber += 1) {
+          if (running.control !== "continue") break;
+          const startedAt = new Date().toISOString();
+          this.emit(match, "agent.started", `${seat.agent.name} request ${attemptNumber}`, { turnId, attempt: attemptNumber }, playerId);
+          let reply: Awaited<ReturnType<typeof adapter.act>> | undefined;
+          let failure: unknown;
+          try {
+            const attemptObservation = feedback ? { ...observation, feedback } : observation;
+            reply = await this.invokeWithTimeout(adapter, attemptObservation);
+          } catch (error) { failure = error; }
+
+          if (running.control !== "continue") {
+            attempts.push(this.attempt(attemptNumber, startedAt, "cancelled", {
+              ...(failure instanceof AgentExecutionError ? { error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs } : {}),
+              ...(reply ? { latencyMs: reply.latencyMs, responseExcerpt: reply.responseExcerpt, stderrExcerpt: reply.stderrExcerpt, toolCalls: reply.toolCalls, usage: reply.usage } : {}),
+            }));
+            break;
+          }
+
+          if (failure instanceof AgentExecutionError && !failure.timedOut) {
+            attempts.push(this.attempt(attemptNumber, startedAt, "error", { error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
+            const record = this.turnRecord(match, game, seat, acceptedPly, turnId, observation, attempts, false);
+            match.history.push(record);
+            match.status = "error";
+            match.error = failure.message;
+            match.currentPlayerId = undefined;
+            this.emit(match, "agent.error", `${seat.agent.name} failed: ${failure.message}`, { turnId, attempt: attemptNumber }, playerId);
+            this.persistState(match, game, state);
+            return;
+          }
+
+          let validation: ActionValidation = { valid: false, reason: "Agent returned no action." };
+          const action = reply?.action;
+          if (failure instanceof AgentProtocolError) {
+            validation = { valid: false, reason: failure.message };
+            this.emit(match, "agent.response", `${seat.agent.name} returned malformed action data`, {
+              turnId, attempt: attemptNumber, status: "malformed", responseLength: failure.responseExcerpt.length,
+            }, playerId);
+            attempts.push(this.attempt(attemptNumber, startedAt, "invalid", {
+              error: failure.message, responseExcerpt: failure.responseExcerpt,
+              latencyMs: failure.latencyMs, stderrExcerpt: failure.stderrExcerpt,
+              toolCalls: failure.toolCalls, usage: failure.usage,
+            }));
+          } else if (failure instanceof AgentExecutionError && failure.timedOut) {
+            validation = { valid: false, reason: failure.message };
+            this.emit(match, "agent.response", `${seat.agent.name} request timed out`, { turnId, attempt: attemptNumber, status: "timeout" }, playerId);
+            attempts.push(this.attempt(attemptNumber, startedAt, "timeout", { error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
+            this.emit(match, "agent.timeout", `${seat.agent.name} exceeded its move timeout`, { turnId, attempt: attemptNumber, timeoutMs: observation.clock.turnTimeoutMs }, playerId);
+          } else if (reply && action) {
+            this.emit(match, "agent.response", `${seat.agent.name} returned a structured action`, {
+              turnId, attempt: attemptNumber, action, latencyMs: reply.latencyMs,
+              toolCalls: reply.toolCalls, usage: reply.usage,
+            }, playerId);
+            this.emit(match, "move.proposed", `${seat.agent.name} proposed ${game.actionLabel(action)}`, { turnId, action }, playerId);
+            validation = reply.toolCalls && reply.toolCalls > 0
+              ? { valid: false, reason: `Agent made ${reply.toolCalls} external tool call(s); this arena accepts a structured action response only.` }
+              : game.validateAction(state, playerId, action);
+            attempts.push(this.attempt(attemptNumber, startedAt, validation.valid ? "valid" : "invalid", {
+              completedAt: new Date().toISOString(),
+              latencyMs: reply.latencyMs,
+              action,
+              ...(validation.reason ? { error: validation.reason } : {}),
+              responseExcerpt: reply.responseExcerpt,
+              stderrExcerpt: reply.stderrExcerpt,
+              toolCalls: reply.toolCalls,
+              usage: reply.usage,
+            }));
+          } else {
+            attempts.push(this.attempt(attemptNumber, startedAt, "error", { error: failure instanceof Error ? failure.message : "Unknown agent failure." }));
+            match.status = "error";
+            match.error = failure instanceof Error ? failure.message : "Unknown agent failure.";
+            this.emit(match, "agent.error", match.error, { turnId }, playerId);
+            this.persistState(match, game, state);
+            return;
+          }
+
+          if (validation.valid && action) {
+            selectedAction = action;
+            break;
+          }
+
+          feedback = validation.reason ?? "The action was invalid.";
+          this.emit(match, "move.rejected", `${seat.agent.name}: ${feedback}`, { turnId, attempt: attemptNumber, action: action ?? null, error: feedback }, playerId);
+          if (attemptNumber <= match.settings.maxRetries) this.emit(match, "turn.retry", "Returning the rejection reason and same authoritative position for one retry", { turnId, retry: attemptNumber }, playerId);
+        }
+
+        if (running.control !== "continue") {
+          const record = this.turnRecord(match, game, seat, acceptedPly, turnId, observation, attempts, false);
+          if (attempts.length) match.history.push(record);
+          this.persistState(match, game, state);
+          break;
+        }
+
+        if (!selectedAction) {
+          const record = this.turnRecord(match, game, seat, acceptedPly, turnId, observation, attempts, false);
+          match.history.push(record);
+          const winnerId = match.players.find((player) => player.id !== playerId)?.id;
+          this.emit(match, "move.rejected", `${seat.agent.name} exhausted its retry after: ${feedback ?? "no valid action"}`, { turnId, retryCount: attempts.length - 1 }, playerId);
+          if (!winnerId) throw new Error("The game did not provide an opposing player for forfeiture.");
+          this.finish(match, game, state, game.winResult(winnerId, `${seat.label} forfeited after retry exhaustion: ${feedback ?? "invalid action"}`), "forfeit");
+          return;
+        }
+
+        const after = game.applyAction(state, playerId, selectedAction);
+        this.runtime.set(id, after);
+        const afterSnapshot = game.serialize(after);
+        const record = this.turnRecord(match, game, seat, acceptedPly, turnId, observation, attempts, true);
+        record.action = selectedAction;
+        record.actionLabel = game.actionLabel(selectedAction);
+        const afterObject = afterSnapshot && typeof afterSnapshot === "object" ? afterSnapshot as Record<string, unknown> : {};
+        if (typeof afterObject.fen === "string") record.fenAfter = afterObject.fen;
+        record.latencyMs = attempts.reduce((total, attempt) => total + (attempt.latencyMs ?? 0), 0);
+        record.retryCount = Math.max(0, attempts.length - 1);
+        match.history.push(record);
+        this.emit(match, "move.applied", `${seat.agent.name} played ${record.actionLabel}`, {
+          turnId, ply: acceptedPly, action: selectedAction, actionLabel: record.actionLabel,
+          fenBefore, ...game.eventProjection(after),
+        }, playerId);
+        this.emit(match, "turn.completed", `${seat.agent.name} completed ply ${acceptedPly}`, {
+          turnId, ply: acceptedPly, latencyMs: record.latencyMs, retryCount: record.retryCount,
+          toolCalls: attempts.reduce((sum, attempt) => sum + (attempt.toolCalls ?? 0), 0),
+          inputTokens: totalUsage(attempts, "inputTokens"), outputTokens: totalUsage(attempts, "outputTokens"),
+        }, playerId);
+        this.persistState(match, game, after);
+
+        if (game.isTerminal(after)) {
+          this.finish(match, game, after, game.result(after) ?? { kind: "draw", notation: "1/2-1/2", reason: "Game ended without a result." });
+          return;
+        }
+      }
+
+      if (running.control === "pause") {
+        match.status = "paused";
+        match.currentPlayerId = undefined;
+        this.emit(match, "match.paused", "Match paused at a saved turn boundary. Resume to request the current player's move again.");
+      } else if (running.control === "stop") {
+        match.status = "stopped";
+        match.currentPlayerId = undefined;
+        this.emit(match, "match.stopped", "Match stopped. The current position and telemetry are saved.");
+      }
+    } catch (error) {
+      match.status = "error";
+      match.error = error instanceof Error ? error.message : "Unexpected match controller failure.";
+      match.currentPlayerId = undefined;
+      this.emit(match, "agent.error", match.error);
+      this.persistState(match, game, state);
+    } finally {
+      await Promise.all([...running.agents.values()].map((agent) => agent.shutdown()));
+      this.runs.delete(id);
+    }
+  }
+
+  private attempt(attempt: number, startedAt: string, status: AgentAttempt["status"], details: Partial<AgentAttempt> = {}): AgentAttempt {
+    return {
+      attempt,
+      startedAt,
+      status,
+      toolCalls: null,
+      usage: { inputTokens: null, outputTokens: null, costUsd: null },
+      ...details,
+      completedAt: details.completedAt ?? new Date().toISOString(),
+    };
+  }
+
+  private async invokeWithTimeout(adapter: AgentAdapter, observation: ReturnType<GameDefinition<unknown>["observe"]>): Promise<Awaited<ReturnType<AgentAdapter["act"]>>> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        void adapter.shutdown();
+        reject(new AgentExecutionError(`Move timed out after ${Math.ceil(observation.clock.turnTimeoutMs / 1000)} seconds.`, true));
+      }, observation.clock.turnTimeoutMs);
+    });
+    try {
+      return await Promise.race([adapter.act(observation), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private turnRecord(
+    match: MatchRecord,
+    game: GameDefinition<unknown>,
+    seat: PlayerSeat,
+    ply: number,
+    turnId: string,
+    observation: ReturnType<typeof game.observe>,
+    attempts: AgentAttempt[],
+    valid: boolean,
+  ): TurnTelemetry {
+    const fen = observation.state.fen;
+    const action = attempts.at(-1)?.action;
+    return {
+      matchId: match.id,
+      ply,
+      turnId,
+      agentId: `${seat.id}:${seat.agent.provider}:${seat.agent.model || "default"}`,
+      model: seat.agent.model,
+      provider: seat.agent.provider,
+      playerId: seat.id,
+      playerLabel: seat.label,
+      ...(typeof fen === "string" ? { fenBefore: fen } : {}),
+      legalActionCount: observation.legalActions.length,
+      ...(action ? { action } : {}),
+      ...(action ? { actionLabel: game.actionLabel(action) } : {}),
+      valid,
+      latencyMs: attempts.reduce((total, attempt) => total + (attempt.latencyMs ?? 0), 0) || null,
+      retryCount: Math.max(0, attempts.length - 1),
+      attempts,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  private persistState(match: MatchRecord, game: GameDefinition<unknown>, state: unknown): void {
+    match.gameState = game.serialize(state);
+    match.updatedAt = new Date().toISOString();
+    this.onChange(match);
+  }
+
+  private finish(match: MatchRecord, game: GameDefinition<unknown>, state: unknown, result: MatchResult, status: "finished" | "forfeit" = "finished"): void {
+    match.result = result;
+    match.status = status;
+    match.currentPlayerId = undefined;
+    match.error = undefined;
+    match.gameState = game.serialize(state, result);
+    this.emit(match, "match.finished", `${result.notation} · ${result.reason}`, {
+      result: result.notation, kind: result.kind, winnerId: result.winnerId ?? null, reason: result.reason, status,
+    });
+  }
+}
+
+function totalUsage(attempts: AgentAttempt[], key: "inputTokens" | "outputTokens"): number | null {
+  const values = attempts.map((attempt) => attempt.usage[key]).filter((value): value is number => value !== null);
+  return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
+}
