@@ -55,18 +55,28 @@ All agents receive a new complete observation every turn. No transcript is neede
 
 ## Persistence and telemetry
 
-`data/matches.json` stores up to the most recent 100 match records. Each record contains:
+`data/matches.json` (override the directory with `AGENT_BATTLE_DATA_DIR`) stores match records in a versioned envelope. The current store version is 2; legacy files that are a bare JSON array are migrated on load with a pre-migration backup. The store is validated on load:
+
+- A root that is not an array or a versioned envelope is preserved (renamed aside), and the app refuses to silently replace it with an empty history.
+- Individual records that fail runtime validation are written to a quarantine file and excluded; valid records are retained.
+- Migration is idempotent and keeps a `.bak` copy; losing a valid record is never used as a recovery path.
+
+A single-writer lock (`matches.json.lock`) is acquired at startup; a second instance with a live lock is refused, and a stale lock from a dead process is recovered. Writes use a unique temporary file with `fsync` and an atomic rename with owner-only permissions. Durability happens at explicit controller checkpoints (turn start, each attempt, accepted move, and lifecycle changes), not on every streamed event, so a failed write can end the match instead of proceeding under a false durability claim.
+
+Each record contains:
 
 - Game ID and game version, protocol/schema versions, participants, model/reasoning selection and timeout/retry settings.
 - The serialized authoritative game state, including chess PGN and replay moves.
-- An append-only event feed and one telemetry record per agent turn, including every retry attempt, FEN before/after, and usage data.
-- Match result and timestamps.
+- An event feed and one telemetry record per agent turn, including every retry attempt, FEN before/after, and usage data. The event feed is a bounded recent window, not the complete history.
+- Match result and timestamps, plus an optional durable in-flight turn (used to keep retry budget and feedback across a pause or restart).
 
-Token counts and cost are nullable because CLIs expose different metadata. No chain-of-thought is requested or used. Successful responses are stored as canonical action JSON; malformed response excerpts and stderr diagnostics are bounded and token-redacted.
+Token counts and cost are nullable because CLIs expose different metadata. No chain-of-thought is requested or used. Successful responses are stored as canonical action JSON; malformed response excerpts and stderr diagnostics are bounded and token-redacted through `src/server/diagnostics.ts`.
 
-New turn records store FEN checkpoints rather than repeating the full serialized game state for every ply. Older records may still contain `stateBefore`/`stateAfter`; those optional fields remain readable for compatibility. Activity-only events are streamed immediately and are included in the next persisted checkpoint. Accepted moves, rejections, errors and lifecycle changes are persisted at their state boundary.
+New turn records store FEN checkpoints rather than repeating the full serialized game state for every ply. Older records may still contain `stateBefore`/`stateAfter`; those optional fields remain readable for compatibility. Accepted moves, rejections, errors and lifecycle changes are persisted at their state boundary.
 
-The JSON file is local, created with owner-only permissions, and replaced atomically. Back it up before moving or deleting match history.
+On restore, ChessGame verifies that saved PGN, FEN, move records and resignation metadata agree. The controller additionally verifies that a stored `finished` result matches the replayed game; a mismatch marks the record `error` rather than feeding the scoreboard.
+
+The JSON file is local and created with owner-only permissions. Back it up before moving or deleting match history.
 
 ## HTTP and real-time interface
 

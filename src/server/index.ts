@@ -8,18 +8,44 @@ import { MatchController } from "../domain/MatchController.js";
 import { GameRegistry } from "../domain/game.js";
 import { ChessGame } from "../games/chess/ChessGame.js";
 import { agentRegistryDefaults, detectProviders } from "./adapters.js";
-import { loadMatches, saveMatches } from "./store.js";
+import { acquireStoreOwnership, loadMatches, releaseStoreOwnership, saveMatches, STORE_VERSION } from "./store.js";
 import { shouldPersistChange, shouldPublishSnapshot } from "./eventPolicy.js";
 
 const app = express();
 const httpServer = createServer(app);
 const port = Number(process.env.PORT || 4173);
-const storedMatches = loadMatches();
+
+try {
+  acquireStoreOwnership();
+} catch (error) {
+  console.error(error instanceof Error ? error.message : "Could not acquire the match store lock.");
+  process.exit(1);
+}
+
+let storedMatches: MatchRecord[] = [];
+try {
+  const loaded = loadMatches();
+  storedMatches = loaded.matches;
+  if (loaded.migrated) {
+    console.log(`Migrated saved matches to store version ${STORE_VERSION}.${loaded.backupPath ? ` Backup: ${loaded.backupPath}.` : ""}${loaded.quarantined ? ` Quarantined ${loaded.quarantined} invalid record(s).` : ""}`);
+  }
+} catch (error) {
+  console.error(`Could not load saved matches: ${error instanceof Error ? error.message : "unknown error"}`);
+}
+
 const eventClients = new Set<Response>();
 const providerCache = { value: detectProviders() };
+let shuttingDown = false;
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "32kb" }));
+app.use((request, response, next) => {
+  if (shuttingDown && request.path.startsWith("/api")) {
+    response.status(503).json({ error: "The server is shutting down." });
+    return;
+  }
+  next();
+});
 
 function stateChanged(record: MatchRecord, event?: MatchEvent): void {
   if (shouldPersistChange(event)) saveMatches(storedMatches.slice(0, 100));
@@ -135,10 +161,26 @@ httpServer.listen(port, "127.0.0.1", () => {
 });
 
 function shutdown(): void {
-  const active = controller.active();
-  if (active?.status === "running") void controller.pause(active.id);
-  httpServer.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 1500).unref();
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const budget = setTimeout(() => process.exit(1), 10_000);
+  budget.unref();
+  void (async () => {
+    try { await controller.shutdown(); }
+    catch { /* Continue closing even if the final checkpoint fails. */ }
+    for (const client of [...eventClients]) {
+      try { client.end(); } catch { /* The client may already be gone. */ }
+    }
+    eventClients.clear();
+    await new Promise<void>((resolve) => {
+      httpServer.close(() => resolve());
+      const fallback = setTimeout(resolve, 2000);
+      fallback.unref();
+    });
+    releaseStoreOwnership();
+    clearTimeout(budget);
+    process.exit(0);
+  })();
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

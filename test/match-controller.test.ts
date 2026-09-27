@@ -163,7 +163,7 @@ test("saved match reload restores canonical chess state and replay history", asy
     const match = await create(controller);
     await controller.start(match.id);
     await waitFor(controller, match.id, ["finished"]);
-    const reloaded = store.load();
+    const reloaded = store.load().matches;
     assert.equal(reloaded.length, 1);
     const restoredHarness = harness(async () => resign, reloaded);
     assert.equal(restoredHarness.controller.get(match.id)?.status, "finished");
@@ -354,4 +354,41 @@ test("multiple legacy active records block creation until each is stopped", asyn
   const created = await controller.create({ gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30 });
   assert.equal(created.status, "ready");
   assert.equal(controller.list().filter((match) => match.status === "stopped").length, 2);
+});
+
+test("a match is not added when its first save fails", async () => {
+  const registry = new AgentRegistry();
+  registry.register("codex", (config) => new ScriptedAgent(config, async () => resign));
+  const controller = new MatchController(new GameRegistry().register(new ChessGame()), registry, [], async () => providers, () => { throw new Error("disk full"); });
+  await assert.rejects(
+    controller.create({ gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30 }),
+    /could not be saved|disk full/i,
+  );
+  assert.equal(controller.list().length, 0);
+});
+
+test("a failed start checkpoint ends the match without creating an adapter", async () => {
+  let created = 0;
+  let fail = false;
+  const registry = new AgentRegistry();
+  registry.register("codex", (config) => { created += 1; return new ScriptedAgent(config, async () => action("e2e4")); });
+  const controller = new MatchController(new GameRegistry().register(new ChessGame()), registry, [], async () => providers, () => { if (fail) throw new Error("disk full"); });
+  const match = await controller.create({ gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30 });
+  fail = true;
+  await controller.start(match.id);
+  const done = controller.get(match.id)!;
+  assert.equal(done.status, "error");
+  assert.match(done.error ?? "", /Could not save|disk full/i);
+  assert.equal(created, 0);
+});
+
+test("restore rejects a stored result that does not match the replayed game", () => {
+  const record = legacyRecord("tampered-result");
+  record.status = "finished";
+  record.result = { kind: "win", winnerId: "white", notation: "1-0", reason: "fabricated" };
+  const registry = new AgentRegistry();
+  registry.register("codex", (config) => new ScriptedAgent(config, async () => resign));
+  const controller = new MatchController(new GameRegistry().register(new ChessGame()), registry, [record], async () => providers, () => undefined);
+  assert.equal(controller.get("tampered-result")?.status, "error");
+  assert.match(controller.get("tampered-result")?.error ?? "", /does not match/i);
 });

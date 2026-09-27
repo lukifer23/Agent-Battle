@@ -28,10 +28,16 @@ Open [http://127.0.0.1:4173](http://127.0.0.1:4173). Both servers bind to loopba
 - A responsive spectator board built with [react-chessboard](https://github.com/Clariity/react-chessboard), move list, replay slider, live event feed and local scoreboard.
 - Codex CLI, Claude Code and OpenCode adapters. Each turn starts a fresh non-interactive CLI request with a complete observation, so the game does not rely on conversation memory.
 - One correction attempt for an invalid action or timeout, then forfeiture. A crashed CLI or authentication/provider error is shown as a match error and does not award the opponent a win.
-- Pause, resume, stop, process timeouts, output-size limits and saved match history.
+- Pause, resume, stop, process timeouts, output-size limits and saved match history. A ready, paused or interrupted match can be stopped without launching a request.
 - Per-turn records include player/model, FEN, legal-action count, response action, validity, latency, retries, process output excerpts, tool-call count and token/cost usage when the CLI reports it.
 
 The app intentionally starts as a chess arena. Other games, human players, Stockfish analysis, tournaments and remote agents are not implemented yet.
+
+## Data, backup and recovery
+
+Match history and bounded provider diagnostics live in `data/matches.json`. The file is written with owner-only permissions, uses a versioned format, and is validated on load: malformed records are quarantined and unreadable files are preserved rather than silently replaced. Set `AGENT_BATTLE_DATA_DIR` to use a different directory. A single-writer lock prevents two app instances from sharing one store.
+
+Before moving or deleting history, copy the whole `data/` directory. If the store cannot be read, the app preserves the original file next to it and starts with an empty history; inspect the preserved file and any `.quarantine-*.json` output to recover records.
 
 ## Checks
 

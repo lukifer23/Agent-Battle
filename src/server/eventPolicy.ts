@@ -8,6 +8,11 @@ export function shouldPublishSnapshot(event: MatchEvent | undefined): boolean {
   return Boolean(event && lifecycleEvents.has(event.type));
 }
 
+/**
+ * Durability is driven by explicit checkpoints (an onChange call with no event),
+ * not by every streamed event. This keeps commit points deliberate and lets the
+ * controller surface a failed write before requesting another move.
+ */
 export function shouldPersistChange(event: MatchEvent | undefined): boolean {
-  return !event || lifecycleEvents.has(event.type) || event.type === "move.rejected";
+  return !event;
 }

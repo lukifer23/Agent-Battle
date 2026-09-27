@@ -16,11 +16,11 @@ test("full SSE snapshots are limited to match lifecycle events", () => {
   assert.equal(shouldPublishSnapshot(event("match.finished")), true);
 });
 
-test("persistence checkpoints retain accepted state, retries, and lifecycle changes", () => {
+test("persistence is reserved for explicit checkpoints, not streamed events", () => {
   assert.equal(shouldPersistChange(undefined), true);
   assert.equal(shouldPersistChange(event("agent.started")), false);
   assert.equal(shouldPersistChange(event("turn.completed")), false);
   assert.equal(shouldPersistChange(event("move.applied")), false);
-  assert.equal(shouldPersistChange(event("move.rejected")), true);
-  assert.equal(shouldPersistChange(event("agent.error")), true);
+  assert.equal(shouldPersistChange(event("move.rejected")), false);
+  assert.equal(shouldPersistChange(event("agent.error")), false);
 });
