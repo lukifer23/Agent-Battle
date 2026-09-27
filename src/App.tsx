@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
-import { applyMatchEvent, matchEventTypes } from "./client/matchEvents.js";
+import { applyMatchEvent, applyPresentationEvent, matchEventTypes } from "./client/matchEvents.js";
 import { highlightSquares, positionSummary } from "./client/chessView.js";
 import { aggregateUsage } from "./domain/usage.js";
 import { ArrowUpRight, BoardMark, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, FlipVertical, RefreshCw, Trophy } from "./components/icons.js";
@@ -172,9 +172,13 @@ function App() {
     });
     for (const type of matchEventTypes) source.addEventListener(type, (message) => {
       try {
-        const envelope = JSON.parse((message as MessageEvent<string>).data) as { matchId?: string; revision?: number; event?: MatchEvent };
+        const envelope = JSON.parse((message as MessageEvent<string>).data) as { matchId?: string; revision?: number; transient?: boolean; event?: MatchEvent };
         if (!envelope.matchId || !envelope.event) throw new Error("Event envelope is missing its match or event.");
         const matchId = envelope.matchId;
+        if (envelope.transient) {
+          setState((existing) => existing ? applyPresentationEvent(existing, matchId, envelope.event!) : existing);
+          return;
+        }
         const revision = envelope.revision ?? envelope.event.sequence ?? 0;
         const current = revisions.current.get(matchId);
         if (current !== undefined && revision <= current) return;

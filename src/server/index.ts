@@ -121,9 +121,9 @@ function stateChanged(record: MatchRecord, event?: import("../shared.js").MatchE
     logMetric("checkpoint", { matches: storedMatches.length, ms: Date.now() - started });
   }
   if (event) {
-    const encoded = JSON.stringify({ matchId: record.id, revision: record.revision, event });
+    const encoded = JSON.stringify({ matchId: record.id, ...(event.sequence === undefined ? { transient: true } : { revision: event.sequence }), event });
     logMetric("event", { type: event.type, bytes: Buffer.byteLength(encoded) });
-    for (const response of eventClients) writeToClient(response, event.type, encoded, `${record.id}:${event.sequence ?? record.revision}`);
+    for (const response of eventClients) writeToClient(response, event.type, encoded, event.sequence === undefined ? undefined : `${record.id}:${event.sequence}`);
   }
   if (shouldPublishSnapshot(event)) publishSnapshot();
 }

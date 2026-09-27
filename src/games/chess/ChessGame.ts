@@ -183,15 +183,16 @@ export class ChessGame implements GameDefinition<ChessRuntimeState> {
 
   serialize(state: ChessRuntimeState, result?: MatchResult): ChessSnapshot {
     if (result) state.chess.setHeader("Result", result.notation);
-    return { fen: state.chess.fen(), pgn: state.chess.pgn(), moves: state.moves, ...(state.resignation ? { resignation: state.resignation } : {}) };
+    return { fen: state.chess.fen(), pgn: state.chess.pgn(), moves: state.moves.map((move) => ({ ...move })), ...(state.resignation ? { resignation: { ...state.resignation } } : {}) };
   }
 
   eventProjection(state: ChessRuntimeState): Record<string, unknown> {
     const latestMove = state.moves.at(-1);
     return {
       fen: state.chess.fen(),
-      ...(latestMove ? { move: latestMove } : {}),
-      ...(state.resignation ? { resignation: state.resignation } : {}),
+      pgn: state.chess.pgn(),
+      ...(latestMove ? { move: { ...latestMove } } : {}),
+      ...(state.resignation ? { resignation: { ...state.resignation } } : {}),
     };
   }
 

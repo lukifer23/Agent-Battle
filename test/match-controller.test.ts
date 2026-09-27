@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { join } from "node:path";
 import { AgentExecutionError, AgentRegistry, type AgentAdapter, type AgentReply, type AttemptControl } from "../src/domain/agent.js";
@@ -74,12 +74,12 @@ async function create(controller: MatchController, whiteModel = "white-model", b
 
 async function waitFor(controller: MatchController, id: string, statuses: string[]): Promise<MatchRecord> {
   const deadline = Date.now() + 3000;
-  while (Date.now() < deadline) {
+  while (true) {
     const match = controller.get(id)!;
     if (statuses.includes(match.status)) return match;
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for match state ${statuses.join(", ")}; current=${match.status}`);
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  throw new Error(`Timed out waiting for match state ${statuses.join(", ")}; current=${controller.get(id)?.status}`);
 }
 
 const action = (move: string): GameAction => ({ type: "move", payload: { move } });
@@ -180,6 +180,85 @@ test("saved match reload restores canonical chess state and replay history", asy
     assert.match(restoredHarness.controller.get(match.id)?.history[0]?.fenBefore ?? "", /^rnbq/);
     assert.match(restoredHarness.controller.get(match.id)?.history[0]?.fenAfter ?? "", /^rnbq/);
   } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("the accepted-move durable boundary reloads one canonical move and resumes black", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-move-boundary-"));
+  try {
+    const path = join(folder, "matches.json");
+    const store = new MatchStore(path);
+    const records: MatchRecord[] = [];
+    let boundary: Buffer | undefined;
+    const { controller } = harness(async (model) => model === "white-model" ? action("e2e4") : resign, records, (items) => {
+      store.save(items);
+      if (!boundary && items[0]?.history.length === 1 && items[0].history[0]?.valid) boundary = readFileSync(path);
+    });
+    const match = await create(controller);
+    await controller.start(match.id);
+    await waitFor(controller, match.id, ["finished"]);
+    assert.ok(boundary);
+    const crashPath = join(folder, "crash.json");
+    writeFileSync(crashPath, boundary);
+    const loaded = new MatchStore(crashPath).load();
+    assert.equal(loaded.quarantined, 0);
+    const saved = loaded.matches[0]!;
+    const game = new ChessGame();
+    const restored = game.deserialize(saved.gameState);
+    assert.equal(saved.history.length, 1);
+    assert.equal(saved.history[0]?.actionLabel, "e2e4");
+    assert.equal((saved.gameState as { moves: unknown[] }).moves.length, 1);
+    assert.equal((saved.gameState as { fen: string }).fen, restored.chess.fen());
+    assert.equal((saved.gameState as { pgn: string }).pgn, restored.chess.pgn());
+    assert.equal(game.currentPlayer(restored), "black");
+    const resumed = harness(async () => resign, loaded.matches);
+    await resumed.controller.start(saved.id);
+    const done = await waitFor(resumed.controller, saved.id, ["finished"]);
+    assert.equal(done.history.length, 2);
+    assert.equal((done.gameState as { moves: unknown[] }).moves.length, 1);
+    assert.equal(done.history[1]?.playerId, "black");
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("retry exhaustion commits invalid evidence and forfeit together", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-forfeit-boundary-"));
+  try {
+    const path = join(folder, "matches.json");
+    const store = new MatchStore(path);
+    const records: MatchRecord[] = [];
+    const committed: MatchRecord[] = [];
+    const { controller } = harness(async () => action("a1a8"), records, (items) => {
+      store.save(items);
+      committed.push(structuredClone(items[0]!));
+    });
+    const match = await create(controller);
+    await controller.start(match.id);
+    await waitFor(controller, match.id, ["forfeit"]);
+    assert.ok(committed.every((item) => item.history.length === 0 || item.status === "forfeit"));
+    const loaded = store.load();
+    assert.equal(loaded.quarantined, 0);
+    const saved = loaded.matches[0]!;
+    assert.equal(saved.status, "forfeit");
+    assert.equal(saved.history[0]?.attempts.length, 2);
+    assert.equal(saved.pendingTurn, undefined);
+    assert.equal(saved.result?.winnerId, "black");
+    assert.equal(harness(async () => resign, loaded.matches).controller.get(saved.id)?.status, "forfeit");
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("presentation events publish without their own durable full-store commits", async () => {
+  const records: MatchRecord[] = [];
+  const committedEventTypes: string[][] = [];
+  const { controller } = harness(async () => resign, records, (items) => {
+    committedEventTypes.push(items[0]?.events.map((event) => event.type) ?? []);
+  });
+  const match = await create(controller);
+  await controller.start(match.id);
+  await waitFor(controller, match.id, ["finished"]);
+  assert.ok(committedEventTypes.some((types) => types.includes("match.created")));
+  assert.ok(committedEventTypes.some((types) => types.includes("match.started")));
+  assert.ok(committedEventTypes.every((types) => !types.some((type) => [
+    "agent.ready", "agent.thinking", "agent.started", "agent.response", "move.proposed", "turn.started",
+  ].includes(type))));
 });
 
 interface ToyState { n: number }
@@ -428,7 +507,7 @@ test("a failed accepted-move checkpoint halts before the next request", async ()
     const records: MatchRecord[] = [];
     let calls = 0;
     const { controller } = harness(async () => { calls += 1; return action("e2e4"); }, records, (items) => {
-      if (items[0]?.events.at(-1)?.type === "move.applied") throw new Error("rename failed");
+      if (items[0]?.events.some((event) => event.type === "move.applied")) throw new Error("rename failed");
       store.save(items);
     });
     const match = await create(controller);
@@ -455,7 +534,7 @@ test("a failed retry checkpoint keeps the first attempt and prevents a second ca
     await controller.start(match.id);
     await waitFor(controller, match.id, ["error"]);
     assert.equal(calls, 1);
-    assert.equal(store.load().matches[0].pendingTurn?.attempts[0].status, "invalid");
+    assert.equal(store.load().matches[0].pendingTurn?.attempts.length, 0);
   } finally { rmSync(folder, { recursive: true, force: true }); }
 });
 

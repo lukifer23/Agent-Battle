@@ -52,6 +52,7 @@ test("legal moves apply and illegal or wrong-player actions are rejected", () =>
   assert.equal(next.chess.history().at(-1), "e4");
   assert.deepEqual(game.eventProjection(next), {
     fen: next.chess.fen(),
+    pgn: next.chess.pgn(),
     move: next.moves.at(-1),
   });
   assert.throws(() => game.applyAction(state, "white", { type: "move", payload: { move: "e2e5" } }));
@@ -95,6 +96,22 @@ test("serialized PGN reloads to the same authoritative position", () => {
   assert.equal(restored.chess.fen(), state.chess.fen());
   assert.equal(restored.chess.pgn(), state.chess.pgn());
   assert.equal(restored.moves.length, 2);
+});
+
+test("serialization detaches move records and resignation from mutable runtime state", () => {
+  const state = game.createState();
+  const before = game.serialize(state);
+  play(state, "e2e4");
+  assert.equal(before.moves.length, 0);
+  assert.equal(before.fen, new Chess().fen());
+  assert.equal(before.pgn, new Chess().pgn());
+  const after = game.serialize(state);
+  after.moves[0]!.san = "tampered";
+  assert.equal(state.moves[0]?.san, "e4");
+  game.applyAction(state, "black", { type: "resign", payload: {} });
+  const resigned = game.serialize(state);
+  resigned.resignation!.playerId = "white";
+  assert.equal(state.resignation?.playerId, "black");
 });
 
 test("action envelope and chess payload keys are strictly validated", () => {

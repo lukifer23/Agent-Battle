@@ -33,6 +33,7 @@ interface RunningMatch {
 
 const CANCELLATION_HARD_GRACE_MS = 2500;
 const ACTIVE_STATUSES: MatchStatus[] = ["ready", "running", "paused", "interrupted"];
+const PRESENTATION_EVENTS = new Set(["agent.ready", "agent.thinking", "agent.started", "agent.response", "move.proposed", "turn.started", "agent.timeout"]);
 
 export interface CreateMatchRequest {
   gameId: string;
@@ -226,13 +227,12 @@ export class MatchController {
     this.runtime.set(match.id, state);
     this.records.unshift(match);
     try {
-      this.commit(match);
+      this.emit(match, "match.created", "Match created", { gameId: game.id, gameVersion: game.version });
     } catch (error) {
       this.records.shift();
       this.runtime.delete(match.id);
       throw new Error(`The new match could not be saved: ${error instanceof Error ? error.message : "storage failure"}. It was not added.`);
     }
-    this.emit(match, "match.created", "Match created", { gameId: game.id, gameVersion: game.version });
     return match;
   }
 
@@ -256,11 +256,13 @@ export class MatchController {
     match.currentPlayerId = undefined;
     const resuming = match.history.length > 0 || Boolean(match.pendingTurn);
     const state = this.runtime.get(id);
-    if (!this.persistCheckpoint(match, game, state)) {
+    try {
+      match.gameState = game.serialize(state);
+      this.emit(match, resuming ? "match.resumed" : "match.started", resuming ? "Match resumed" : "Match started");
+    } catch {
       this.runs.delete(id);
       throw this.storageFailure ?? new Error("Could not save the match start.");
     }
-    this.emit(match, resuming ? "match.resumed" : "match.started", resuming ? "Match resumed" : "Match started");
     running.done = this.run(id, game, running);
     void running.done.catch((error: unknown) => {
       const current = this.get(id);
@@ -346,21 +348,37 @@ export class MatchController {
   }
 
   private emit(match: MatchRecord, type: string, text: string, payload?: Record<string, unknown>, playerId?: string): void {
-    match.revision = (match.revision ?? 0) + 1;
-    const event: MatchEvent = {
-      at: new Date().toISOString(),
-      type,
-      text,
-      sequence: match.revision,
-      ...(playerId ? { playerId } : {}),
-      ...(payload ? { payload } : {}),
-    };
-    match.events.push(event);
-    if (match.events.length > 500) match.events.splice(0, match.events.length - 500);
-    match.updatedAt = event.at;
+    if (PRESENTATION_EVENTS.has(type)) {
+      const event: MatchEvent = { at: new Date().toISOString(), type, text, ...(playerId ? { playerId } : {}), ...(payload ? { payload } : {}) };
+      try { this.onChange(match, event); }
+      catch (error) { console.error("Could not publish a presentation event.", error); }
+      return;
+    }
+    this.emitBatch(match, [{ type, text, payload, playerId }]);
+  }
+
+  private emitBatch(match: MatchRecord, entries: Array<{ type: string; text: string; payload?: Record<string, unknown>; playerId?: string }>): void {
+    const events: MatchEvent[] = [];
+    for (const { type, text, payload, playerId } of entries) {
+      match.revision = (match.revision ?? 0) + 1;
+      const event: MatchEvent = {
+        at: new Date().toISOString(),
+        type,
+        text,
+        sequence: match.revision,
+        ...(playerId ? { playerId } : {}),
+        ...(payload ? { payload } : {}),
+      };
+      match.events.push(event);
+      events.push(event);
+      if (match.events.length > 500) match.events.splice(0, match.events.length - 500);
+      match.updatedAt = event.at;
+    }
     this.commit(match);
-    try { this.onChange(match, event); }
-    catch (error) { console.error("Could not publish a committed match event.", error); }
+    for (const event of events) {
+      try { this.onChange(match, event); }
+      catch (error) { console.error("Could not publish a committed match event.", error); }
+    }
   }
 
   private save(): void {
@@ -549,9 +567,12 @@ export class MatchController {
 
           feedback = validation.reason ?? "The action was invalid.";
           if (match.pendingTurn) match.pendingTurn.feedback = feedback;
-          if (!this.persistCheckpoint(match, game, state)) return;
-          this.emit(match, "move.rejected", `${seat.agent.name}: ${feedback}`, { turnId, attempt: attemptNumber, action: action ?? null, error: feedback }, playerId);
-          if (attemptNumber <= match.settings.maxRetries) this.emit(match, "turn.retry", "Returning the rejection reason and same authoritative position for one retry", { turnId, retry: attemptNumber }, playerId);
+          if (attemptNumber <= match.settings.maxRetries) {
+            this.emitBatch(match, [
+              { type: "move.rejected", text: `${seat.agent.name}: ${feedback}`, payload: { turnId, attempt: attemptNumber, action: action ?? null, error: feedback }, playerId },
+              { type: "turn.retry", text: "Returning the rejection reason and same authoritative position for one retry", payload: { turnId, retry: attemptNumber }, playerId },
+            ]);
+          }
         }
 
         if (running.control !== "continue") {
@@ -565,17 +586,26 @@ export class MatchController {
           match.history.push(record);
           match.pendingTurn = undefined;
           const winnerId = match.players.find((player) => player.id !== playerId)?.id;
-          this.emit(match, "move.rejected", `${seat.agent.name} exhausted its retry after: ${feedback ?? "no valid action"}`, { turnId, retryCount: attempts.length - 1 }, playerId);
           if (!winnerId) throw new Error("The game did not provide an opposing player for forfeiture.");
-          this.finish(match, game, state, game.winResult(winnerId, `${seat.label} forfeited after retry exhaustion: ${feedback ?? "invalid action"}`), "forfeit");
+          const result = game.winResult(winnerId, `${seat.label} forfeited after retry exhaustion: ${feedback ?? "invalid action"}`);
+          match.result = result;
+          match.status = "forfeit";
+          match.currentPlayerId = undefined;
+          match.error = undefined;
+          match.gameState = game.serialize(state, result);
+          this.emitBatch(match, [
+            { type: "move.rejected", text: `${seat.agent.name} exhausted its retry after: ${feedback ?? "no valid action"}`, payload: { turnId, retryCount: attempts.length - 1 }, playerId },
+            { type: "match.finished", text: `${result.notation} · ${result.reason}`, payload: { result: result.notation, kind: result.kind, winnerId: result.winnerId ?? null, reason: result.reason, status: "forfeit" } },
+          ]);
           return;
         }
 
-        const after = game.applyAction(state, playerId, selectedAction);
-        state = after;
-        this.runtime.set(id, state);
+        const nextState = game.applyAction(game.deserialize(game.serialize(state)), playerId, selectedAction);
         match.pendingTurn = undefined;
-        const afterSnapshot = game.serialize(state);
+        const terminalResult = game.isTerminal(nextState)
+          ? game.result(nextState) ?? { kind: "draw" as const, notation: "1/2-1/2", reason: "Game ended without a result." }
+          : undefined;
+        const afterSnapshot = game.serialize(nextState, terminalResult);
         const record = this.turnRecord(match, game, seat, turnId, observation, attempts, true);
         record.action = selectedAction;
         record.actionLabel = game.actionLabel(selectedAction);
@@ -584,22 +614,34 @@ export class MatchController {
         record.latencyMs = attempts.reduce((total, attempt) => total + (attempt.latencyMs ?? 0), 0);
         record.retryCount = Math.max(0, attempts.length - 1);
         match.history.push(record);
-        this.emit(match, "move.applied", `${seat.agent.name} played ${record.actionLabel}`, {
-          turnId, ply, action: selectedAction, actionLabel: record.actionLabel,
-          fenBefore, ...game.eventProjection(state),
-        }, playerId);
-        this.emit(match, "turn.completed", `${seat.agent.name} completed ply ${ply}`, {
-          turnId, turnIndex, ply, latencyMs: record.latencyMs, retryCount: record.retryCount,
-          toolCalls: attempts.reduce((sum, attempt) => sum + (attempt.toolCalls ?? 0), 0),
-          inputTokens: totalUsage(attempts, "inputTokens"), outputTokens: totalUsage(attempts, "outputTokens"),
-          record: projectTurn(record),
-        }, playerId);
-        if (!this.persistCheckpoint(match, game, state)) return;
-
-        if (game.isTerminal(state)) {
-          this.finish(match, game, state, game.result(state) ?? { kind: "draw", notation: "1/2-1/2", reason: "Game ended without a result." });
-          return;
+        match.currentPlayerId = game.currentPlayer(nextState) ?? undefined;
+        if (terminalResult) {
+          match.result = terminalResult;
+          match.status = "finished";
+          match.currentPlayerId = undefined;
+          match.error = undefined;
         }
+        match.gameState = afterSnapshot;
+        this.emitBatch(match, [
+          { type: "move.applied", text: `${seat.agent.name} played ${record.actionLabel}`, payload: {
+            turnId, ply, action: selectedAction, actionLabel: record.actionLabel,
+            fenBefore, nextPlayerId: match.currentPlayerId ?? null, ...game.eventProjection(nextState),
+          }, playerId },
+          { type: "turn.completed", text: `${seat.agent.name} completed ply ${ply}`, payload: {
+            turnId, turnIndex, ply, latencyMs: record.latencyMs, retryCount: record.retryCount,
+            toolCalls: attempts.reduce((sum, attempt) => sum + (attempt.toolCalls ?? 0), 0),
+            inputTokens: totalUsage(attempts, "inputTokens"), outputTokens: totalUsage(attempts, "outputTokens"),
+            record: projectTurn(record),
+          }, playerId },
+          ...(terminalResult ? [{ type: "match.finished", text: `${terminalResult.notation} · ${terminalResult.reason}`, payload: {
+            result: terminalResult.notation, kind: terminalResult.kind, winnerId: terminalResult.winnerId ?? null,
+            reason: terminalResult.reason, status: "finished",
+          } }] : []),
+        ]);
+        state = nextState;
+        this.runtime.set(id, state);
+
+        if (terminalResult) return;
       }
 
       if (running.control === "pause") {

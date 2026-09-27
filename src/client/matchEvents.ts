@@ -6,6 +6,18 @@ export const matchEventTypes = [
   "agent.response", "agent.timeout", "agent.error", "move.proposed", "move.rejected", "move.applied",
 ];
 
+/** Presentation events never advance a durable revision or replay after reconnect. */
+export function applyPresentationEvent(state: AppState, matchId: string, event: MatchEvent): AppState {
+  const append = (match: MatchRecord): MatchRecord => match.id === matchId
+    ? { ...match, events: [...match.events, event].slice(-500) }
+    : match;
+  return {
+    ...state,
+    activeMatch: state.activeMatch ? append(state.activeMatch) : null,
+    recentMatches: state.recentMatches.map(append),
+  };
+}
+
 const activeStatuses = ["ready", "running", "paused", "interrupted"];
 
 /**
@@ -33,11 +45,14 @@ export function applyMatchEvent(state: AppState, matchId: string, event: MatchEv
       const snapshot = match.gameState as ChessSnapshot;
       const move = payload.move as ChessMoveRecord | undefined;
       const fen = typeof payload.fen === "string" ? payload.fen : snapshot.fen;
+      const pgn = typeof payload.pgn === "string" ? payload.pgn : snapshot.pgn;
       updated.gameState = {
         ...snapshot,
         fen,
+        pgn,
         ...(move ? { moves: [...snapshot.moves.filter((item) => item.ply !== move.ply), move].sort((left, right) => left.ply - right.ply) } : {}),
       } satisfies ChessSnapshot;
+      updated.currentPlayerId = typeof payload.nextPlayerId === "string" ? payload.nextPlayerId : undefined;
     }
     if (event.type === "turn.completed") {
       const record = payload.record as TurnTelemetry | undefined;

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyMatchEvent } from "../src/client/matchEvents.js";
+import { applyMatchEvent, applyPresentationEvent } from "../src/client/matchEvents.js";
 import type { AppState, MatchEvent, MatchRecord } from "../src/shared.js";
 
 const initialFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -80,4 +80,12 @@ test("the reducer is idempotent and ignores stale revisions", () => {
   assert.equal(twice.recentMatches[0], once.recentMatches[0]);
   const stale = applyMatchEvent(once, "match-1", { ...event, text: "stale" }, 4);
   assert.equal(stale.recentMatches[0], once.recentMatches[0]);
+});
+
+test("presentation events leave the durable revision unchanged", () => {
+  const event: MatchEvent = { at: "2026-01-01T00:00:01.000Z", type: "agent.thinking", text: "Thinking" };
+  const updated = applyPresentationEvent(runningState(), "match-1", event);
+  assert.equal(updated.recentMatches[0]?.revision, 0);
+  assert.equal(updated.recentMatches[0]?.events[0], event);
+  assert.equal(updated.activeMatch?.events[0], event);
 });
