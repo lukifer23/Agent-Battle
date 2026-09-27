@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Chessboard } from "react-chessboard";
+import { ArenaRouter } from "./components/ArenaRouter.js";
 import { applyMatchEvent, applyPresentationEvent, matchEventTypes } from "./client/matchEvents.js";
 import { highlightSquares, positionSummary } from "./client/chessView.js";
 import { aggregateUsage } from "./domain/usage.js";
 import { ArrowUpRight, BoardMark, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, FlipVertical, RefreshCw, Trophy } from "./components/icons.js";
 import { competitorLabel } from "./shared.js";
-import type { AppState, ChessSnapshot, MatchEvent, MatchRecord, Provider } from "./shared.js";
+import type { AppState, ChessSnapshot, MatchEvent, PublicMatchDetail, Provider } from "./shared.js";
 
 const initialFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const pretty: Record<Provider, string> = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode" };
@@ -65,7 +65,7 @@ function coverageMark(coverage: "none" | "partial" | "full"): string {
   return coverage === "full" ? "" : coverage === "partial" ? "~" : " n/a";
 }
 
-function resultLine(match: MatchRecord): string {
+function resultLine(match: PublicMatchDetail): string {
   if (match.result) return `${match.result.notation} · ${match.result.reason}`;
   if (match.status === "error") return "The match stopped at this position. Review the error below.";
   if (match.status === "ready") return "Ready to start";
@@ -73,7 +73,7 @@ function resultLine(match: MatchRecord): string {
   return match.error ?? match.status;
 }
 
-function statusForPlayer(match: MatchRecord, playerId: string, isActiveTurn: boolean): string {
+function statusForPlayer(match: PublicMatchDetail, playerId: string, isActiveTurn: boolean): string {
   const latest = [...match.history].reverse().find((turn) => turn.playerId === playerId);
   if (match.status === "ready") return "READY";
   if (match.status === "running") return isActiveTurn ? "THINKING" : "WAITING";
@@ -102,6 +102,7 @@ function App() {
   const [whiteReasoning, setWhiteReasoning] = useState(preferences.whiteReasoning ?? "");
   const [blackReasoning, setBlackReasoning] = useState(preferences.blackReasoning ?? "");
   const [timeoutSeconds, setTimeoutSeconds] = useState(preferences.timeoutSeconds ?? 120);
+  const [gameId, setGameId] = useState("chess");
   const [maxPlies, setMaxPlies] = useState(150);
   const [maxRequests, setMaxRequests] = useState(200);
   const [maxWallMinutes, setMaxWallMinutes] = useState(30);
@@ -116,7 +117,8 @@ function App() {
   const [now, setNow] = useState(() => Date.now());
   const [connection, setConnection] = useState<"connecting" | "live" | "reconnecting" | "offline">("connecting");
   const [pendingCommand, setPendingCommand] = useState<null | "create" | "start" | "pause" | "stop">(null);
-  const [detailById, setDetailById] = useState<Map<string, MatchRecord>>(() => new Map());
+  const [detailById, setDetailById] = useState<Map<string, PublicMatchDetail>>(() => new Map());
+  const lastSnapshot = useRef<{ epoch?: string; version: number }>({ version: -1 });
   const revisions = useRef<Map<string, number>>(new Map());
   const moveListRef = useRef<HTMLDivElement | null>(null);
 
@@ -141,15 +143,21 @@ function App() {
   }, [selectedId]);
 
   const rememberSnapshot = useCallback((next: AppState) => {
+    if (next.epoch === lastSnapshot.current.epoch && (next.stateVersion ?? 0) < lastSnapshot.current.version) return false;
+    for (const match of next.recentMatches) {
+      if (next.epoch === lastSnapshot.current.epoch && (revisions.current.get(match.id) ?? 0) > match.revision) return false;
+    }
+    lastSnapshot.current = { epoch: next.epoch, version: next.stateVersion ?? 0 };
     const map = revisions.current;
     map.clear();
     for (const match of next.recentMatches) map.set(match.id, match.revision ?? 0);
     if (next.activeMatch) map.set(next.activeMatch.id, next.activeMatch.revision ?? 0);
+    return true;
   }, []);
 
   const refresh = useCallback(async () => {
     const next = await api<AppState>("/api/state");
-    rememberSnapshot(next);
+    if (!rememberSnapshot(next)) return;
     setState(next);
     setProvidersChecked(true);
     setSelectedId((current) => (current && (next.activeMatchId === current || next.recentMatches.some((match) => match.id === current)) ? current : next.activeMatchId ?? next.recentMatches[0]?.id ?? null));
@@ -161,7 +169,7 @@ function App() {
     source.addEventListener("snapshot", (event) => {
       try {
         const next = JSON.parse((event as MessageEvent<string>).data) as AppState;
-        rememberSnapshot(next);
+        if (!rememberSnapshot(next)) return;
         setState(next);
         setProvidersChecked(true);
         setConnection("live");
@@ -201,22 +209,22 @@ function App() {
     if (selectedId && state.activeMatch && selectedId === state.activeMatch.id) return state.activeMatch;
     const detail = selectedId ? detailById.get(selectedId) : undefined;
     if (detail) return detail;
-    return state.activeMatch ?? state.recentMatches.find((match) => match.id === selectedId) ?? state.recentMatches[0] ?? null;
+    return selectedId ? null : state.activeMatch;
   }, [state, selectedId, detailById]);
 
   useEffect(() => {
     if (!selectedId || !state) return;
     if (selectedId === state.activeMatchId) return;
-    if (detailById.has(selectedId)) return;
+    if ((detailById.get(selectedId)?.revision ?? -1) >= (state.recentMatches.find((match) => match.id === selectedId)?.revision ?? 0)) return;
     let cancelled = false;
-    void api<{ match: MatchRecord }>(`/api/matches/${selectedId}`).then((result) => {
+    void api<{ match: PublicMatchDetail }>(`/api/matches/${selectedId}`).then((result) => {
       if (!cancelled) setDetailById((current) => new Map(current).set(result.match.id, result.match));
     }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load the selected match."));
     return () => { cancelled = true; };
   }, [selectedId, state, detailById]);
 
-  const selectedSnapshot = selectedMatch?.gameState as ChessSnapshot | undefined;
-  const totalPlies = selectedSnapshot?.moves.length ?? 0;
+  const selectedSnapshot = selectedMatch?.gameId === "chess" ? selectedMatch.gameState as ChessSnapshot : undefined;
+  const totalPlies = selectedSnapshot?.moves?.length ?? 0;
   const viewingPly = replayPly ?? totalPlies;
   const displayedMove = viewingPly > 0 ? selectedSnapshot?.moves[viewingPly - 1] : undefined;
 
@@ -242,6 +250,7 @@ function App() {
   const standings = useMemo(() => {
     const rows = new Map<string, { name: string; wins: number; draws: number; losses: number; points: number }>();
     for (const match of state?.recentMatches ?? []) {
+      if (match.gameId !== (selectedMatch?.gameId ?? gameId)) continue;
       if (!match.result || !["finished", "forfeit"].includes(match.status)) continue;
       for (const player of match.players) {
         const side = player.id;
@@ -256,7 +265,7 @@ function App() {
       }
     }
     return [...rows.values()].sort((a, b) => b.points - a.points || b.wins - a.wins);
-  }, [state]);
+  }, [state, selectedMatch?.gameId, gameId]);
 
   const providers = state?.providers ?? [];
   const storageBlocked = state?.storage?.status === "write_failed";
@@ -275,19 +284,21 @@ function App() {
     return () => window.clearInterval(interval);
   }, [currentIsRunning, selectedMatch?.currentPlayerId]);
 
-  const currentTurnStart = selectedMatch?.events.filter((event) => event.type === "agent.started" && event.playerId === selectedMatch.currentPlayerId).at(-1)?.at;
+  const currentTurnStart = selectedMatch?.pendingTurn?.attempts.at(-1)?.startedAt ?? selectedMatch?.events.filter((event) => event.type === "agent.started" && event.playerId === selectedMatch.currentPlayerId).at(-1)?.at;
   const currentTurnElapsed = currentIsRunning && currentTurnStart ? Math.max(0, Math.floor((now - Date.parse(currentTurnStart)) / 1000)) : 0;
   const turnSecondsLeft = Math.max(0, (selectedMatch?.settings.turnTimeoutSeconds ?? timeoutSeconds) - currentTurnElapsed);
 
   const startMatch = async () => {
     setPendingCommand("start"); setError("");
     try {
-      const created = await api<{ match: MatchRecord }>("/api/matches", {
+      const created = await api<{ match: PublicMatchDetail }>("/api/matches", {
         method: "POST",
         body: JSON.stringify({
-          gameId: "chess",
-          white: { provider: whiteProvider, model: whiteModel, reasoning: whiteReasoning },
-          black: { provider: blackProvider, model: blackModel, reasoning: blackReasoning },
+          gameId,
+          players: {
+            [gameId === "chess" ? "white" : "player1"]: { provider: whiteProvider, model: whiteModel, reasoning: whiteReasoning },
+            [gameId === "chess" ? "black" : "player2"]: { provider: blackProvider, model: blackModel, reasoning: blackReasoning },
+          },
           turnTimeoutSeconds: timeoutSeconds,
           budgets: {
             maxPlies,
@@ -364,7 +375,7 @@ function App() {
 
   const matchTotals = useMemo(() => {
     if (!selectedMatch) return null;
-    return aggregateUsage(selectedMatch.history.flatMap((turn) => turn.attempts));
+    return aggregateUsage([...selectedMatch.history.flatMap((turn) => turn.attempts), ...(selectedMatch.pendingTurn?.attempts ?? [])]);
   }, [selectedMatch]);
 
   const shortId = selectedMatch ? selectedMatch.id.slice(0, 8) : "";
@@ -378,7 +389,7 @@ function App() {
   const downloadJson = async () => {
     if (!selectedMatch) return;
     try {
-      const result = await api<{ match: MatchRecord }>(`/api/matches/${selectedMatch.id}`);
+      const result = await api<{ match: PublicMatchDetail }>(`/api/matches/${selectedMatch.id}`);
       const blob = new Blob([JSON.stringify(result.match, null, 2)], { type: "application/json" });
       triggerDownload(blob, `agent-battle-${shortId}.json`);
     } catch (reason) {
@@ -425,19 +436,19 @@ function App() {
           <section className={`match-setup panel ${condenseSetup ? "is-condensed" : ""}`}>
             <div className="section-heading">
               <div><span className="eyebrow">01 / THE MATCH</span><h2>{condenseSetup ? "Match settings" : "Choose your players"}</h2></div>
-              <span className="setup-tag">{condenseSetup ? selectedMatch?.status.toUpperCase() : "CHESS · STANDARD"}</span>
+              <span className="setup-tag">{condenseSetup ? selectedMatch?.status.toUpperCase() : gameId.toUpperCase()}</span>
             </div>
             {condenseSetup ? <div className="active-setup-note">
               <span className="live-dot" />
               <span>{selectedMatch?.players.map((player) => competitorLabel(player.agent)).join(" vs ")}</span>
               <span className="active-setup-status">{selectedMatch?.result ? `${selectedMatch.result.notation} · ${selectedMatch.result.reason}` : selectedMatch?.status === "error" ? "Stopped · review match log" : selectedMatch?.currentPlayerId ? `${selectedMatch.players.find((player) => player.id === selectedMatch.currentPlayerId)?.label} to move` : "Resume when ready"}</span>
-              {terminalMatchSelected && <button className="active-setup-new" onClick={() => setNewMatchOpen(true)}>NEW MATCH <ArrowUpRight className="inline-icon" /></button>}
+              {terminalMatchSelected && <button className="active-setup-new" onClick={() => { setGameId(selectedMatch!.gameId); const [a, b] = selectedMatch!.players; setWhiteProvider(a.agent.provider); setWhiteModel(a.agent.model); setWhiteReasoning(a.agent.reasoning ?? ""); setBlackProvider(b.agent.provider); setBlackModel(b.agent.model); setBlackReasoning(b.agent.reasoning ?? ""); setNewMatchOpen(true); }}>PLAY AGAIN <ArrowUpRight className="inline-icon" /></button>}
             </div> : <>
-              <div className="players-grid">
-                <PlayerPicker color="white" provider={whiteProvider} model={whiteModel} reasoning={whiteReasoning} providers={providers} loading={!providersChecked}
+              <label className="field-label">GAME<select aria-label="Game" value={gameId} onChange={(event) => setGameId(event.target.value)}><option value="chess">Chess</option><option value="hangman">Hangman</option></select></label><div className="players-grid">
+                <PlayerPicker title={gameId === "chess" ? "WHITE PLAYER" : "PLAYER 1"} color="white" provider={whiteProvider} model={whiteModel} reasoning={whiteReasoning} providers={providers} loading={!providersChecked}
                   onProvider={chooseWhiteProvider} onModel={setWhiteModel} onReasoning={setWhiteReasoning} />
                 <div className="versus"><span>VS</span></div>
-                <PlayerPicker color="black" provider={blackProvider} model={blackModel} reasoning={blackReasoning} providers={providers} loading={!providersChecked}
+                <PlayerPicker title={gameId === "chess" ? "BLACK PLAYER" : "PLAYER 2"} color="black" provider={blackProvider} model={blackModel} reasoning={blackReasoning} providers={providers} loading={!providersChecked}
                   onProvider={chooseBlackProvider} onModel={setBlackModel} onReasoning={setBlackReasoning} />
               </div>
               <div className="setup-footer">
@@ -475,7 +486,7 @@ function App() {
             {selectedMatch && <div className="player-strip">
               {selectedMatch.players.map((player) => {
                 const playerTurns = selectedMatch.history.filter((turn) => turn.playerId === player.id);
-                const attempts = playerTurns.flatMap((turn) => turn.attempts);
+                const attempts = [...playerTurns.flatMap((turn) => turn.attempts), ...(selectedMatch.pendingTurn?.playerId === player.id ? selectedMatch.pendingTurn.attempts : [])];
                 const usage = aggregateUsage(attempts);
                 const latest = playerTurns.at(-1);
                 const active = selectedMatch.currentPlayerId === player.id;
@@ -483,7 +494,7 @@ function App() {
                 return <div className={`player-strip-card ${player.id === "white" ? "strip-white" : "strip-black"}`} key={player.id}>
                   <span className={`strip-piece strip-piece-${player.id}`} aria-hidden="true" />
                   <span className="strip-info"><b>{player.label} · {competitorLabel(player.agent)}</b><small>{statusForPlayer(selectedMatch, player.id, active)}</small></span>
-                  <span className="strip-metric"><b>{latest?.latencyMs != null ? `${(latest.latencyMs / 1000).toFixed(1)}s` : "—"}</b><small>LAST MOVE</small><small>{usage.requests} req · {totalTokens || usage.coverage === "none" ? `${totalTokens} tok${coverageMark(usage.coverage)}` : "tokens n/a"} · {usage.costUsd || usage.coverage === "none" ? `$${usage.costUsd.toFixed(4)}` : "cost n/a"}</small></span>
+                  <span className="strip-metric"><b>{latest?.latencyMs != null ? `${(latest.latencyMs / 1000).toFixed(1)}s` : "—"}</b><small>LAST MOVE</small><small>{usage.requests} req · {totalTokens || usage.coverage === "none" ? `${totalTokens} tok${coverageMark(usage.coverage)}` : "tokens n/a"} · {attempts.some((attempt) => attempt.usage.costUsd !== null) ? `$${usage.costUsd.toFixed(4)} reported` : "cost unknown"}</small></span>
                   {active && <span className="strip-live" />}
                 </div>;
               })}
@@ -491,31 +502,12 @@ function App() {
             {selectedMatch?.status === "error" && selectedMatch.error && <div className="error-banner match-error" role="alert">
               <strong>Agent request failed</strong><p>{selectedMatch.error}</p>
             </div>}
-            <div className="board-frame">
-              <div className="board-rank rank-left"><span>8</span><span>7</span><span>6</span><span>5</span><span>4</span><span>3</span><span>2</span><span>1</span></div>
-              <div className="chessboard-wrap">
-                <Chessboard options={{
-                  position: boardFen,
-                  boardOrientation,
-                  allowDragging: false,
-                  showAnimations: true,
-                  animationDurationInMs: 240,
-                  boardStyle: { borderRadius: "3px", width: "100%" },
-                  lightSquareStyle: { backgroundColor: "#d8cfb7" },
-                  darkSquareStyle: { backgroundColor: "#526c61" },
-                  squareStyles,
-                  showNotation: false,
-                }} />
-              </div>
-              <div className="board-rank rank-right"><span>8</span><span>7</span><span>6</span><span>5</span><span>4</span><span>3</span><span>2</span><span>1</span></div>
-              <div className="board-files"><span>a</span><span>b</span><span>c</span><span>d</span><span>e</span><span>f</span><span>g</span><span>h</span></div>
-            </div>
-            <p className="board-summary" aria-live="polite">{selectedMatch ? positionSummary(boardFen, displayedMove?.san) : "Starting position. Select or start a match."}</p>
+            <ArenaRouter match={selectedMatch} chess={{ boardFen, boardOrientation, squareStyles, summary: selectedMatch ? positionSummary(boardFen, displayedMove?.san) : "Starting position. Select or start a match." }} />
             <div className="board-caption">
               <span>{selectedMatch ? (replayPly !== null ? `Reviewing ply ${replayPly} of ${totalPlies}` : resultLine(selectedMatch)) : "The board is ready for its first match."}</span>
               {selectedMatch && (
                 <div className="match-actions">
-                  <button className="quiet-button" onClick={() => setBoardOrientation((value) => value === "white" ? "black" : "white")} aria-label="Flip board orientation"><FlipVertical className="button-icon" /> FLIP</button>
+                  {selectedMatch.gameId === "chess" && <button className="quiet-button" onClick={() => setBoardOrientation((value) => value === "white" ? "black" : "white")} aria-label="Flip board orientation"><FlipVertical className="button-icon" /> FLIP</button>}
                   {currentIsRunning && <button className="quiet-button" onClick={() => void pauseMatch()} disabled={pendingCommand !== null}>{pendingCommand === "pause" ? "PAUSING…" : "PAUSE"}</button>}
                   {canStart && <button className="primary-button compact" onClick={() => void resumeMatch()} disabled={pendingCommand !== null}>{selectedMatch.status === "ready" ? "START THIS MATCH" : pendingCommand === "start" ? "RESUMING…" : "RESUME MATCH"}</button>}
                   {["ready", "running", "paused", "interrupted"].includes(selectedMatch.status) && <button className="stop-button" onClick={() => void stopMatch()} disabled={pendingCommand !== null}>{pendingCommand === "stop" ? "STOPPING…" : "STOP"}</button>}
@@ -524,8 +516,8 @@ function App() {
             </div>
             {selectedMatch?.result && replayPly !== null && <div className="replay-note">Viewing a historical position. Final result: {selectedMatch.result.notation} · {selectedMatch.result.reason}.</div>}
             {selectedMatch && <div className="export-bar">
-              <span className="export-totals">{matchTotals ? `MATCH ${matchTotals.requests} req · ${matchTotals.inputTokens + matchTotals.outputTokens} tok${coverageMark(matchTotals.coverage)} · $${matchTotals.costUsd.toFixed(4)}` : ""}</span>
-              <button className="quiet-button" onClick={() => void copyText(boardFen, "FEN")}><Copy className="button-icon" /> FEN</button>
+              <span className="export-totals">{matchTotals ? `MATCH ${matchTotals.requests} req · ${matchTotals.inputTokens + matchTotals.outputTokens} tok${coverageMark(matchTotals.coverage)} · ${matchTotals.coverage === "none" ? "usage unknown" : `$${matchTotals.costUsd.toFixed(4)} reported`}` : ""}</span>
+              {selectedMatch.gameId === "chess" && <button className="quiet-button" onClick={() => void copyText(boardFen, "FEN")}><Copy className="button-icon" /> FEN</button>}
               <button className="quiet-button" onClick={downloadPgn} disabled={!totalPlies}><Download className="button-icon" /> PGN</button>
               <button className="quiet-button" onClick={() => void downloadJson()}><Download className="button-icon" /> JSON</button>
             </div>}
@@ -563,7 +555,7 @@ function App() {
                 <span className="history-date">{new Date(match.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
                 <span className="history-players"><b>{competitorLabel(match.players[0].agent)}</b><small>vs</small><b>{competitorLabel(match.players[1].agent)}</b></span>
                 <span className={`history-result ${match.result ? "" : "muted"}`}>{match.result?.notation ?? match.status}</span>
-                <span className="history-moves">{((match.gameState as ChessSnapshot)?.moves?.length ?? 0)} ply</span>
+                <span className="history-moves">{match.actionCount} actions · {match.gameId}</span>
               </button>)}
             </div>
           </section>
@@ -571,7 +563,7 @@ function App() {
 
         <aside className="side-column">
           <section className="scoreboard panel">
-            <div className="section-heading"><div><span className="eyebrow">HALL OF FAME</span><h2>Scoreboard</h2></div><Trophy className="trophy" /></div>
+            <div className="section-heading"><div><span className="eyebrow">HALL OF FAME</span><h2>{selectedMatch?.gameId ?? gameId} scoreboard</h2></div><Trophy className="trophy" /></div>
             {standings.length === 0 ? <div className="score-empty">The leaderboard starts after game one.</div> : <table className="score-table">
               <caption className="sr-only">Scoreboard by competitor across recent matches</caption>
               <thead><tr><th scope="col">AGENT</th><th scope="col">W</th><th scope="col">D</th><th scope="col">L</th><th scope="col">PTS</th></tr></thead>
@@ -593,7 +585,7 @@ function App() {
                 <button className="quiet-button" onClick={() => void downloadJson()} disabled={!selectedMatch}><Download className="button-icon" /> JSON</button>
               </div>
             </div>
-            {!selectedSnapshot?.moves.length ? <div className="score-empty">Moves will appear here as the agents play.</div> : <div className="move-list" ref={moveListRef}>
+            {!selectedSnapshot?.moves?.length ? <div className="score-empty">Moves will appear here as the agents play.</div> : <div className="move-list" ref={moveListRef}>
               {Array.from({ length: Math.ceil(selectedSnapshot.moves.length / 2) }, (_, index) => {
                 const white = selectedSnapshot.moves[index * 2];
                 const black = selectedSnapshot.moves[index * 2 + 1];
@@ -624,12 +616,13 @@ function App() {
           <div className="footnote"><BoardMark className="footnote-mark" /> THE AGENTS PLAY. THE ENGINE KEEPS SCORE.</div>
         </aside>
       </section>
-      <footer className="page-footer"><span>AGENT BATTLE <b>·</b> v{__APP_VERSION__}</span><span>LOCAL FIRST · STANDARD CHESS</span></footer>
+      <footer className="page-footer"><span>AGENT BATTLE <b>·</b> v{__APP_VERSION__}</span><span>LOCAL FIRST · CHESS + HANGMAN</span></footer>
     </main>
   );
 }
 
 function PlayerPicker(props: {
+  title?: string;
   color: "white" | "black";
   provider: Provider;
   model: string;
@@ -640,7 +633,7 @@ function PlayerPicker(props: {
   onModel: (model: string) => void;
   onReasoning: (reasoning: string) => void;
 }) {
-  const cardTitle = props.color === "white" ? "WHITE PLAYER" : "BLACK PLAYER";
+  const cardTitle = props.title ?? (props.color === "white" ? "WHITE PLAYER" : "BLACK PLAYER");
   const providerInfo = props.providers.find((item) => item.provider === props.provider);
   const options = reasoningOptions[props.provider];
   return <div className={`player-card player-${props.color}`}>

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { applyMatchEvent, applyPresentationEvent } from "../src/client/matchEvents.js";
+import { projectRecord, summaryOf } from "../src/domain/projection.js";
 import type { AppState, MatchEvent, MatchRecord } from "../src/shared.js";
 
 const initialFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -25,7 +26,7 @@ function runningState(): AppState {
     events: [],
     currentPlayerId: "white",
   };
-  return { revision: 0, providers: [], activeMatchId: match.id, activeMatch: match, recentMatches: [match] };
+  return { revision: 0, providers: [], activeMatchId: match.id, activeMatch: projectRecord(match), recentMatches: [summaryOf(match)] };
 }
 
 test("move events update the spectator board and replay without replacing the match snapshot", () => {
@@ -86,6 +87,6 @@ test("presentation events leave the durable revision unchanged", () => {
   const event: MatchEvent = { at: "2026-01-01T00:00:01.000Z", type: "agent.thinking", text: "Thinking" };
   const updated = applyPresentationEvent(runningState(), "match-1", event);
   assert.equal(updated.recentMatches[0]?.revision, 0);
-  assert.equal(updated.recentMatches[0]?.events[0], event);
+  assert.equal("events" in updated.recentMatches[0], false);
   assert.equal(updated.activeMatch?.events[0], event);
 });

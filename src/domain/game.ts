@@ -1,4 +1,5 @@
-import type { GameAction, GameObservation, MatchResult, PlayerSeat } from "../shared.js";
+import { isDeepStrictEqual } from "node:util";
+import type { GameAction, GameObservation, MatchResult, MatchRecord, PlayerSeat } from "../shared.js";
 
 export interface ObservationContext {
   matchId: string;
@@ -36,6 +37,10 @@ export interface GameDefinition<State> {
   winResult(winnerId: string, reason: string): MatchResult;
   serialize(state: State, result?: MatchResult): unknown;
   deserialize(saved: unknown): State;
+  publicState(state: State): unknown;
+  publicReplay?(state: State): unknown[];
+  publicAction?(action: GameAction): GameAction;
+  forfeit?(state: State, playerId: string): State;
   actionLabel(action: GameAction): string;
   eventProjection(state: State): Record<string, unknown>;
 }
@@ -53,6 +58,32 @@ export class GameRegistry {
     const game = this.games.get(gameId);
     if (!game) throw new Error(`Game "${gameId}" is not registered.`);
     return game;
+  }
+
+  validateRecord(record: MatchRecord): string | undefined {
+    try {
+      const game = this.get(record.gameId);
+      if (game.version !== record.gameVersion) return "Unsupported game version";
+      if (record.players.map((p) => p.id).join() !== game.playerIds.join()) return "Invalid player roles";
+      const state = game.deserialize(record.gameState);
+      const invocationIds = [...record.history.flatMap((turn) => turn.attempts), ...(record.pendingTurn?.attempts ?? [])].flatMap((a) => a.invocationId ? [a.invocationId] : []);
+      if (new Set(invocationIds).size !== invocationIds.length) return "Duplicate invocation identity";
+
+      if (record.status === "finished") {
+        const result = game.result(state);
+        if (!result || !isDeepStrictEqual(result, record.result)) return "Finished result differs from replay";
+      }
+      if (record.status === "forfeit") {
+        const loser = record.history.at(-1);
+        if (game.forfeit || !loser || loser.valid || !game.playerIds.includes(loser.playerId)
+          || loser.attempts.filter((a) => a.status === "invalid" || a.status === "timeout").length < record.settings.maxRetries + 1
+          || loser.attempts.some((a) => a.status === "valid")) return "Invalid forfeit evidence";
+        const winner = game.playerIds.find((id) => id !== loser.playerId)!;
+        const result = game.winResult(winner, record.result?.reason ?? "");
+        if (!isDeepStrictEqual(result, record.result)) return "Invalid forfeit result";
+      }
+    } catch { return "Saved game failed authoritative validation"; }
+    return undefined;
   }
 
   list(): Array<{ id: string; version: string; playerIds: string[] }> {

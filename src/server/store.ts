@@ -2,10 +2,10 @@ import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, re
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { MatchRecord } from "../shared.js";
-import { ChessGame } from "../games/chess/ChessGame.js";
+import { defaultGames } from "../domain/defaultGames.js";
 import { validateMatchRecord, validateStoreEnvelope } from "./schema.js";
 
-export const STORE_VERSION = 3;
+export const STORE_VERSION = 4;
 
 export interface LoadResult {
   matches: MatchRecord[];
@@ -24,30 +24,12 @@ function isProcessAlive(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
-const chess = new ChessGame();
-
-function validateSavedGame(record: MatchRecord): string | undefined {
-  if (record.gameId !== chess.id || record.gameVersion !== chess.version) return "game contract is unsupported";
-  try {
-    const state = chess.deserialize(record.gameState);
-    if (record.status === "finished") {
-      const result = chess.isTerminal(state) ? chess.result(state) : undefined;
-      if (!result || !record.result || result.kind !== record.result.kind || result.notation !== record.result.notation || (result.winnerId ?? null) !== (record.result.winnerId ?? null)) {
-        return "finished result does not match the replayed game";
-      }
-    }
-  } catch (error) {
-    return `saved game cannot be replayed: ${error instanceof Error ? error.message : "invalid state"}`;
-  }
-  return undefined;
-}
-
 export class MatchStore {
   private readonly lockPath: string;
   private ownsLock = false;
   private lockToken?: string;
 
-  constructor(readonly storePath: string) {
+  constructor(readonly storePath: string, private readonly validateGame: (record: MatchRecord) => string | undefined = (record) => defaultGames.validateRecord(record)) {
     this.lockPath = `${storePath}.lock`;
   }
 
@@ -121,7 +103,7 @@ export class MatchStore {
     const seenIds = new Set<string>();
     for (const record of envelope.records) {
       const result = validateMatchRecord(record);
-      const gameError = result.value ? validateSavedGame(result.value) : undefined;
+      const gameError = result.value ? this.validateGame(result.value) : undefined;
       if (result.value && !gameError && !seenIds.has(result.value.id)) {
         seenIds.add(result.value.id);
         matches.push(result.value);

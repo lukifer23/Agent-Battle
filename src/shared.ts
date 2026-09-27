@@ -90,11 +90,13 @@ export interface AgentUsage {
 }
 
 export interface AgentAttempt {
+  invocationId?: string;
+  deadlineAt?: string;
   attempt: number;
   startedAt: string;
   completedAt?: string;
   latencyMs?: number;
-  status: "valid" | "invalid" | "timeout" | "error" | "cancelled";
+  status: "started" | "interrupted" | "valid" | "invalid" | "timeout" | "error" | "cancelled";
   phase?: "initialization" | "provider" | "protocol" | "controller" | "storage";
   action?: GameAction;
   error?: string;
@@ -184,6 +186,31 @@ export interface MatchRecord {
   pendingTurn?: PendingTurn;
 }
 
+/** Allowlisted list DTO. Canonical state and diagnostics never belong here. */
+export interface MatchSummary {
+  id: string;
+  gameId: string;
+  gameVersion: string;
+  protocolVersion: string;
+  createdAt: string;
+  updatedAt: string;
+  status: MatchStatus;
+  players: [PlayerSeat, PlayerSeat];
+  revision: number;
+  actionCount: number;
+  result?: MatchResult;
+}
+export interface PublicMatchDetail extends MatchSummary {
+  replay?: unknown[];
+  gameState: unknown;
+  settings: MatchRecord["settings"];
+  history: TurnTelemetry[];
+  events: MatchEvent[];
+  currentPlayerId?: string;
+  error?: string;
+  pendingTurn?: PendingTurn;
+}
+
 export interface ProviderInfo {
   provider: Provider;
   installed: boolean;
@@ -193,12 +220,14 @@ export interface ProviderInfo {
 }
 
 export interface AppState {
+  epoch?: string;
+  stateVersion?: number;
   /** Monotonic snapshot revision: the maximum record revision included. */
   revision: number;
   providers: ProviderInfo[];
   activeMatchId: string | null;
-  activeMatch: MatchRecord | null;
-  recentMatches: MatchRecord[];
+  activeMatch: PublicMatchDetail | null;
+  recentMatches: MatchSummary[];
   storage?: { status: "healthy" | "quarantined" | "write_failed"; message: string };
 }
 

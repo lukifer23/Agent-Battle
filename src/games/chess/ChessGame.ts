@@ -186,6 +186,8 @@ export class ChessGame implements GameDefinition<ChessRuntimeState> {
     return { fen: state.chess.fen(), pgn: state.chess.pgn(), moves: state.moves.map((move) => ({ ...move })), ...(state.resignation ? { resignation: { ...state.resignation } } : {}) };
   }
 
+  publicState(state: ChessRuntimeState): ChessSnapshot { return this.serialize(state); }
+
   eventProjection(state: ChessRuntimeState): Record<string, unknown> {
     const latestMove = state.moves.at(-1);
     return {

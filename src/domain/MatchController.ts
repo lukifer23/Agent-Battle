@@ -4,7 +4,7 @@ import type { AgentAdapter, AgentRegistry } from "./agent.js";
 import { AgentExecutionError, AgentProtocolError } from "./agent.js";
 import type { ActionValidation, GameDefinition, GameRegistry } from "./game.js";
 import { buildSnapshot } from "./snapshot.js";
-import { projectTurn } from "./projection.js";
+import { projectTurn, projectEvent } from "./projection.js";
 import { matchReportedCost, matchRequests } from "./usage.js";
 import type {
   AgentAttempt,
@@ -57,6 +57,9 @@ export class MatchController {
   private creatingMatch = false;
   private readonly durableRecords = new Map<string, MatchRecord>();
   private storageFailure?: Error;
+  private recoveryCandidate?: MatchRecord;
+  private readonly epoch = randomUUID();
+  private stateVersion = 0;
 
   constructor(
     private readonly games: GameRegistry,
@@ -82,6 +85,9 @@ export class MatchController {
           if (!matches) throw new Error("Saved result does not match the replayed game position.");
         }
         if (match.status === "running") {
+          for (const attempt of match.pendingTurn?.attempts ?? []) {
+            if (attempt.status === "started") { attempt.status = "interrupted"; attempt.phase = "controller"; }
+          }
           match.status = "interrupted";
           match.currentPlayerId = undefined;
           match.error = "The app restarted during this match. Its saved game state is intact; resume to ask the current player again.";
@@ -97,6 +103,8 @@ export class MatchController {
     if (migrated) this.save();
   }
 
+  getRecoveryCandidate(): MatchRecord | undefined { return this.recoveryCandidate ? structuredClone(this.recoveryCandidate) : undefined; }
+
   getStorageError(): string | null { return this.storageFailure?.message ?? null; }
 
   private assertWritable(): void {
@@ -107,8 +115,10 @@ export class MatchController {
     this.assertWritable();
     try {
       this.onChange(match);
-      for (const record of this.records) this.durableRecords.set(record.id, structuredClone(record));
+      this.durableRecords.set(match.id, structuredClone(match));
+      this.stateVersion++;
     } catch (error) {
+      this.recoveryCandidate = structuredClone(match);
       const message = error instanceof Error ? error.message : "storage failure";
       this.storageFailure = new Error(`Could not save match state: ${message}. The last saved position needs recovery.`);
       const durable = this.durableRecords.get(match.id);
@@ -137,7 +147,8 @@ export class MatchController {
   }
 
   async snapshot(): Promise<AppState> {
-    return buildSnapshot(this.records, await this.providers());
+    const providers = await this.providers();
+    return { ...buildSnapshot(this.records, providers), epoch: this.epoch, stateVersion: this.stateVersion };
   }
 
   async create(request: CreateMatchRequest): Promise<MatchRecord> {
@@ -153,6 +164,7 @@ export class MatchController {
 
   private async createMatch(request: CreateMatchRequest): Promise<MatchRecord> {
     const game = this.games.get(request.gameId);
+    if (Object.keys(request.players).sort().join() !== [...game.playerIds].sort().join()) throw new Error("Player roles do not match the game.");
     if (game.playerIds.length !== 2) throw new Error("The current match controller requires exactly two players.");
     if (!Number.isInteger(request.turnTimeoutSeconds) || request.turnTimeoutSeconds < 30 || request.turnTimeoutSeconds > 600) {
       throw new Error("Move timeout must be between 30 and 600 seconds.");
@@ -350,7 +362,7 @@ export class MatchController {
   private emit(match: MatchRecord, type: string, text: string, payload?: Record<string, unknown>, playerId?: string): void {
     if (PRESENTATION_EVENTS.has(type)) {
       const event: MatchEvent = { at: new Date().toISOString(), type, text, ...(playerId ? { playerId } : {}), ...(payload ? { payload } : {}) };
-      try { this.onChange(match, event); }
+      try { this.onChange(match, projectEvent(match, event, this.games)); }
       catch (error) { console.error("Could not publish a presentation event.", error); }
       return;
     }
@@ -369,14 +381,15 @@ export class MatchController {
         ...(playerId ? { playerId } : {}),
         ...(payload ? { payload } : {}),
       };
-      match.events.push(event);
-      events.push(event);
+      const safeEvent = projectEvent(match, event, this.games);
+      match.events.push(safeEvent);
+      events.push(safeEvent);
       if (match.events.length > 500) match.events.splice(0, match.events.length - 500);
       match.updatedAt = event.at;
     }
     this.commit(match);
     for (const event of events) {
-      try { this.onChange(match, event); }
+      try { this.onChange(match, projectEvent(match, event, this.games)); }
       catch (error) { console.error("Could not publish a committed match event.", error); }
     }
   }
@@ -410,6 +423,8 @@ export class MatchController {
           await adapter.initialize();
         } catch (error) {
           const message = error instanceof Error ? error.message : "The agent could not initialize.";
+          const retryBudget = this.budgetStopReason(match, game, state);
+          if (retryBudget) { this.budgetStop(match, retryBudget); return; }
           const startedAt = new Date().toISOString();
           const initializationAttempt = this.attempt(1, startedAt, "error", { error: message, phase: "initialization" });
           match.pendingTurn = {
@@ -476,7 +491,14 @@ export class MatchController {
 
         for (let attemptNumber = resumeAttempt; attemptNumber <= match.settings.maxRetries + 1; attemptNumber += 1) {
           if (running.control !== "continue") break;
+          const retryBudget = this.budgetStopReason(match, game, state);
+          if (retryBudget) { this.budgetStop(match, retryBudget); return; }
           const startedAt = new Date().toISOString();
+          const invocationId = randomUUID();
+          const reservation: AgentAttempt = { attempt: attemptNumber, invocationId, startedAt, deadlineAt: new Date(Date.parse(startedAt) + observation.clock.turnTimeoutMs).toISOString(), status: "started", phase: "provider", toolCalls: null, usage: { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" } };
+          attempts.push(reservation);
+          if (!this.persistCheckpoint(match, game, state)) return;
+          const finishAttempt = (completed: AgentAttempt) => Object.assign(reservation, completed, { invocationId, deadlineAt: reservation.deadlineAt });
           this.emit(match, "agent.started", `${seat.agent.name} request ${attemptNumber}`, { turnId, attempt: attemptNumber }, playerId);
           let reply: Awaited<ReturnType<typeof adapter.act>> | undefined;
           let failure: unknown;
@@ -492,7 +514,7 @@ export class MatchController {
           }
 
           if (running.control !== "continue") {
-            attempts.push(this.attempt(attemptNumber, startedAt, "cancelled", {
+            finishAttempt(this.attempt(attemptNumber, startedAt, "cancelled", {
               phase: "controller",
               ...(failure instanceof AgentExecutionError ? { error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs } : {}),
               ...(reply ? { latencyMs: reply.latencyMs, responseExcerpt: reply.responseExcerpt, stderrExcerpt: reply.stderrExcerpt, toolCalls: reply.toolCalls, usage: reply.usage } : {}),
@@ -501,7 +523,7 @@ export class MatchController {
           }
 
           if (failure instanceof AgentExecutionError && !failure.timedOut) {
-            attempts.push(this.attempt(attemptNumber, startedAt, "error", { phase: "provider", error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
+            finishAttempt(this.attempt(attemptNumber, startedAt, "error", { phase: "provider", error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
             const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
             match.history.push(record);
             match.pendingTurn = undefined;
@@ -520,7 +542,7 @@ export class MatchController {
             this.emit(match, "agent.response", `${seat.agent.name} returned malformed action data`, {
               turnId, attempt: attemptNumber, status: "malformed", responseLength: failure.responseExcerpt.length,
             }, playerId);
-            attempts.push(this.attempt(attemptNumber, startedAt, "invalid", {
+            finishAttempt(this.attempt(attemptNumber, startedAt, "invalid", {
               phase: "protocol", error: failure.message, responseExcerpt: failure.responseExcerpt,
               latencyMs: failure.latencyMs, stderrExcerpt: failure.stderrExcerpt,
               toolCalls: failure.toolCalls, usage: failure.usage,
@@ -528,7 +550,7 @@ export class MatchController {
           } else if (failure instanceof AgentExecutionError && failure.timedOut) {
             validation = { valid: false, reason: failure.message };
             this.emit(match, "agent.response", `${seat.agent.name} request timed out`, { turnId, attempt: attemptNumber, status: "timeout" }, playerId);
-            attempts.push(this.attempt(attemptNumber, startedAt, "timeout", { phase: "provider", error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
+            finishAttempt(this.attempt(attemptNumber, startedAt, "timeout", { phase: "provider", error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
             this.emit(match, "agent.timeout", `${seat.agent.name} exceeded its move timeout`, { turnId, attempt: attemptNumber, timeoutMs: observation.clock.turnTimeoutMs }, playerId);
           } else if (reply && action) {
             this.emit(match, "agent.response", `${seat.agent.name} returned a structured action`, {
@@ -539,7 +561,7 @@ export class MatchController {
             validation = reply.toolCalls && reply.toolCalls > 0
               ? { valid: false, reason: `Agent made ${reply.toolCalls} external tool call(s); this arena accepts a structured action response only.` }
               : game.validateAction(state, playerId, action);
-            attempts.push(this.attempt(attemptNumber, startedAt, validation.valid ? "valid" : "invalid", {
+            finishAttempt(this.attempt(attemptNumber, startedAt, validation.valid ? "valid" : "invalid", {
               completedAt: new Date().toISOString(),
               latencyMs: reply.latencyMs,
               action,
@@ -550,7 +572,7 @@ export class MatchController {
               usage: reply.usage,
             }));
           } else {
-            attempts.push(this.attempt(attemptNumber, startedAt, "error", { phase: "controller", error: failure instanceof Error ? failure.message : "Unknown agent failure." }));
+            finishAttempt(this.attempt(attemptNumber, startedAt, "error", { phase: "controller", error: failure instanceof Error ? failure.message : "Unknown agent failure." }));
             match.history.push(this.turnRecord(match, game, seat, turnId, observation, attempts, false));
             match.pendingTurn = undefined;
             match.status = "error";
@@ -577,7 +599,7 @@ export class MatchController {
 
         if (running.control !== "continue") {
           if (match.pendingTurn) match.pendingTurn.feedback = feedback;
-          this.persistCheckpoint(match, game, state);
+          if (!this.persistCheckpoint(match, game, state)) return;
           break;
         }
 
@@ -585,6 +607,19 @@ export class MatchController {
           const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
           match.history.push(record);
           match.pendingTurn = undefined;
+          if (game.forfeit) {
+            const nextState = game.forfeit(game.deserialize(game.serialize(state)), playerId);
+            const result = game.result(nextState);
+            match.gameState = game.serialize(nextState);
+            match.currentPlayerId = game.currentPlayer(nextState) ?? undefined;
+            if (result) { match.result = result; match.status = "finished"; }
+            this.emitBatch(match, [{ type: "lane.forfeit", text: "Lane forfeited after retry exhaustion", playerId, payload: game.eventProjection(nextState) },
+              ...(result ? [{ type: "match.finished", text: result.reason, payload: { result: result.notation, kind: result.kind, winnerId: result.winnerId, reason: result.reason } }] : [])]);
+            state = nextState;
+            this.runtime.set(id, state);
+            if (result) return;
+            continue;
+          }
           const winnerId = match.players.find((player) => player.id !== playerId)?.id;
           if (!winnerId) throw new Error("The game did not provide an opposing player for forfeiture.");
           const result = game.winResult(winnerId, `${seat.label} forfeited after retry exhaustion: ${feedback ?? "invalid action"}`);
@@ -666,6 +701,7 @@ export class MatchController {
       this.emit(match, "agent.error", match.error);
       this.persistCheckpoint(match, game, state);
     } finally {
+      if (!ACTIVE_STATUSES.includes(match.status)) this.runtime.delete(id);
       await Promise.all([...running.agents.values()].map((agent) => agent.shutdown()));
       if (this.runs.get(id) === running) this.runs.delete(id);
     }

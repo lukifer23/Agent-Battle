@@ -1,15 +1,13 @@
 import { createServer } from "node:http";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { PROVIDERS, type MatchRecord, type PlayerConfig, type Provider } from "../shared.js";
 import { AgentRegistry } from "../domain/agent.js";
 import { MatchController } from "../domain/MatchController.js";
-import { GameRegistry } from "../domain/game.js";
-import { buildSnapshot } from "../domain/snapshot.js";
-import { summaryOf } from "../domain/projection.js";
-import { ChessGame } from "../games/chess/ChessGame.js";
+import { defaultGames } from "../domain/defaultGames.js";
+import { summaryOf, projectRecord } from "../domain/projection.js";
 import { agentRegistryDefaults, detectProviders } from "./adapters.js";
 import { acquireStoreOwnership, loadMatches, releaseStoreOwnership, saveMatches, STORE_VERSION } from "./store.js";
 import { shouldPersistChange, shouldPublishSnapshot } from "./eventPolicy.js";
@@ -107,7 +105,7 @@ function withStorage(snapshot: import("../shared.js").AppState): import("../shar
 
 function publishSnapshot(): void {
   const started = Date.now();
-  void providerCache.value.then((providers) => withStorage(buildSnapshot(storedMatches, providers))).then((snapshot) => {
+  void controller.snapshot().then(withStorage).then((snapshot) => {
     const encoded = JSON.stringify(snapshot);
     logMetric("snapshot", { bytes: Buffer.byteLength(encoded), matches: snapshot.recentMatches.length, ms: Date.now() - started });
     for (const response of eventClients) writeToClient(response, "snapshot", encoded);
@@ -125,10 +123,10 @@ function stateChanged(record: MatchRecord, event?: import("../shared.js").MatchE
     logMetric("event", { type: event.type, bytes: Buffer.byteLength(encoded) });
     for (const response of eventClients) writeToClient(response, event.type, encoded, event.sequence === undefined ? undefined : `${record.id}:${event.sequence}`);
   }
-  if (shouldPublishSnapshot(event)) publishSnapshot();
+  if (shouldPublishSnapshot(event) || record.gameId === "hangman" || event?.type === "agent.started") publishSnapshot();
 }
 
-const games = new GameRegistry().register(new ChessGame());
+const games = defaultGames;
 const agentDefaults = agentRegistryDefaults();
 const agents = new AgentRegistry()
   .register("codex", agentDefaults.codex)
@@ -136,7 +134,14 @@ const agents = new AgentRegistry()
   .register("opencode", agentDefaults.opencode);
 let controller: MatchController;
 try {
-  controller = new MatchController(games, agents, storedMatches, () => providerCache.value, stateChanged, () => publishSnapshot());
+  controller = new MatchController(games, agents, storedMatches, () => providerCache.value, stateChanged, () => {
+    const candidate = controller.getRecoveryCandidate();
+    if (candidate) {
+      try { writeFileSync(join(process.env.AGENT_BATTLE_DATA_DIR ?? join(process.cwd(), "data"), `unsaved-recovery-${candidate.id}-${Date.now()}.json`), JSON.stringify(candidate), { mode: 0o600, flag: "wx" }); }
+      catch { console.error("Unable to persist the private recovery candidate; it remains in memory until shutdown."); }
+    }
+    publishSnapshot();
+  });
 } catch (error) {
   console.error("Could not restore saved matches.", error);
   releaseStoreOwnership();
@@ -207,7 +212,7 @@ app.get("/api/matches", (request, response) => {
 app.get("/api/matches/:id", (request, response) => {
   const match = controller.get(matchIdOf(request));
   if (!match) { response.status(404).json({ error: "Match not found.", code: "not_found" }); return; }
-  response.json({ match });
+  response.json({ match: projectRecord(match, 500) });
 });
 
 app.get("/api/matches/:id/events", (request, response) => {
@@ -221,7 +226,8 @@ app.get("/api/matches/:id/attempts", (request, response) => {
   const match = controller.get(matchIdOf(request));
   if (!match) { response.status(404).json({ error: "Match not found.", code: "not_found" }); return; }
   const { limit, offset } = pageParams(request);
-  const attempts = match.history.flatMap((turn) => turn.attempts.map((attempt) => ({ turnId: turn.turnId, ply: turn.ply, turnIndex: turn.turnIndex, playerId: turn.playerId, ...attempt })));
+  const publicMatch = projectRecord(match);
+  const attempts = [...publicMatch.history, ...(publicMatch.pendingTurn ? [publicMatch.pendingTurn] : [])].flatMap((turn) => turn.attempts.map((attempt) => ({ turnId: turn.turnId, ply: turn.ply, turnIndex: turn.turnIndex, playerId: turn.playerId, ...attempt })));
   response.json({ total: attempts.length, offset, limit, attempts: attempts.slice(offset, offset + limit) });
 });
 
@@ -243,12 +249,15 @@ app.post("/api/matches", asyncRoute(async (request, response) => {
   const body = request.body as Record<string, unknown>;
   const rawBudgets = (body.budgets && typeof body.budgets === "object" ? body.budgets : {}) as Record<string, unknown>;
   const costLimit = rawBudgets.maxReportedCostUsd;
+  const gameId = typeof body.gameId === "string" ? body.gameId : "chess";
+  const game = games.get(gameId);
+  if (body.players && (body.white || body.black)) throw new Error("Do not mix player formats.");
+  const rawPlayers = body.players ?? (gameId === "chess" ? { white: body.white, black: body.black } : undefined);
+  if (!rawPlayers || typeof rawPlayers !== "object" || Object.keys(rawPlayers).sort().join() !== [...game.playerIds].sort().join()) throw new Error("Player roles do not match the game.");
+  const players = Object.fromEntries(game.playerIds.map((id) => [id, parsePlayer((rawPlayers as Record<string, unknown>)[id])]));
   const created = await controller.create({
-    gameId: typeof body.gameId === "string" ? body.gameId : "chess",
-    players: {
-      white: parsePlayer(body.white),
-      black: parsePlayer(body.black),
-    },
+    gameId,
+    players,
     turnTimeoutSeconds: Number(body.turnTimeoutSeconds ?? 120),
     budgets: {
       maxPlies: Number(rawBudgets.maxPlies ?? 150),
@@ -257,12 +266,12 @@ app.post("/api/matches", asyncRoute(async (request, response) => {
       maxReportedCostUsd: costLimit === undefined || costLimit === null || costLimit === "" ? null : Number(costLimit),
     },
   });
-  response.status(201).json({ match: created });
+  response.status(201).json({ match: projectRecord(created) });
 }));
 
 app.post("/api/matches/:id/start", asyncRoute(async (request, response) => {
   const match = await controller.start(matchIdOf(request));
-  response.json({ match });
+  response.json({ match: projectRecord(match, 500) });
 }));
 
 app.post("/api/matches/:id/pause", asyncRoute(async (request, response) => {

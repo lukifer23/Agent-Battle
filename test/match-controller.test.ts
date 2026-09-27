@@ -310,6 +310,7 @@ class ToyGame implements GameDefinition<ToyState> {
   isTerminal(state: ToyState): boolean { return state.n >= 2; }
   result(state: ToyState) { return state.n >= 2 ? { kind: "win" as const, winnerId: "a", notation: "1-0", reason: "Toy terminal" } : undefined; }
   winResult(winnerId: string, reason: string) { return { kind: "win" as const, winnerId, notation: "1-0", reason }; }
+  publicState(state: ToyState): unknown { return { n: state.n }; }
   serialize(state: ToyState): unknown { return { n: state.n }; }
   deserialize(saved: unknown): ToyState {
     if (!saved || typeof saved !== "object" || typeof (saved as { n?: unknown }).n !== "number") throw new Error("Saved toy state is invalid.");
@@ -534,7 +535,9 @@ test("a failed retry checkpoint keeps the first attempt and prevents a second ca
     await controller.start(match.id);
     await waitFor(controller, match.id, ["error"]);
     assert.equal(calls, 1);
-    assert.equal(store.load().matches[0].pendingTurn?.attempts.length, 0);
+    assert.equal(store.load().matches[0].pendingTurn?.attempts.length, 1);
+    assert.equal(store.load().matches[0].pendingTurn?.attempts[0].status, "started");
+    assert.equal(controller.getRecoveryCandidate()?.pendingTurn?.attempts[0].status, "invalid");
   } finally { rmSync(folder, { recursive: true, force: true }); }
 });
 

@@ -154,3 +154,64 @@ test("quarantined records produce a recovery notice in the state API", async () 
     assert.match(state.storage?.message ?? "", /quarantined/);
   } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
 });
+
+test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess completion respect reveal boundary", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-hangman-api-"));
+  const { mkdirSync, chmodSync } = await import("node:fs");
+  const bin = join(folder, "bin"); mkdirSync(bin);
+  const fixture = join(bin, "codex");
+  writeFileSync(fixture, `#!${process.execPath}\n${readFileSync(join(projectRoot, "test/fixtures/hangman-cli.cjs"), "utf8")}`); chmodSync(fixture, 0o700);
+  const port = 5200 + Math.floor(Math.random() * 300);
+  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], { cwd: projectRoot, env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
+  const request = async (path: string, body?: unknown) => {
+    const result = await probe(port, { path, ...(body ? { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } } : {}) });
+    assert.ok(result.status < 300, result.body); return JSON.parse(result.body);
+  };
+  try {
+    await waitForListening(child, port);
+    const player = { provider: "codex", model: "fixture" };
+    const created = await request("/api/matches", { gameId: "hangman", players: { player1: player, player2: player }, turnTimeoutSeconds: 30 });
+    const id = created.match.id;
+    const privateStore = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
+    const word = privateStore.matches[0].gameState.word;
+    writeFileSync(join(bin, "fixture-config.json"), JSON.stringify({ word, delayMs: 600 }));
+    assert.equal(JSON.stringify(created).includes(word), false);
+    assert.equal("provenance" in created.match.gameState, false);
+    const started = await request(`/api/matches/${id}/start`, {});
+    assert.equal(JSON.stringify(started).includes(word), false);
+    for (const route of ["/api/state", "/api/matches", `/api/matches/${id}`, `/api/matches/${id}/events`, `/api/matches/${id}/attempts`]) {
+      const value = await request(route); assert.equal(JSON.stringify(value).includes(word), false, route);
+    }
+    const stream = await fetch(`http://127.0.0.1:${port}/api/events`);
+    const reader = stream.body!.getReader(); const first = await reader.read(); await reader.cancel();
+    assert.equal(new TextDecoder().decode(first.value).includes(word), false);
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    const early = await request(`/api/matches/${id}`);
+    assert.equal(early.match.gameState.lanes.player1.sealed, true);
+    assert.equal(JSON.stringify(early).includes(word), false);
+    const pending = early.match.pendingTurn.attempts.at(-1);
+    assert.equal(pending.status, "started"); assert.ok(pending.invocationId); assert.ok(pending.deadlineAt);
+    await request(`/api/matches/${id}/pause`, {});
+    const paused = await request(`/api/matches/${id}`);
+    assert.equal(paused.match.status, "paused"); assert.equal(JSON.stringify(paused).includes(word), false);
+    await request(`/api/matches/${id}/start`, {});
+    let finished;
+    for (let i = 0; i < 80; i++) {
+      finished = await request(`/api/matches/${id}`);
+      if (finished.match.status === "finished") break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(finished.match.status, "finished"); assert.equal(finished.match.gameState.word, word);
+    assert.equal(finished.match.result.winnerId, "player1");
+    assert.ok(finished.match.replay.length >= 4);
+    assert.equal(JSON.stringify(finished.match.replay.slice(0, -1)).includes(word), false);
+    const raw = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
+    assert.equal(raw.matches[0].gameState.word, word);
+    assert.equal(raw.version, 4);
+    for (const event of raw.matches[0].events) {
+      if (JSON.stringify(event).includes(word)) assert.equal(event.payload?.publicState?.terminal, true);
+    }
+    const list = await request("/api/matches");
+    for (const key of ["gameState", "pendingTurn", "history", "events", "responseExcerpt", "stderrExcerpt"]) assert.equal(key in list.matches[0], false);
+  } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
+});

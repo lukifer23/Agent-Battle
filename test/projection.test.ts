@@ -79,8 +79,10 @@ test("transport projection drops bulky diagnostics but keeps replay and usage", 
 
 test("summary projection excludes history and events", () => {
   const summary = summaryOf(record(40, 60));
-  assert.equal(summary.history.length, 0);
-  assert.equal(summary.events.length, 0);
+  assert.equal("history" in summary, false);
+  assert.equal("gameState" in summary, false);
+  assert.equal("pendingTurn" in summary, false);
+  assert.equal("events" in summary, false);
   assert.equal(summary.id, "m1");
 });
 
@@ -88,7 +90,7 @@ test("a 50-record snapshot stays well under the transport budget", () => {
   const records = Array.from({ length: 50 }, (_value, index) => ({ ...record(80, 500), id: `match-${index}`, revision: index + 1, status: "stopped" as const }));
   const snapshot = buildSnapshot(records, []);
   assert.equal(snapshot.recentMatches.length, 50);
-  assert.ok(snapshot.recentMatches.every((match) => match.history.length === 0 && match.events.length === 0));
+  assert.ok(snapshot.recentMatches.every((match) => !("history" in match) && !("events" in match)));
   const bytes = Buffer.byteLength(JSON.stringify(snapshot));
   assert.ok(bytes < 100 * 1024, `snapshot was ${bytes} bytes`);
 });
@@ -100,5 +102,5 @@ test("the active match is included as a full transport projection", () => {
   assert.equal(snapshot.activeMatch?.history.length, 30);
   assert.equal(snapshot.activeMatch?.events.length, 40);
   assert.equal(snapshot.activeMatch?.history[0].attempts[0].responseExcerpt, undefined);
-  assert.equal(snapshot.recentMatches.find((match) => match.id === "old")?.history.length, 0);
+  assert.equal("history" in snapshot.recentMatches.find((match) => match.id === "old")!, false);
 });

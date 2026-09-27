@@ -1,4 +1,4 @@
-import type { AppState, ChessMoveRecord, ChessSnapshot, MatchEvent, MatchRecord, TurnTelemetry } from "../shared.js";
+import type { AppState, ChessMoveRecord, ChessSnapshot, MatchEvent, PublicMatchDetail, MatchSummary, TurnTelemetry } from "../shared.js";
 
 export const matchEventTypes = [
   "match.created", "match.started", "match.resumed", "match.paused", "match.stopped", "match.finished",
@@ -8,13 +8,13 @@ export const matchEventTypes = [
 
 /** Presentation events never advance a durable revision or replay after reconnect. */
 export function applyPresentationEvent(state: AppState, matchId: string, event: MatchEvent): AppState {
-  const append = (match: MatchRecord): MatchRecord => match.id === matchId
+  const append = (match: PublicMatchDetail): PublicMatchDetail => match.id === matchId
     ? { ...match, events: [...match.events, event].slice(-500) }
     : match;
   return {
     ...state,
     activeMatch: state.activeMatch ? append(state.activeMatch) : null,
-    recentMatches: state.recentMatches.map(append),
+    recentMatches: state.recentMatches,
   };
 }
 
@@ -27,12 +27,12 @@ const activeStatuses = ["ready", "running", "paused", "interrupted"];
  * the caller when a revision gap is detected).
  */
 export function applyMatchEvent(state: AppState, matchId: string, event: MatchEvent, revision?: number): AppState {
-  const apply = (match: MatchRecord | null): MatchRecord | null => {
+  const apply = (match: PublicMatchDetail | null): PublicMatchDetail | null => {
     if (!match || match.id !== matchId) return match;
     const nextRevision = revision ?? event.sequence ?? (match.revision ?? 0) + 1;
     if ((match.revision ?? 0) >= nextRevision) return match;
     const payload = event.payload ?? {};
-    const updated: MatchRecord = {
+    const updated: PublicMatchDetail = {
       ...match,
       updatedAt: event.at,
       revision: nextRevision,
@@ -41,7 +41,7 @@ export function applyMatchEvent(state: AppState, matchId: string, event: MatchEv
     if (event.type === "match.created") updated.status = "ready";
     if (event.type === "match.started" || event.type === "match.resumed" || event.type === "turn.started") updated.status = "running";
     if (event.type === "turn.started" && event.playerId) updated.currentPlayerId = event.playerId;
-    if (event.type === "move.applied") {
+    if (event.type === "move.applied" && match.gameId === "chess") {
       const snapshot = match.gameState as ChessSnapshot;
       const move = payload.move as ChessMoveRecord | undefined;
       const fen = typeof payload.fen === "string" ? payload.fen : snapshot.fen;
@@ -54,7 +54,9 @@ export function applyMatchEvent(state: AppState, matchId: string, event: MatchEv
       } satisfies ChessSnapshot;
       updated.currentPlayerId = typeof payload.nextPlayerId === "string" ? payload.nextPlayerId : undefined;
     }
+    if (payload.publicState && match.gameId !== "chess") updated.gameState = payload.publicState;
     if (event.type === "turn.completed") {
+      updated.pendingTurn = undefined;
       const record = payload.record as TurnTelemetry | undefined;
       if (record && typeof record === "object" && !match.history.some((turn) => turn.turnId === record.turnId)) {
         updated.history = [...match.history, record];
@@ -86,8 +88,13 @@ export function applyMatchEvent(state: AppState, matchId: string, event: MatchEv
     return updated;
   };
 
-  const recentMatches = state.recentMatches.map((match) => apply(match) ?? match);
   const activeUpdated = state.activeMatch?.id === matchId ? apply(state.activeMatch) : state.activeMatch;
+  const recentMatches = state.recentMatches.map((match): MatchSummary => {
+    const nextRevision = revision ?? event.sequence ?? match.revision + 1;
+    if (match.id !== matchId || match.revision >= nextRevision) return match;
+    return { ...match, revision: nextRevision, updatedAt: event.at,
+      ...(activeUpdated?.id === match.id ? { status: activeUpdated.status, result: activeUpdated.result, actionCount: activeUpdated.history.filter((t) => t.valid).length } : {}) };
+  });
   const activeMatch = activeUpdated && activeStatuses.includes(activeUpdated.status) ? activeUpdated : null;
   return {
     ...state,

@@ -57,12 +57,16 @@ function validateAttempt(raw: unknown): ValidationResult<AgentAttempt> {
   if (!isPlainObject(raw)) return { error: "attempt is not an object" };
   if (!Number.isSafeInteger(raw.attempt) || (raw.attempt as number) < 1) return { error: "attempt number is invalid" };
   if (!isIsoDate(raw.startedAt)) return { error: "attempt start time is invalid" };
+  if (raw.invocationId !== undefined && (!isString(raw.invocationId) || !/^[0-9a-f-]{36}$/.test(raw.invocationId))) return { error: "invocation identity is invalid" };
+  if (raw.deadlineAt !== undefined && !isIsoDate(raw.deadlineAt)) return { error: "invocation deadline is invalid" };
   const status = raw.status;
-  if (!["valid", "invalid", "timeout", "error", "cancelled"].includes(status as string)) return { error: "attempt status is unsupported" };
+  if (!["started", "interrupted", "valid", "invalid", "timeout", "error", "cancelled"].includes(status as string)) return { error: "attempt status is unsupported" };
   if (raw.phase !== undefined && !["initialization", "provider", "protocol", "controller", "storage"].includes(String(raw.phase))) return { error: "attempt phase is unsupported" };
   return {
     value: {
       attempt: raw.attempt as number,
+      ...(isString(raw.invocationId) ? { invocationId: raw.invocationId } : {}),
+      ...(isIsoDate(raw.deadlineAt) ? { deadlineAt: raw.deadlineAt } : {}),
       startedAt: raw.startedAt,
       ...(isIsoDate(raw.completedAt) ? { completedAt: raw.completedAt } : {}),
       ...(isFiniteNumber(raw.latencyMs) ? { latencyMs: raw.latencyMs } : {}),
@@ -162,7 +166,6 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
   if (!isString(raw.id) || !raw.id) return { error: "id is missing" };
   if (!isString(raw.gameId) || !raw.gameId) return { error: "gameId is missing" };
   if (!isString(raw.gameVersion) || !isString(raw.protocolVersion)) return { error: "version fields are missing" };
-  if (raw.gameId === "chess" && raw.gameVersion !== "standard-1") return { error: "game version is unsupported" };
   if (raw.protocolVersion !== "game-action-v1") return { error: "protocol version is unsupported" };
   if (!isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)) return { error: "timestamps are invalid" };
   if (!MATCH_STATUSES.includes(raw.status as MatchStatus)) return { error: `status "${String(raw.status)}" is unsupported` };
@@ -270,7 +273,7 @@ export function validateStoreEnvelope(root: unknown): { version: number; records
   if (Array.isArray(root)) return { version: 1, records: root };
   if (isPlainObject(root) && Array.isArray(root.matches)) {
     const version = root.version;
-    if (!Number.isSafeInteger(version) || (version as number) < 2 || (version as number) > 3) throw new Error(`Unsupported store version ${String(version)}.`);
+    if (!Number.isSafeInteger(version) || (version as number) < 2 || (version as number) > 4) throw new Error(`Unsupported store version ${String(version)}.`);
     return { version: version as number, records: root.matches };
   }
   throw new Error("Saved store must be an array of matches or a versioned envelope with a matches array.");
