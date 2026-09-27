@@ -250,6 +250,7 @@ function App() {
               {(whiteProvider === blackProvider) && <div className="inline-note">Both sides can use the same CLI with different models.</div>}
               {providersChecked && providers.some((entry) => !entry.installed) && <div className="inline-note">Install a supported CLI and sign in before choosing it. Agent Battle uses its existing login.</div>}
             </>}
+            {!canCreate && state?.activeMatch && <div className="inline-note">A match is already active. <button className="link-button" onClick={() => { setSelectedId(state.activeMatch!.id); setNewMatchOpen(false); setReplayPly(null); }}>Open the current match</button> to stop it or let it finish.</div>}
             {error && <div className="error-banner" role="alert">{error}</div>}
           </section>
 
@@ -301,11 +302,13 @@ function App() {
             </div>
             <div className="board-caption">
               <span>{selectedMatch ? resultLine(selectedMatch) : "The board is ready for its first match."}</span>
-              {currentIsRunning && <div className="match-actions">
-                <button className="quiet-button" onClick={() => void api(`/api/matches/${selectedMatch!.id}/pause`, { method: "POST", body: "{}" }).then(refresh).catch((reason) => setError(reason.message))} disabled={busy}>PAUSE</button>
-                <button className="stop-button" onClick={() => void stopMatch()} disabled={busy}>STOP</button>
-              </div>}
-              {canStart && <button className="primary-button compact" onClick={() => void api(`/api/matches/${selectedMatch!.id}/start`, { method: "POST", body: "{}" }).then(refresh).catch((reason) => setError(reason.message))}>{selectedMatch?.status === "ready" ? "START THIS MATCH" : "RESUME MATCH"}</button>}
+              {selectedMatch && (
+                <div className="match-actions">
+                  {currentIsRunning && <button className="quiet-button" onClick={() => void api(`/api/matches/${selectedMatch.id}/pause`, { method: "POST", body: "{}" }).then(refresh).catch((reason) => setError(reason.message))} disabled={busy}>PAUSE</button>}
+                  {canStart && <button className="primary-button compact" onClick={() => void api(`/api/matches/${selectedMatch.id}/start`, { method: "POST", body: "{}" }).then(refresh).catch((reason) => setError(reason.message))} disabled={busy}>{selectedMatch.status === "ready" ? "START THIS MATCH" : "RESUME MATCH"}</button>}
+                  {["ready", "running", "paused", "interrupted"].includes(selectedMatch.status) && <button className="stop-button" onClick={() => void stopMatch()} disabled={busy}>STOP</button>}
+                </div>
+              )}
             </div>
             {currentIsRunning && <div className="turn-indicator" role="status" aria-live="polite">
               <span><span className="live-dot" /> THINKING · {currentTurnName ?? "AGENT"}</span>

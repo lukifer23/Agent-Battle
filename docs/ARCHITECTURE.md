@@ -43,7 +43,7 @@ The UI currently renders the `ChessSnapshot` projection. Adding a game does not 
 5. Apply only a valid action, record compact FEN/action telemetry, and continue until the game reports a result.
 6. Persist canonical state checkpoints and publish small activity events.
 
-Pause terminates the in-flight request and preserves the unchanged turn for a fresh request on resume. Stop also terminates the request but marks the match stopped. On an app restart, an interrupted match is restored from the saved game snapshot; resuming asks the current player again.
+Pause cancels the in-flight request and preserves the unchanged turn, including a durable in-flight attempt record, so resume keeps the prior rejection feedback and remaining retry budget instead of restarting the turn. Stop cancels the request but marks the match stopped; stop is also a valid, spawn-free command for a ready, paused or interrupted match, and is idempotent once terminal. A `stopped` match keeps its history and has no winner. On an app restart, an interrupted match is restored from the saved game snapshot; resuming asks the current player again and continues any retained in-flight attempt. Creation is blocked while any match is ready, running, paused or interrupted; multiple legacy active records can each be stopped to recover.
 
 ### `AgentAdapter`
 

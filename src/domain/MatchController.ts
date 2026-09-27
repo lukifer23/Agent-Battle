@@ -9,6 +9,7 @@ import type {
   MatchEvent,
   MatchRecord,
   MatchResult,
+  MatchStatus,
   PlayerConfig,
   PlayerSeat,
   ProviderInfo,
@@ -20,9 +21,11 @@ interface RunningMatch {
   agents: Map<string, AgentAdapter>;
   inFlight: Set<AbortController>;
   done: Promise<void>;
+  generation: number;
 }
 
 const CANCELLATION_HARD_GRACE_MS = 2500;
+const ACTIVE_STATUSES: MatchStatus[] = ["ready", "running", "paused", "interrupted"];
 
 export interface CreateMatchRequest {
   gameId: string;
@@ -161,18 +164,23 @@ export class MatchController {
 
   async start(id: string): Promise<MatchRecord> {
     const match = this.require(id);
-    if (!["ready", "paused", "interrupted"].includes(match.status)) throw new Error("This match is not ready to start or resume.");
-    if (this.runs.has(id)) throw new Error("This match already has an active controller.");
-    const otherActive = this.records.find((candidate) => candidate.id !== id && ["ready", "running", "paused", "interrupted"].includes(candidate.status));
+    const existingRun = this.runs.get(id);
+    if (existingRun && match.status === "running") return match;
+    if (match.status === "running" || existingRun) throw new Error("This match is already running.");
+    if (!["ready", "paused", "interrupted"].includes(match.status)) throw new Error("Only a ready, paused or interrupted match can be started or resumed.");
+    const otherActive = this.records.find((candidate) => candidate.id !== id && ACTIVE_STATUSES.includes(candidate.status));
     if (otherActive) throw new Error("Another match is already active. Stop or finish it before resuming this match.");
     const game = this.games.get(match.gameId);
     if (!this.runtime.has(id)) this.runtime.set(id, game.deserialize(match.gameState));
-    const running: RunningMatch = { control: "continue", agents: new Map(), inFlight: new Set(), done: Promise.resolve() };
+    const generation = (match.runGeneration ?? 0) + 1;
+    match.runGeneration = generation;
+    const running: RunningMatch = { control: "continue", agents: new Map(), inFlight: new Set(), done: Promise.resolve(), generation };
     this.runs.set(id, running);
     match.status = "running";
     match.error = undefined;
     match.currentPlayerId = undefined;
-    this.emit(match, match.history.length === 0 ? "match.started" : "match.resumed", match.history.length === 0 ? "Match started" : "Match resumed");
+    const resuming = match.history.length > 0 || Boolean(match.pendingTurn);
+    this.emit(match, resuming ? "match.resumed" : "match.started", resuming ? "Match resumed" : "Match started");
     running.done = this.run(id, game, running);
     void running.done.catch((error: unknown) => {
       const current = this.get(id);
@@ -191,17 +199,35 @@ export class MatchController {
   }
 
   async pause(id: string): Promise<void> {
-    await this.control(id, "pause");
+    const match = this.require(id);
+    const running = this.runs.get(id);
+    if (running && match.status === "running") {
+      await this.cancel(id, running, "pause");
+      return;
+    }
+    if (match.status === "paused") return;
+    throw new Error(`A ${match.status} match cannot be paused.`);
   }
 
   async stop(id: string): Promise<void> {
-    await this.control(id, "stop");
-  }
-
-  private async control(id: string, control: "pause" | "stop"): Promise<void> {
     const match = this.require(id);
     const running = this.runs.get(id);
-    if (match.status !== "running" || !running) throw new Error("This match is not running.");
+    if (running && match.status === "running") {
+      await this.cancel(id, running, "stop");
+      return;
+    }
+    if (["ready", "paused", "interrupted", "running"].includes(match.status)) {
+      match.status = "stopped";
+      match.currentPlayerId = undefined;
+      match.error = undefined;
+      this.emit(match, "match.stopped", match.pendingTurn
+        ? "Match stopped before resuming. The saved position and the retained in-flight attempt are kept for the record."
+        : "Match stopped before a controller was attached. The saved position is retained.");
+      return;
+    }
+  }
+
+  private async cancel(id: string, running: RunningMatch, control: "pause" | "stop"): Promise<void> {
     running.control = control;
     const reason = new AgentExecutionError(
       control === "pause" ? "Match paused during an active request." : "Match stopped during an active request.",
@@ -209,6 +235,7 @@ export class MatchController {
     );
     for (const controller of running.inFlight) controller.abort(reason);
     await running.done;
+    if (this.runs.get(id) === running) this.runs.delete(id);
   }
 
   private require(id: string): MatchRecord {
@@ -256,7 +283,27 @@ export class MatchController {
       for (const seat of match.players) {
         const adapter = this.agents.create(seat.agent);
         running.agents.set(seat.id, adapter);
-        await adapter.initialize();
+        try {
+          await adapter.initialize();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "The agent could not initialize.";
+          const startedAt = new Date().toISOString();
+          const initializationAttempt = this.attempt(1, startedAt, "error", { error: message, phase: "initialization" });
+          match.pendingTurn = {
+            turnId: randomUUID(),
+            turnIndex: match.history.length + 1,
+            ply: game.plyCount(state) + 1,
+            playerId: seat.id,
+            startedAt,
+            attempts: [initializationAttempt],
+          };
+          match.status = "error";
+          match.error = message;
+          match.currentPlayerId = undefined;
+          this.emit(match, "agent.error", `${seat.agent.name} could not initialize: ${message}`, { phase: "initialization" }, seat.id);
+          this.persistState(match, game, state);
+          return;
+        }
         this.emit(match, "agent.ready", `${seat.agent.name} is ready`, { provider: seat.agent.provider, model: seat.agent.model || null }, seat.id);
         if (running.control !== "continue") break;
       }
@@ -272,12 +319,17 @@ export class MatchController {
         const seat = this.player(match, playerId);
         const adapter = running.agents.get(playerId);
         if (!adapter) throw new Error(`Adapter for player ${playerId} was not initialized.`);
-        const turnId = randomUUID();
-        const turnIndex = match.history.length + 1;
         const ply = game.plyCount(state) + 1;
-        let feedback: string | undefined;
+        const pending = match.pendingTurn && match.pendingTurn.playerId === playerId && match.pendingTurn.ply === ply ? match.pendingTurn : undefined;
+        const turnId = pending?.turnId ?? randomUUID();
+        const turnIndex = pending?.turnIndex ?? match.history.length + 1;
+        let feedback = pending?.feedback;
         let selectedAction: GameAction | undefined;
-        const attempts: AgentAttempt[] = [];
+        const attempts: AgentAttempt[] = pending ? [...pending.attempts] : [];
+        const resumeAttempt = this.nextAttemptNumber(attempts);
+        match.pendingTurn = pending
+          ? { ...pending, attempts }
+          : { turnId, turnIndex, ply, playerId, startedAt: new Date().toISOString(), attempts };
         const observation = game.observe(state, {
           matchId: id,
           turnId,
@@ -289,10 +341,14 @@ export class MatchController {
         const before = game.serialize(state);
         const beforeObject = before && typeof before === "object" ? before as Record<string, unknown> : {};
         const fenBefore = typeof beforeObject.fen === "string" ? beforeObject.fen : undefined;
-        this.emit(match, "turn.started", `${seat.agent.name} to act`, { turnId, turnIndex, ply, legalActionCount: observation.legalActions.length, fenBefore }, playerId);
-        this.emit(match, "agent.thinking", `${seat.agent.name} is considering the observation`, { turnId }, playerId);
+        if (!pending) {
+          this.emit(match, "turn.started", `${seat.agent.name} to act`, { turnId, turnIndex, ply, legalActionCount: observation.legalActions.length, fenBefore }, playerId);
+          this.emit(match, "agent.thinking", `${seat.agent.name} is considering the observation`, { turnId }, playerId);
+        } else {
+          this.emit(match, "turn.started", `${seat.agent.name} resumes turn ${turnIndex}`, { turnId, turnIndex, ply, resumed: true, legalActionCount: observation.legalActions.length, fenBefore }, playerId);
+        }
 
-        for (let attemptNumber = 1; attemptNumber <= match.settings.maxRetries + 1; attemptNumber += 1) {
+        for (let attemptNumber = resumeAttempt; attemptNumber <= match.settings.maxRetries + 1; attemptNumber += 1) {
           if (running.control !== "continue") break;
           const startedAt = new Date().toISOString();
           this.emit(match, "agent.started", `${seat.agent.name} request ${attemptNumber}`, { turnId, attempt: attemptNumber }, playerId);
@@ -311,6 +367,7 @@ export class MatchController {
 
           if (running.control !== "continue") {
             attempts.push(this.attempt(attemptNumber, startedAt, "cancelled", {
+              phase: "controller",
               ...(failure instanceof AgentExecutionError ? { error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs } : {}),
               ...(reply ? { latencyMs: reply.latencyMs, responseExcerpt: reply.responseExcerpt, stderrExcerpt: reply.stderrExcerpt, toolCalls: reply.toolCalls, usage: reply.usage } : {}),
             }));
@@ -318,9 +375,10 @@ export class MatchController {
           }
 
           if (failure instanceof AgentExecutionError && !failure.timedOut) {
-            attempts.push(this.attempt(attemptNumber, startedAt, "error", { error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
+            attempts.push(this.attempt(attemptNumber, startedAt, "error", { phase: "provider", error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
             const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
             match.history.push(record);
+            match.pendingTurn = undefined;
             match.status = "error";
             match.error = failure.message;
             match.currentPlayerId = undefined;
@@ -337,14 +395,14 @@ export class MatchController {
               turnId, attempt: attemptNumber, status: "malformed", responseLength: failure.responseExcerpt.length,
             }, playerId);
             attempts.push(this.attempt(attemptNumber, startedAt, "invalid", {
-              error: failure.message, responseExcerpt: failure.responseExcerpt,
+              phase: "protocol", error: failure.message, responseExcerpt: failure.responseExcerpt,
               latencyMs: failure.latencyMs, stderrExcerpt: failure.stderrExcerpt,
               toolCalls: failure.toolCalls, usage: failure.usage,
             }));
           } else if (failure instanceof AgentExecutionError && failure.timedOut) {
             validation = { valid: false, reason: failure.message };
             this.emit(match, "agent.response", `${seat.agent.name} request timed out`, { turnId, attempt: attemptNumber, status: "timeout" }, playerId);
-            attempts.push(this.attempt(attemptNumber, startedAt, "timeout", { error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
+            attempts.push(this.attempt(attemptNumber, startedAt, "timeout", { phase: "provider", error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
             this.emit(match, "agent.timeout", `${seat.agent.name} exceeded its move timeout`, { turnId, attempt: attemptNumber, timeoutMs: observation.clock.turnTimeoutMs }, playerId);
           } else if (reply && action) {
             this.emit(match, "agent.response", `${seat.agent.name} returned a structured action`, {
@@ -366,8 +424,9 @@ export class MatchController {
               usage: reply.usage,
             }));
           } else {
-            attempts.push(this.attempt(attemptNumber, startedAt, "error", { error: failure instanceof Error ? failure.message : "Unknown agent failure." }));
+            attempts.push(this.attempt(attemptNumber, startedAt, "error", { phase: "controller", error: failure instanceof Error ? failure.message : "Unknown agent failure." }));
             match.history.push(this.turnRecord(match, game, seat, turnId, observation, attempts, false));
+            match.pendingTurn = undefined;
             match.status = "error";
             match.error = failure instanceof Error ? failure.message : "Unknown agent failure.";
             this.emit(match, "agent.error", match.error, { turnId }, playerId);
@@ -381,13 +440,13 @@ export class MatchController {
           }
 
           feedback = validation.reason ?? "The action was invalid.";
+          if (match.pendingTurn) match.pendingTurn.feedback = feedback;
           this.emit(match, "move.rejected", `${seat.agent.name}: ${feedback}`, { turnId, attempt: attemptNumber, action: action ?? null, error: feedback }, playerId);
           if (attemptNumber <= match.settings.maxRetries) this.emit(match, "turn.retry", "Returning the rejection reason and same authoritative position for one retry", { turnId, retry: attemptNumber }, playerId);
         }
 
         if (running.control !== "continue") {
-          const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
-          if (attempts.length) match.history.push(record);
+          if (match.pendingTurn) match.pendingTurn.feedback = feedback;
           this.persistState(match, game, state);
           break;
         }
@@ -395,6 +454,7 @@ export class MatchController {
         if (!selectedAction) {
           const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
           match.history.push(record);
+          match.pendingTurn = undefined;
           const winnerId = match.players.find((player) => player.id !== playerId)?.id;
           this.emit(match, "move.rejected", `${seat.agent.name} exhausted its retry after: ${feedback ?? "no valid action"}`, { turnId, retryCount: attempts.length - 1 }, playerId);
           if (!winnerId) throw new Error("The game did not provide an opposing player for forfeiture.");
@@ -405,6 +465,7 @@ export class MatchController {
         const after = game.applyAction(state, playerId, selectedAction);
         state = after;
         this.runtime.set(id, state);
+        match.pendingTurn = undefined;
         const afterSnapshot = game.serialize(state);
         const record = this.turnRecord(match, game, seat, turnId, observation, attempts, true);
         record.action = selectedAction;
@@ -444,12 +505,17 @@ export class MatchController {
       match.status = "error";
       match.error = error instanceof Error ? error.message : "Unexpected match controller failure.";
       match.currentPlayerId = undefined;
+      match.pendingTurn = undefined;
       this.emit(match, "agent.error", match.error);
       this.persistState(match, game, state);
     } finally {
       await Promise.all([...running.agents.values()].map((agent) => agent.shutdown()));
-      this.runs.delete(id);
+      if (this.runs.get(id) === running) this.runs.delete(id);
     }
+  }
+
+  private nextAttemptNumber(attempts: AgentAttempt[]): number {
+    return attempts.filter((attempt) => attempt.status === "invalid" || attempt.status === "timeout").length + 1;
   }
 
   private attempt(attempt: number, startedAt: string, status: AgentAttempt["status"], details: Partial<AgentAttempt> = {}): AgentAttempt {
@@ -533,6 +599,7 @@ export class MatchController {
     match.status = status;
     match.currentPlayerId = undefined;
     match.error = undefined;
+    match.pendingTurn = undefined;
     match.gameState = game.serialize(state, result);
     this.emit(match, "match.finished", `${result.notation} · ${result.reason}`, {
       result: result.notation, kind: result.kind, winnerId: result.winnerId ?? null, reason: result.reason, status,

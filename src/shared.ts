@@ -61,12 +61,23 @@ export interface AgentAttempt {
   completedAt?: string;
   latencyMs?: number;
   status: "valid" | "invalid" | "timeout" | "error" | "cancelled";
+  phase?: "initialization" | "provider" | "protocol" | "controller" | "storage";
   action?: GameAction;
   error?: string;
   responseExcerpt?: string;
   stderrExcerpt?: string;
   toolCalls: number | null;
   usage: AgentUsage;
+}
+
+export interface PendingTurn {
+  turnId: string;
+  turnIndex: number;
+  ply: number;
+  playerId: string;
+  startedAt: string;
+  feedback?: string;
+  attempts: AgentAttempt[];
 }
 
 export interface TurnTelemetry {
@@ -127,6 +138,10 @@ export interface MatchRecord {
   currentPlayerId?: string;
   result?: MatchResult;
   error?: string;
+  /** Incremented on every accepted start; used to reject stale controller commands. */
+  runGeneration?: number;
+  /** Durable in-flight turn so a resume keeps rejection feedback and retry budget. */
+  pendingTurn?: PendingTurn;
 }
 
 export interface ProviderInfo {

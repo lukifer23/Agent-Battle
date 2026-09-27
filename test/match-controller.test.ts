@@ -249,6 +249,56 @@ test("stop during an active request cancels without applying a move", async () =
   release();
 });
 
+test("stop on a ready match never creates an adapter and is idempotent", async () => {
+  let created = 0;
+  const registry = new AgentRegistry();
+  registry.register("codex", (config) => { created += 1; return new ScriptedAgent(config, async () => resign); });
+  const controller = new MatchController(new GameRegistry().register(new ChessGame()), registry, [], async () => providers, () => undefined);
+  const match = await controller.create({ gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30 });
+  await controller.stop(match.id);
+  assert.equal(controller.get(match.id)?.status, "stopped");
+  assert.equal(created, 0);
+  await controller.stop(match.id);
+  assert.equal(controller.get(match.id)?.status, "stopped");
+});
+
+test("start is idempotent while a match is running", async () => {
+  const { controller } = harness(async () => new Promise<GameAction>(() => undefined));
+  const match = await create(controller);
+  await controller.start(match.id);
+  const again = await controller.start(match.id);
+  assert.equal(again.id, match.id);
+  assert.equal(controller.list().filter((item) => item.status === "running").length, 1);
+  await controller.stop(match.id);
+  assert.equal(controller.get(match.id)?.status, "stopped");
+});
+
+test("resume continues a durable in-flight turn with its prior retry budget", async () => {
+  const observations: GameObservation[] = [];
+  const { controller } = harness(async (model, observation) => {
+    observations.push(observation);
+    if (model === "black-model") return resign;
+    return observation.feedback ? action("e2e4") : action("a1a8");
+  });
+  const match = await create(controller);
+  match.status = "paused";
+  match.pendingTurn = {
+    turnId: "seed-turn",
+    turnIndex: 1,
+    ply: 1,
+    playerId: "white",
+    startedAt: new Date().toISOString(),
+    feedback: 'Move "a1a8" is illegal in the current position.',
+    attempts: [{ attempt: 1, startedAt: new Date().toISOString(), status: "invalid", toolCalls: null, usage: { inputTokens: null, outputTokens: null, costUsd: null }, error: "illegal" }],
+  };
+  await controller.start(match.id);
+  const done = await waitFor(controller, match.id, ["finished"]);
+  assert.equal(done.history[0].retryCount, 1);
+  assert.equal(done.history[0].attempts.length, 2);
+  assert.equal(done.history[0].turnId, "seed-turn");
+  assert.ok(observations[0].feedback);
+});
+
 test("controller advances a game that returns fresh immutable state", async () => {
   const registry = new AgentRegistry();
   registry.register("codex", (config) => new ScriptedAgent(config, async () => ({ type: "inc", payload: {} })));
@@ -263,4 +313,45 @@ test("controller advances a game that returns fresh immutable state", async () =
   assert.equal(done.history.length, 2);
   assert.deepEqual(done.history.map((turn) => turn.ply), [1, 2]);
   assert.deepEqual(done.history.map((turn) => turn.turnIndex), [1, 2]);
+});
+
+function legacyRecord(id: string): MatchRecord {
+  const game = new ChessGame();
+  return {
+    id,
+    gameId: "chess",
+    gameVersion: game.version,
+    protocolVersion: "game-action-v1",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    status: "interrupted",
+    players: [
+      { id: "white", label: "White", agent: { provider: "codex", model: "", name: "Codex · CLI default" } },
+      { id: "black", label: "Black", agent: { provider: "codex", model: "", name: "Codex · CLI default" } },
+    ],
+    settings: { turnTimeoutSeconds: 30, maxRetries: 1, retryPolicy: "retry-invalid-once-then-forfeit", promptVersion: "x", toolSchemaVersion: "game-action-v1", resultPolicy: "engine-terminal-with-arena-adjudication" },
+    gameState: game.serialize(game.createState()),
+    history: [],
+    events: [],
+  };
+}
+
+test("multiple legacy active records block creation until each is stopped", async () => {
+  const records = [legacyRecord("legacy-1"), legacyRecord("legacy-2")];
+  const registry = new AgentRegistry();
+  registry.register("codex", (config) => new ScriptedAgent(config, async () => resign));
+  const controller = new MatchController(new GameRegistry().register(new ChessGame()), registry, records, async () => providers, () => undefined);
+  await assert.rejects(
+    controller.create({ gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30 }),
+    /Another match|current match|Stop/i,
+  );
+  await controller.stop("legacy-1");
+  await assert.rejects(
+    controller.create({ gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30 }),
+    /Another match|current match|Stop/i,
+  );
+  await controller.stop("legacy-2");
+  const created = await controller.create({ gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30 });
+  assert.equal(created.status, "ready");
+  assert.equal(controller.list().filter((match) => match.status === "stopped").length, 2);
 });

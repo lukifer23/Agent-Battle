@@ -90,6 +90,7 @@ h2 { margin-top: 5px; font: 600 18px var(--display); letter-spacing: -.025em; }
 .button-icon { width: 10px; height: 10px; }
 .inline-icon { width: 11px; height: 11px; }
 .inline-note { margin-top: 11px; color: #78877e; font-size: 11px; }
+.link-button { padding: 0; border: 0; background: transparent; color: var(--lime); text-decoration: underline; cursor: pointer; font: inherit; }
 .error-banner { margin-top: 12px; border: 1px solid #754d41; color: #f0ad93; background: #281b17; border-radius: 5px; padding: 10px 12px; font-size: 12px; }
 .match-setup.is-condensed { padding-top: 14px; padding-bottom: 14px; }
 .match-setup.is-condensed h2 { font-size: 16px; }
