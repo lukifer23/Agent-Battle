@@ -18,7 +18,7 @@ function runningState(): AppState {
       { id: "white", label: "White", agent: { provider: "codex", model: "", name: "Codex" } },
       { id: "black", label: "Black", agent: { provider: "claude", model: "", name: "Claude Code" } },
     ],
-    settings: { turnTimeoutSeconds: 60, maxRetries: 1, retryPolicy: "retry-invalid-once-then-forfeit", promptVersion: "observation-v1", toolSchemaVersion: "action-v1" },
+    settings: { turnTimeoutSeconds: 60, maxRetries: 1, retryPolicy: "retry-invalid-once-then-forfeit", promptVersion: "observation-v2", toolSchemaVersion: "action-v1", resultPolicy: "engine-terminal-with-arena-adjudication" },
     gameState: { fen: initialFen, pgn: "*", moves: [] },
     history: [],
     events: [],

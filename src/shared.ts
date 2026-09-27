@@ -28,7 +28,10 @@ export interface GameObservation {
   playerId: string;
   playerLabel: string;
   sideToMove: string;
-  moveNumber: number;
+  /** Board half-move number of the move about to be played (1-based). */
+  ply: number;
+  /** Sequential agent turn within the match (1-based), including non-moving turns. */
+  turnIndex: number;
   state: Record<string, unknown>;
   legalActions: GameAction[];
   actionSchema: Record<string, unknown>;
@@ -68,7 +71,10 @@ export interface AgentAttempt {
 
 export interface TurnTelemetry {
   matchId: string;
+  /** Board half-move number this turn acted on (1-based). */
   ply: number;
+  /** Sequential agent turn within the match (1-based). */
+  turnIndex: number;
   turnId: string;
   agentId: string;
   model: string;
@@ -112,6 +118,8 @@ export interface MatchRecord {
     retryPolicy: "retry-invalid-once-then-forfeit";
     promptVersion: string;
     toolSchemaVersion: string;
+    /** "engine-terminal" uses chess.js automatic draw/termination; arena adjudication adds forfeit/stop/error outcomes. */
+    resultPolicy: "engine-terminal-with-arena-adjudication";
   };
   gameState: unknown;
   history: TurnTelemetry[];

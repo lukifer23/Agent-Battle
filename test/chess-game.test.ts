@@ -20,7 +20,7 @@ function play(state: ReturnType<ChessGame["createState"]>, move: string) {
 
 test("observation is player-specific and includes FEN, history, legal actions, and schema", () => {
   const state = game.createState();
-  const white = game.observe(state, { matchId: "m1", turnId: "t1", player: seat("white"), moveNumber: 1, turnTimeoutMs: 60_000 });
+  const white = game.observe(state, { matchId: "m1", turnId: "t1", player: seat("white"), ply: 1, turnIndex: 1, turnTimeoutMs: 60_000 });
   assert.equal(white.playerId, "white");
   assert.equal(white.sideToMove, "white");
   assert.equal(white.state.fen, new Chess().fen());
@@ -35,12 +35,12 @@ test("observation is player-specific and includes FEN, history, legal actions, a
   assert.equal(actionSchema.properties.payload.anyOf[0]?.properties.move?.enum?.includes("e2e4"), true);
 
   play(state, "e2e4");
-  const black = game.observe(state, { matchId: "m1", turnId: "t2", player: seat("black"), moveNumber: 2, turnTimeoutMs: 60_000 });
+  const black = game.observe(state, { matchId: "m1", turnId: "t2", player: seat("black"), ply: 2, turnIndex: 2, turnTimeoutMs: 60_000 });
   assert.equal(black.playerId, "black");
   assert.equal(black.sideToMove, "black");
   assert.equal(black.history[0] && (black.history[0] as { uci: string }).uci, "e2e4");
   assert.ok(black.legalActions.some((action) => action.type === "move" && action.payload.move === "e7e5"));
-  assert.throws(() => game.observe(state, { matchId: "m1", turnId: "wrong", player: seat("white"), moveNumber: 2, turnTimeoutMs: 1000 }));
+  assert.throws(() => game.observe(state, { matchId: "m1", turnId: "wrong", player: seat("white"), ply: 2, turnIndex: 2, turnTimeoutMs: 1000 }));
 });
 
 test("legal moves apply and illegal or wrong-player actions are rejected", () => {
@@ -95,4 +95,52 @@ test("serialized PGN reloads to the same authoritative position", () => {
   assert.equal(restored.chess.fen(), state.chess.fen());
   assert.equal(restored.chess.pgn(), state.chess.pgn());
   assert.equal(restored.moves.length, 2);
+});
+
+test("action envelope and chess payload keys are strictly validated", () => {
+  const state = game.createState();
+  assert.equal(game.validateAction(state, "white", { type: "move", payload: { move: "e2e4" } }).valid, true);
+  assert.equal(game.validateAction(state, "white", { type: "move", payload: { move: "e2e4", extra: "accepted" } }).valid, false);
+  assert.equal(game.validateAction(state, "white", { type: "move", payload: { move: "E2E4" } }).valid, false);
+  assert.equal(game.validateAction(state, "white", { type: "move", payload: { move: "e2e4" }, extra: true }).valid, false);
+  assert.equal(game.validateAction(state, "white", { type: "resign", payload: [] }).valid, false);
+  assert.equal(game.validateAction(state, "white", { type: "resign", payload: { move: "e2e4" } }).valid, false);
+  assert.equal(game.validateAction(state, "white", { type: "resign", payload: {} }).valid, true);
+  assert.equal(game.validateAction(state, "white", null).valid, false);
+  assert.equal(game.validateAction(state, "white", { type: "move", payload: null }).valid, false);
+  assert.equal(game.validateAction(state, "white", { type: "jump", payload: {} }).valid, false);
+  assert.throws(() => game.applyAction(state, "white", { type: "move", payload: { move: "E2E4" } }));
+  assert.throws(() => game.applyAction(state, "white", { type: "move", payload: { move: "e2e4", extra: 1 } }));
+  assert.equal(state.chess.history().length, 0);
+});
+
+test("lowercase UCI is applied verbatim and drives telemetry and replay", () => {
+  const state = game.createState();
+  const next = game.applyAction(state, "white", { type: "move", payload: { move: "e2e4" } });
+  assert.equal(next.moves[0].uci, "e2e4");
+  assert.equal(game.eventProjection(next).fen, next.chess.fen());
+});
+
+test("saved state rejects tampered move records and resignation metadata", () => {
+  let state = game.createState();
+  state = play(state, "e2e4");
+  state = play(state, "e7e5");
+  const snapshot = game.serialize(state) as { moves: Array<{ ply: number; color: string }>; resignation?: unknown };
+  assert.doesNotThrow(() => game.deserialize(snapshot));
+
+  const badPly = JSON.parse(JSON.stringify(snapshot)) as { moves: Array<{ ply: number }> };
+  badPly.moves[0].ply = 5;
+  assert.throws(() => game.deserialize(badPly), /ply/i);
+
+  const badColor = JSON.parse(JSON.stringify(snapshot)) as { moves: Array<{ color: string }> };
+  badColor.moves[0].color = "black";
+  assert.throws(() => game.deserialize(badColor), /color/i);
+
+  const badUci = JSON.parse(JSON.stringify(snapshot)) as { moves: Array<{ uci: string }> };
+  badUci.moves[1].uci = "E7E5";
+  assert.throws(() => game.deserialize(badUci), /UCI/i);
+
+  const badResignation = JSON.parse(JSON.stringify(snapshot)) as { resignation?: unknown };
+  badResignation.resignation = { playerId: "nobody", at: "invalid" };
+  assert.throws(() => game.deserialize(badResignation), /resign/i);
 });

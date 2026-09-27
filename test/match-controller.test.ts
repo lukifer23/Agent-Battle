@@ -5,7 +5,8 @@ import os from "node:os";
 import { join } from "node:path";
 import { AgentExecutionError, AgentRegistry, type AgentAdapter, type AgentReply } from "../src/domain/agent.js";
 import { MatchController } from "../src/domain/MatchController.js";
-import { GameRegistry } from "../src/domain/game.js";
+import { GameRegistry, type GameDefinition, type ObservationContext } from "../src/domain/game.js";
+import { parseActionEnvelope } from "../src/domain/actions.js";
 import { ChessGame } from "../src/games/chess/ChessGame.js";
 import type { GameAction, GameObservation, MatchRecord, PlayerConfig, ProviderInfo } from "../src/shared.js";
 import { MatchStore } from "../src/server/store.js";
@@ -167,4 +168,78 @@ test("saved match reload restores canonical chess state and replay history", asy
     assert.match(restoredHarness.controller.get(match.id)?.history[0]?.fenBefore ?? "", /^rnbq/);
     assert.match(restoredHarness.controller.get(match.id)?.history[0]?.fenAfter ?? "", /^rnbq/);
   } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+interface ToyState { n: number }
+
+class ToyGame implements GameDefinition<ToyState> {
+  readonly id = "toy";
+  readonly version = "toy-1";
+  readonly observationVersion = "toy-observation-1";
+  readonly actionSchemaVersion = "toy-action-1";
+  readonly playerIds = ["a", "b"] as const;
+  playerLabel(playerId: string): string {
+    if (playerId !== "a" && playerId !== "b") throw new Error(`Unknown toy player ${playerId}.`);
+    return playerId.toUpperCase();
+  }
+  createState(): ToyState { return { n: 0 }; }
+  currentPlayer(state: ToyState): string | null { return this.isTerminal(state) ? null : state.n % 2 === 0 ? "a" : "b"; }
+  plyCount(state: ToyState): number { return state.n; }
+  observe(state: ToyState, context: ObservationContext) {
+    return {
+      schemaVersion: this.observationVersion,
+      gameId: this.id,
+      matchId: context.matchId,
+      turnId: context.turnId,
+      playerId: context.player.id,
+      playerLabel: context.player.label,
+      sideToMove: context.player.id,
+      ply: context.ply,
+      turnIndex: context.turnIndex,
+      state: { n: state.n },
+      legalActions: [{ type: "inc", payload: {} }],
+      actionSchema: { type: "object" },
+      history: [],
+      clock: { turnTimeoutMs: context.turnTimeoutMs },
+      status: "active" as const,
+      ...(context.feedback ? { feedback: context.feedback } : {}),
+    };
+  }
+  validateAction(state: ToyState, playerId: string, action: unknown) {
+    if (this.currentPlayer(state) !== playerId) return { valid: false, reason: "Not this player's turn." };
+    const envelope = parseActionEnvelope(action);
+    if (!envelope || envelope.type !== "inc" || Object.keys(envelope.payload).length !== 0) return { valid: false, reason: "Only an empty inc action is allowed." };
+    return { valid: true };
+  }
+  applyAction(state: ToyState, playerId: string, action: unknown): ToyState {
+    const validation = this.validateAction(state, playerId, action);
+    if (!validation.valid) throw new Error(validation.reason ?? "Invalid toy action.");
+    return { n: state.n + 1 };
+  }
+  isTerminal(state: ToyState): boolean { return state.n >= 2; }
+  result(state: ToyState) { return state.n >= 2 ? { kind: "win" as const, winnerId: "a", notation: "1-0", reason: "Toy terminal" } : undefined; }
+  winResult(winnerId: string, reason: string) { return { kind: "win" as const, winnerId, notation: "1-0", reason }; }
+  serialize(state: ToyState): unknown { return { n: state.n }; }
+  deserialize(saved: unknown): ToyState {
+    if (!saved || typeof saved !== "object" || typeof (saved as { n?: unknown }).n !== "number") throw new Error("Saved toy state is invalid.");
+    return { n: (saved as { n: number }).n };
+  }
+  actionLabel(): string { return "inc"; }
+  eventProjection(): Record<string, unknown> { return {}; }
+}
+
+test("controller advances a game that returns fresh immutable state", async () => {
+  const registry = new AgentRegistry();
+  registry.register("codex", (config) => new ScriptedAgent(config, async () => ({ type: "inc", payload: {} })));
+  const controller = new MatchController(
+    new GameRegistry().register(new ToyGame()), registry, [], async () => providers, () => undefined,
+  );
+  const match = await controller.create({ gameId: "toy", players: { a: config("a"), b: config("b") }, turnTimeoutSeconds: 30 });
+  await controller.start(match.id);
+  const done = await waitFor(controller, match.id, ["finished"]);
+  assert.equal(done.status, "finished");
+  assert.deepEqual(done.gameState, { n: 2 });
+  assert.equal(done.history.length, 2);
+  assert.deepEqual(done.history.map((turn) => turn.ply), [1, 2]);
+  assert.deepEqual(done.history.map((turn) => turn.turnIndex), [1, 2]);
 });

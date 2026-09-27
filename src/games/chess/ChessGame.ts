@@ -1,6 +1,7 @@
 import { Chess, type Move } from "chess.js";
 import type { ChessMoveRecord, ChessSnapshot, GameAction, GameObservation, MatchResult, PlayerSeat } from "../../shared.js";
 import type { ActionValidation, GameDefinition, ObservationContext } from "../../domain/game.js";
+import { isPlainObject, parseActionEnvelope } from "../../domain/actions.js";
 
 interface ChessRuntimeState {
   chess: Chess;
@@ -13,7 +14,7 @@ function uci(move: Move): string {
 }
 
 function safeSnapshot(value: unknown): ChessSnapshot {
-  if (!value || typeof value !== "object") throw new Error("Saved chess state is invalid.");
+  if (!isPlainObject(value)) throw new Error("Saved chess state is invalid.");
   const state = value as Partial<ChessSnapshot>;
   if (typeof state.fen !== "string" || typeof state.pgn !== "string" || !Array.isArray(state.moves)) {
     throw new Error("Saved chess state is missing FEN, PGN, or move history.");
@@ -21,10 +22,33 @@ function safeSnapshot(value: unknown): ChessSnapshot {
   return state as ChessSnapshot;
 }
 
+const uciPattern = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
+
+function validateMoveRecord(value: unknown, index: number): ChessMoveRecord {
+  if (!isPlainObject(value)) throw new Error(`Saved move record ${index + 1} is not an object.`);
+  const move = value as Partial<ChessMoveRecord>;
+  if (move.ply !== index + 1) throw new Error(`Saved move record ${index + 1} has a non-contiguous ply number.`);
+  if (move.color !== "white" && move.color !== "black") throw new Error(`Saved move record ${index + 1} has an invalid color.`);
+  if (typeof move.san !== "string" || move.san.length === 0) throw new Error(`Saved move record ${index + 1} is missing SAN.`);
+  if (typeof move.uci !== "string" || !uciPattern.test(move.uci)) throw new Error(`Saved move record ${index + 1} has an invalid UCI move.`);
+  if (typeof move.fen !== "string") throw new Error(`Saved move record ${index + 1} is missing a FEN checkpoint.`);
+  if (typeof move.at !== "string" || Number.isNaN(Date.parse(move.at))) throw new Error(`Saved move record ${index + 1} has an invalid timestamp.`);
+  return move as ChessMoveRecord;
+}
+
+function validateResignation(value: unknown): { playerId: string; at: string } | undefined {
+  if (value === undefined) return undefined;
+  if (!isPlainObject(value)) throw new Error("Saved resignation metadata is invalid.");
+  const { playerId, at } = value as { playerId?: unknown; at?: unknown };
+  if (playerId !== "white" && playerId !== "black") throw new Error("Saved resignation names an unknown player.");
+  if (typeof at !== "string" || Number.isNaN(Date.parse(at))) throw new Error("Saved resignation has an invalid timestamp.");
+  return { playerId, at };
+}
+
 export class ChessGame implements GameDefinition<ChessRuntimeState> {
   readonly id = "chess";
   readonly version = "standard-1";
-  readonly observationVersion = "chess-observation-v1";
+  readonly observationVersion = "chess-observation-v2";
   readonly actionSchemaVersion = "game-action-v1";
   readonly playerIds = ["white", "black"] as const;
 
@@ -40,6 +64,10 @@ export class ChessGame implements GameDefinition<ChessRuntimeState> {
   currentPlayer(state: ChessRuntimeState): string | null {
     if (this.isTerminal(state)) return null;
     return state.chess.turn() === "w" ? "white" : "black";
+  }
+
+  plyCount(state: ChessRuntimeState): number {
+    return state.moves.length;
   }
 
   legalActions(state: ChessRuntimeState, playerId: string): GameAction[] {
@@ -63,7 +91,8 @@ export class ChessGame implements GameDefinition<ChessRuntimeState> {
       playerId: context.player.id,
       playerLabel: context.player.label,
       sideToMove,
-      moveNumber: context.moveNumber,
+      ply: context.ply,
+      turnIndex: context.turnIndex,
       state: {
         fen: state.chess.fen(),
         side_to_move: sideToMove,
@@ -80,33 +109,37 @@ export class ChessGame implements GameDefinition<ChessRuntimeState> {
     };
   }
 
-  validateAction(state: ChessRuntimeState, playerId: string, action: GameAction): ActionValidation {
+  validateAction(state: ChessRuntimeState, playerId: string, action: unknown): ActionValidation {
     if (this.currentPlayer(state) !== playerId) return { valid: false, reason: `It is not ${playerId}'s turn.` };
-    if (!action || typeof action !== "object" || typeof action.type !== "string" || !action.payload || typeof action.payload !== "object") {
-      return { valid: false, reason: "Action must be an object with type and payload fields." };
+    const envelope = parseActionEnvelope(action);
+    if (!envelope) return { valid: false, reason: "Action must be an object with exactly the fields type and payload, and payload must be an object." };
+    if (envelope.type === "resign") {
+      return Object.keys(envelope.payload).length === 0 ? { valid: true } : { valid: false, reason: "Resign action payload must be empty." };
     }
-    if (action.type === "resign") {
-      return Object.keys(action.payload).length === 0 ? { valid: true } : { valid: false, reason: "Resign action payload must be empty." };
+    if (envelope.type !== "move") return { valid: false, reason: `Unsupported chess action type "${envelope.type}".` };
+    const payloadKeys = Object.keys(envelope.payload);
+    if (payloadKeys.length !== 1 || payloadKeys[0] !== "move") {
+      return { valid: false, reason: "Move payload must contain only a move field." };
     }
-    if (action.type !== "move") return { valid: false, reason: `Unsupported chess action type "${action.type}".` };
-    const move = action.payload.move;
-    if (typeof move !== "string" || !/^[a-h][1-8][a-h][1-8][qrbn]?$/i.test(move)) {
-      return { valid: false, reason: "Move must use UCI coordinate notation such as e2e4." };
+    const move = envelope.payload.move;
+    if (typeof move !== "string" || !uciPattern.test(move)) {
+      return { valid: false, reason: "Move must use lowercase UCI coordinate notation such as e2e4." };
     }
-    if (!this.legalActions(state, playerId).some((legal) => legal.type === "move" && legal.payload.move === move.toLowerCase())) {
+    if (!this.legalActions(state, playerId).some((legal) => legal.type === "move" && legal.payload.move === move)) {
       return { valid: false, reason: `Move "${move}" is illegal in the current position.` };
     }
     return { valid: true };
   }
 
-  applyAction(state: ChessRuntimeState, playerId: string, action: GameAction): ChessRuntimeState {
+  applyAction(state: ChessRuntimeState, playerId: string, action: unknown): ChessRuntimeState {
     const validation = this.validateAction(state, playerId, action);
     if (!validation.valid) throw new Error(validation.reason ?? "Invalid chess action.");
-    if (action.type === "resign") {
+    const envelope = parseActionEnvelope(action)!;
+    if (envelope.type === "resign") {
       state.resignation = { playerId, at: new Date().toISOString() };
       return state;
     }
-    const moveText = action.payload.move as string;
+    const moveText = envelope.payload.move as string;
     const from = moveText.slice(0, 2);
     const to = moveText.slice(2, 4);
     const promotion = moveText[4]?.toLowerCase();
@@ -164,19 +197,26 @@ export class ChessGame implements GameDefinition<ChessRuntimeState> {
 
   deserialize(saved: unknown): ChessRuntimeState {
     const snapshot = safeSnapshot(saved);
+    const moves = snapshot.moves.map((move, index) => validateMoveRecord(move, index));
+    const resignation = validateResignation(snapshot.resignation);
     const chess = new Chess();
-    if (snapshot.pgn) chess.loadPgn(snapshot.pgn);
+    if (snapshot.pgn) {
+      try { chess.loadPgn(snapshot.pgn); }
+      catch (error) { throw new Error(`Saved PGN could not be parsed: ${error instanceof Error ? error.message : "invalid PGN"}`); }
+    }
     if (chess.fen() !== snapshot.fen) throw new Error("Saved PGN and FEN do not describe the same chess position.");
     const replay = new Chess();
-    if (snapshot.moves.length !== chess.history().length) throw new Error("Saved move records do not match the PGN history length.");
-    for (const [index, move] of snapshot.moves.entries()) {
+    if (moves.length !== chess.history().length) throw new Error("Saved move records do not match the PGN history length.");
+    for (const [index, move] of moves.entries()) {
       const played = replay.move({ from: move.uci.slice(0, 2), to: move.uci.slice(2, 4), ...(move.uci[4] ? { promotion: move.uci[4] } : {}) });
       if (played.san !== move.san || replay.fen() !== move.fen || uci(played) !== move.uci) {
         throw new Error(`Saved move record ${index + 1} does not match replayed chess state.`);
       }
+      const expectedColor = played.color === "w" ? "white" : "black";
+      if (move.color !== expectedColor) throw new Error(`Saved move record ${index + 1} has the wrong color.`);
     }
     if (replay.fen() !== snapshot.fen) throw new Error("Saved move history does not lead to the recorded FEN.");
-    return { chess, moves: snapshot.moves, ...(snapshot.resignation ? { resignation: snapshot.resignation } : {}) };
+    return { chess, moves, ...(resignation ? { resignation } : {}) };
   }
 
   actionLabel(action: GameAction): string {

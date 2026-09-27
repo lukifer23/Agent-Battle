@@ -141,8 +141,9 @@ export class MatchController {
         turnTimeoutSeconds: request.turnTimeoutSeconds,
         maxRetries: 1,
         retryPolicy: "retry-invalid-once-then-forfeit",
-        promptVersion: "observation-contract-v1",
+        promptVersion: "observation-contract-v2",
         toolSchemaVersion: game.actionSchemaVersion,
+        resultPolicy: "engine-terminal-with-arena-adjudication",
       },
       gameState: game.serialize(state),
       history: [],
@@ -232,7 +233,7 @@ export class MatchController {
 
   private async run(id: string, game: GameDefinition<unknown>, running: RunningMatch): Promise<void> {
     const match = this.require(id);
-    const state = this.runtime.get(id);
+    let state = this.runtime.get(id);
     if (state === undefined) {
       match.status = "error";
       match.error = "The game state is missing.";
@@ -262,7 +263,8 @@ export class MatchController {
         const adapter = running.agents.get(playerId);
         if (!adapter) throw new Error(`Adapter for player ${playerId} was not initialized.`);
         const turnId = randomUUID();
-        const acceptedPly = match.history.filter((turn) => turn.valid).length + 1;
+        const turnIndex = match.history.length + 1;
+        const ply = game.plyCount(state) + 1;
         let feedback: string | undefined;
         let selectedAction: GameAction | undefined;
         const attempts: AgentAttempt[] = [];
@@ -270,13 +272,14 @@ export class MatchController {
           matchId: id,
           turnId,
           player: seat,
-          moveNumber: acceptedPly,
+          ply,
+          turnIndex,
           turnTimeoutMs: match.settings.turnTimeoutSeconds * 1000,
         });
         const before = game.serialize(state);
         const beforeObject = before && typeof before === "object" ? before as Record<string, unknown> : {};
         const fenBefore = typeof beforeObject.fen === "string" ? beforeObject.fen : undefined;
-        this.emit(match, "turn.started", `${seat.agent.name} to act`, { turnId, ply: acceptedPly, legalActionCount: observation.legalActions.length, fenBefore }, playerId);
+        this.emit(match, "turn.started", `${seat.agent.name} to act`, { turnId, turnIndex, ply, legalActionCount: observation.legalActions.length, fenBefore }, playerId);
         this.emit(match, "agent.thinking", `${seat.agent.name} is considering the observation`, { turnId }, playerId);
 
         for (let attemptNumber = 1; attemptNumber <= match.settings.maxRetries + 1; attemptNumber += 1) {
@@ -300,7 +303,7 @@ export class MatchController {
 
           if (failure instanceof AgentExecutionError && !failure.timedOut) {
             attempts.push(this.attempt(attemptNumber, startedAt, "error", { error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
-            const record = this.turnRecord(match, game, seat, acceptedPly, turnId, observation, attempts, false);
+            const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
             match.history.push(record);
             match.status = "error";
             match.error = failure.message;
@@ -348,6 +351,7 @@ export class MatchController {
             }));
           } else {
             attempts.push(this.attempt(attemptNumber, startedAt, "error", { error: failure instanceof Error ? failure.message : "Unknown agent failure." }));
+            match.history.push(this.turnRecord(match, game, seat, turnId, observation, attempts, false));
             match.status = "error";
             match.error = failure instanceof Error ? failure.message : "Unknown agent failure.";
             this.emit(match, "agent.error", match.error, { turnId }, playerId);
@@ -366,14 +370,14 @@ export class MatchController {
         }
 
         if (running.control !== "continue") {
-          const record = this.turnRecord(match, game, seat, acceptedPly, turnId, observation, attempts, false);
+          const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
           if (attempts.length) match.history.push(record);
           this.persistState(match, game, state);
           break;
         }
 
         if (!selectedAction) {
-          const record = this.turnRecord(match, game, seat, acceptedPly, turnId, observation, attempts, false);
+          const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
           match.history.push(record);
           const winnerId = match.players.find((player) => player.id !== playerId)?.id;
           this.emit(match, "move.rejected", `${seat.agent.name} exhausted its retry after: ${feedback ?? "no valid action"}`, { turnId, retryCount: attempts.length - 1 }, playerId);
@@ -383,9 +387,10 @@ export class MatchController {
         }
 
         const after = game.applyAction(state, playerId, selectedAction);
-        this.runtime.set(id, after);
-        const afterSnapshot = game.serialize(after);
-        const record = this.turnRecord(match, game, seat, acceptedPly, turnId, observation, attempts, true);
+        state = after;
+        this.runtime.set(id, state);
+        const afterSnapshot = game.serialize(state);
+        const record = this.turnRecord(match, game, seat, turnId, observation, attempts, true);
         record.action = selectedAction;
         record.actionLabel = game.actionLabel(selectedAction);
         const afterObject = afterSnapshot && typeof afterSnapshot === "object" ? afterSnapshot as Record<string, unknown> : {};
@@ -394,18 +399,18 @@ export class MatchController {
         record.retryCount = Math.max(0, attempts.length - 1);
         match.history.push(record);
         this.emit(match, "move.applied", `${seat.agent.name} played ${record.actionLabel}`, {
-          turnId, ply: acceptedPly, action: selectedAction, actionLabel: record.actionLabel,
-          fenBefore, ...game.eventProjection(after),
+          turnId, ply, action: selectedAction, actionLabel: record.actionLabel,
+          fenBefore, ...game.eventProjection(state),
         }, playerId);
-        this.emit(match, "turn.completed", `${seat.agent.name} completed ply ${acceptedPly}`, {
-          turnId, ply: acceptedPly, latencyMs: record.latencyMs, retryCount: record.retryCount,
+        this.emit(match, "turn.completed", `${seat.agent.name} completed ply ${ply}`, {
+          turnId, turnIndex, ply, latencyMs: record.latencyMs, retryCount: record.retryCount,
           toolCalls: attempts.reduce((sum, attempt) => sum + (attempt.toolCalls ?? 0), 0),
           inputTokens: totalUsage(attempts, "inputTokens"), outputTokens: totalUsage(attempts, "outputTokens"),
         }, playerId);
-        this.persistState(match, game, after);
+        this.persistState(match, game, state);
 
-        if (game.isTerminal(after)) {
-          this.finish(match, game, after, game.result(after) ?? { kind: "draw", notation: "1/2-1/2", reason: "Game ended without a result." });
+        if (game.isTerminal(state)) {
+          this.finish(match, game, state, game.result(state) ?? { kind: "draw", notation: "1/2-1/2", reason: "Game ended without a result." });
           return;
         }
       }
@@ -462,7 +467,6 @@ export class MatchController {
     match: MatchRecord,
     game: GameDefinition<unknown>,
     seat: PlayerSeat,
-    ply: number,
     turnId: string,
     observation: ReturnType<typeof game.observe>,
     attempts: AgentAttempt[],
@@ -472,7 +476,8 @@ export class MatchController {
     const action = attempts.at(-1)?.action;
     return {
       matchId: match.id,
-      ply,
+      ply: observation.ply,
+      turnIndex: observation.turnIndex,
       turnId,
       agentId: `${seat.id}:${seat.agent.provider}:${seat.agent.model || "default"}`,
       model: seat.agent.model,

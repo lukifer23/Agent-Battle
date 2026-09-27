@@ -4,7 +4,10 @@ export interface ObservationContext {
   matchId: string;
   turnId: string;
   player: PlayerSeat;
-  moveNumber: number;
+  /** Board half-move number of the move about to be played (1-based). */
+  ply: number;
+  /** Sequential agent turn within the match (1-based). */
+  turnIndex: number;
   turnTimeoutMs: number;
   feedback?: string;
 }
@@ -23,9 +26,11 @@ export interface GameDefinition<State> {
   playerLabel(playerId: string): string;
   createState(): State;
   currentPlayer(state: State): string | null;
+  /** Number of board plies already applied to the state. */
+  plyCount(state: State): number;
   observe(state: State, context: ObservationContext): GameObservation;
-  validateAction(state: State, playerId: string, action: GameAction): ActionValidation;
-  applyAction(state: State, playerId: string, action: GameAction): State;
+  validateAction(state: State, playerId: string, action: unknown): ActionValidation;
+  applyAction(state: State, playerId: string, action: unknown): State;
   isTerminal(state: State): boolean;
   result(state: State): MatchResult | undefined;
   winResult(winnerId: string, reason: string): MatchResult;

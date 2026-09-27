@@ -6,20 +6,21 @@ The browser is never an agent tool or input source. The match controller builds 
 
 Agents do not receive a mutable game object, a filesystem path to the game database, an HTTP endpoint for arbitrary moves, or access to the GUI. A restarted agent can play from the next full observation without earlier conversation history.
 
-## Chess observation v1
+## Chess observation v2
 
 The exact fields are defined by `GameObservation` in `src/shared.ts` and built by `ChessGame.observe()`.
 
 ```json
 {
-  "schemaVersion": "chess-observation-v1",
+  "schemaVersion": "chess-observation-v2",
   "gameId": "chess",
   "matchId": "match UUID",
   "turnId": "unique turn UUID",
   "playerId": "white",
   "playerLabel": "White",
   "sideToMove": "white",
-  "moveNumber": 12,
+  "ply": 23,
+  "turnIndex": 23,
   "state": {
     "fen": "current FEN",
     "side_to_move": "white",
@@ -68,6 +69,8 @@ Or resign:
 ```
 
 The parser rejects prose, markdown, trailing content, missing fields and non-object payloads. The game implementation then checks that the action type, current player, payload and move are legal. Any CLI tool call is also rejected for this push-observation contract; agents should return the action directly.
+
+Both the provider parser and the game boundary enforce the same strict envelope: exactly the two keys `type` and `payload`. Extra top-level keys, array or null payloads, and unknown action types are rejected. Chess move payloads must contain exactly the single key `move`, and the move string must be lowercase UCI (for example `e2e4`, `e7e8q`). Uppercase notation is rejected as a protocol error rather than normalized, so the validated value, the applied move, telemetry and replay all use the same string. Invalid actions are never repaired.
 
 ## Errors, retries and timeouts
 

@@ -4,6 +4,7 @@ import os from "node:os";
 import { delimiter, join } from "node:path";
 import type { AgentUsage, GameAction, GameObservation, PlayerConfig, Provider, ProviderInfo } from "../shared.js";
 import { AgentExecutionError, AgentProtocolError, type AgentAdapter, type AgentReply } from "../domain/agent.js";
+import { parseActionEnvelope } from "../domain/actions.js";
 
 interface Invocation {
   args: string[];
@@ -108,11 +109,7 @@ function excerpt(text: string, limit = 1200): string {
 }
 
 function parseJsonAction(value: unknown): GameAction | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const candidate = value as Record<string, unknown>;
-  if (typeof candidate.type !== "string" || !candidate.payload || typeof candidate.payload !== "object" || Array.isArray(candidate.payload)) return undefined;
-  if (Object.keys(candidate).some((key) => !["type", "payload"].includes(key))) return undefined;
-  return { type: candidate.type, payload: candidate.payload as Record<string, unknown> };
+  return parseActionEnvelope(value);
 }
 
 export function parseStructuredAction(output: string, provider: Provider): GameAction {

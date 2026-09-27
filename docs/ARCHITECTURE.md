@@ -26,7 +26,7 @@ The controller never reads the board from the UI. The React app cannot make a mo
 
 `src/domain/game.ts` defines the game plug-in contract: game identity/version, player IDs and labels, state creation, current-player selection, player-specific observations, action validation/application, terminal/result handling, serialization and deserialization. The controller holds game state as an opaque value and calls this contract. It does not import `Chess` or inspect chess moves.
 
-`ChessGame` in `src/games/chess/ChessGame.ts` implements standard two-player chess using chess.js. Its internal state is a chess.js position, move records and optional resignation. Its observation exposes FEN, current side, move number, legal UCI moves, move history, allowed action schema and the turn deadline. Serialization includes FEN, PGN, per-move FENs and resignation metadata. Reload verifies that saved PGN, FEN and move records agree.
+`ChessGame` in `src/games/chess/ChessGame.ts` implements standard two-player chess using chess.js. Its internal state is a chess.js position, move records and optional resignation. Its observation exposes FEN, current side, the upcoming board ply and turn index, legal UCI moves, move history, allowed action schema and the turn deadline. Serialization includes FEN, PGN, per-move FENs and resignation metadata. Reload verifies that saved PGN, FEN, move records and resignation metadata agree.
 
 The game contract also exposes `eventProjection(state)`. Chess returns the latest move record and current FEN so the spectator can update the board and replay one ply at a time without receiving a full match snapshot after every event.
 
