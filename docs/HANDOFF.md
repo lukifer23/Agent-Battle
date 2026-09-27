@@ -2,6 +2,8 @@
 
 ## Concurrent work notice
 
+The local implementation lane is now working on a bounded time-control follow-up: 5/10/30/60-minute and custom setup presets, durable accumulated active-runtime accounting across pause/restart, a wall-time cutoff during an in-flight request, and distinct time-control results. Coordinate edits to `MatchController`, match/schema timing fields, `App.tsx`, and timing tests against this work. The existing live playtest server is intentionally left running until its match finishes; new builds will use a separate isolated store and port.
+
 As of 2026-09-27, F1 and F1.1 are on `main` through `6e4059d4a1e03000c85c9f24a7cf7c621772b037`. F1.1 makes accepted actions and retry-exhaustion forfeits atomic durable transitions, detaches chess snapshots, and streams presentation events without a store write. Concurrent agents should base changes to the controller, store, schema, startup storage handling, and storage regressions on that commit. Invocation ledgers, per-invocation budgets, usage/provenance, safe public/private contracts, game-neutral infrastructure and UI, and provider qualification remain pending follow-up work.
 
 ## Current state
