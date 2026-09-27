@@ -6,6 +6,7 @@ import type { ActionValidation, GameDefinition, GameRegistry } from "./game.js";
 import { buildSnapshot } from "./snapshot.js";
 import { projectTurn } from "./projection.js";
 import { matchReportedCost, matchRequests } from "./usage.js";
+import { beginMatchTime, endMatchTime, remainingMatchMs } from "./matchTime.js";
 import type {
   AgentAttempt,
   AppState,
@@ -34,6 +35,7 @@ interface RunningMatch {
 const CANCELLATION_HARD_GRACE_MS = 2500;
 const ACTIVE_STATUSES: MatchStatus[] = ["ready", "running", "paused", "interrupted"];
 const PRESENTATION_EVENTS = new Set(["agent.ready", "agent.thinking", "agent.started", "agent.response", "move.proposed", "turn.started", "agent.timeout"]);
+class WallTimeExceededError extends Error {}
 
 export interface CreateMatchRequest {
   gameId: string;
@@ -82,6 +84,7 @@ export class MatchController {
           if (!matches) throw new Error("Saved result does not match the replayed game position.");
         }
         if (match.status === "running") {
+          endMatchTime(match);
           match.status = "interrupted";
           match.currentPlayerId = undefined;
           match.error = "The app restarted during this match. Its saved game state is intact; resume to ask the current player again.";
@@ -89,6 +92,7 @@ export class MatchController {
         }
         if (ACTIVE_STATUSES.includes(match.status)) this.runtime.set(match.id, state);
       } catch (error) {
+        endMatchTime(match);
         match.status = "error";
         match.error = `Could not restore saved ${match.gameId || "game"} state: ${error instanceof Error ? error.message : "invalid snapshot"}`;
         migrated = true;
@@ -220,6 +224,7 @@ export class MatchController {
         budgets,
       },
       environment,
+      timeAccounting: { mode: "active-runtime-v1", elapsedMs: 0 },
       gameState: game.serialize(state),
       history: [],
       events: [],
@@ -252,6 +257,7 @@ export class MatchController {
     const running: RunningMatch = { control: "continue", agents: new Map(), inFlight: new Set(), done: Promise.resolve(), generation };
     this.runs.set(id, running);
     match.status = "running";
+    beginMatchTime(match);
     match.error = undefined;
     match.currentPlayerId = undefined;
     const resuming = match.history.length > 0 || Boolean(match.pendingTurn);
@@ -268,6 +274,7 @@ export class MatchController {
       const current = this.get(id);
       if (!current) return;
       current.status = "error";
+      endMatchTime(current);
       current.error = error instanceof Error ? error.message : "Unexpected match controller failure.";
       current.currentPlayerId = undefined;
       try {
@@ -301,6 +308,7 @@ export class MatchController {
       return;
     }
     if (["ready", "paused", "interrupted", "running"].includes(match.status)) {
+      endMatchTime(match);
       match.status = "stopped";
       match.currentPlayerId = undefined;
       match.error = undefined;
@@ -395,6 +403,7 @@ export class MatchController {
     const match = this.require(id);
     let state = this.runtime.get(id);
     if (state === undefined) {
+      endMatchTime(match);
       match.status = "error";
       match.error = "The game state is missing.";
       this.emit(match, "agent.error", match.error);
@@ -421,6 +430,7 @@ export class MatchController {
             attempts: [initializationAttempt],
           };
           match.status = "error";
+          endMatchTime(match);
           match.error = message;
           match.currentPlayerId = undefined;
           this.emit(match, "agent.error", `${seat.agent.name} could not initialize: ${message}`, { phase: "initialization" }, seat.id);
@@ -476,6 +486,8 @@ export class MatchController {
 
         for (let attemptNumber = resumeAttempt; attemptNumber <= match.settings.maxRetries + 1; attemptNumber += 1) {
           if (running.control !== "continue") break;
+          const attemptBudgetReason = this.budgetStopReason(match, game, state);
+          if (attemptBudgetReason) { this.budgetStop(match, attemptBudgetReason); return; }
           const startedAt = new Date().toISOString();
           this.emit(match, "agent.started", `${seat.agent.name} request ${attemptNumber}`, { turnId, attempt: attemptNumber }, playerId);
           let reply: Awaited<ReturnType<typeof adapter.act>> | undefined;
@@ -484,7 +496,7 @@ export class MatchController {
           running.inFlight.add(control);
           try {
             const attemptObservation = feedback ? { ...observation, feedback } : observation;
-            reply = await this.invokeWithTimeout(adapter, attemptObservation, control);
+            reply = await this.invokeWithTimeout(adapter, attemptObservation, control, remainingMatchMs(match));
           } catch (error) { failure = error; }
           finally {
             running.inFlight.delete(control);
@@ -500,12 +512,19 @@ export class MatchController {
             break;
           }
 
+          if (failure instanceof WallTimeExceededError) {
+            attempts.push(this.attempt(attemptNumber, startedAt, "cancelled", { phase: "controller", error: failure.message }));
+            this.budgetStop(match, `maximum active time (${match.settings.budgets.maxWallMinutes} min) reached`);
+            return;
+          }
+
           if (failure instanceof AgentExecutionError && !failure.timedOut) {
             attempts.push(this.attempt(attemptNumber, startedAt, "error", { phase: "provider", error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
             const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
             match.history.push(record);
             match.pendingTurn = undefined;
             match.status = "error";
+            endMatchTime(match);
             match.error = failure.message;
             match.currentPlayerId = undefined;
             this.emit(match, "agent.error", `${seat.agent.name} failed: ${failure.message}`, { turnId, attempt: attemptNumber }, playerId);
@@ -554,6 +573,7 @@ export class MatchController {
             match.history.push(this.turnRecord(match, game, seat, turnId, observation, attempts, false));
             match.pendingTurn = undefined;
             match.status = "error";
+            endMatchTime(match);
             match.error = failure instanceof Error ? failure.message : "Unknown agent failure.";
             this.emit(match, "agent.error", match.error, { turnId }, playerId);
             this.persistCheckpoint(match, game, state);
@@ -590,6 +610,7 @@ export class MatchController {
           const result = game.winResult(winnerId, `${seat.label} forfeited after retry exhaustion: ${feedback ?? "invalid action"}`);
           match.result = result;
           match.status = "forfeit";
+          endMatchTime(match);
           match.currentPlayerId = undefined;
           match.error = undefined;
           match.gameState = game.serialize(state, result);
@@ -618,6 +639,7 @@ export class MatchController {
         if (terminalResult) {
           match.result = terminalResult;
           match.status = "finished";
+          endMatchTime(match);
           match.currentPlayerId = undefined;
           match.error = undefined;
         }
@@ -645,10 +667,12 @@ export class MatchController {
       }
 
       if (running.control === "pause") {
+        endMatchTime(match);
         match.status = "paused";
         match.currentPlayerId = undefined;
         this.emit(match, "match.paused", "Match paused at a saved turn boundary. Resume to request the current player's move again.");
       } else if (running.control === "stop") {
+        endMatchTime(match);
         match.status = "stopped";
         match.currentPlayerId = undefined;
         this.emit(match, "match.stopped", "Match stopped. The current position and telemetry are saved.");
@@ -660,6 +684,7 @@ export class MatchController {
         return;
       }
       match.status = "error";
+      endMatchTime(match);
       match.error = error instanceof Error ? error.message : "Unexpected match controller failure.";
       match.currentPlayerId = undefined;
       match.pendingTurn = undefined;
@@ -677,8 +702,7 @@ export class MatchController {
     if (plies >= budgets.maxPlies) return `maximum plies (${budgets.maxPlies}) reached`;
     const requests = matchRequests(match);
     if (requests >= budgets.maxRequests) return `maximum requests (${budgets.maxRequests}) reached`;
-    const wallMinutes = (Date.now() - Date.parse(match.createdAt)) / 60_000;
-    if (wallMinutes >= budgets.maxWallMinutes) return `maximum wall time (${budgets.maxWallMinutes} min) reached`;
+    if (remainingMatchMs(match) <= 0) return `maximum ${match.timeAccounting ? "active" : "wall"} time (${budgets.maxWallMinutes} min) reached`;
     if (budgets.maxReportedCostUsd !== null) {
       const cost = matchReportedCost(match);
       if (cost !== null && cost >= budgets.maxReportedCostUsd) return `reported cost threshold ($${budgets.maxReportedCostUsd}) reached`;
@@ -687,9 +711,10 @@ export class MatchController {
   }
 
   private budgetStop(match: MatchRecord, reason: string): void {
+    endMatchTime(match);
     match.status = "stopped";
     match.currentPlayerId = undefined;
-    match.error = `Budget reached: ${reason}. No further request was made.`;
+    match.error = `Budget reached: ${reason}. Further requests are blocked.`;
     match.updatedAt = new Date().toISOString();
     this.emit(match, "match.stopped", `Stopped: ${match.error}`, { reason: "budget" });
   }
@@ -714,20 +739,28 @@ export class MatchController {
     adapter: AgentAdapter,
     observation: ReturnType<GameDefinition<unknown>["observe"]>,
     control: AbortController,
+    wallRemainingMs: number,
   ): Promise<Awaited<ReturnType<AgentAdapter["act"]>>> {
     const actPromise = adapter.act(observation, { signal: control.signal });
-    const timeoutError = new AgentExecutionError(`Move timed out after ${Math.ceil(observation.clock.turnTimeoutMs / 1000)} seconds.`, true);
+    const wallFirst = wallRemainingMs < observation.clock.turnTimeoutMs;
+    const timeoutMs = Math.max(1, Math.min(observation.clock.turnTimeoutMs, wallRemainingMs));
+    const timeoutError = wallFirst
+      ? new WallTimeExceededError("Active match time expired during the provider request.")
+      : new AgentExecutionError(`Move timed out after ${Math.ceil(observation.clock.turnTimeoutMs / 1000)} seconds.`, true);
     let primary: NodeJS.Timeout | undefined;
     let hard: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
       primary = setTimeout(() => {
         control.abort(timeoutError);
         actPromise.then(() => reject(timeoutError), () => reject(timeoutError));
-      }, observation.clock.turnTimeoutMs);
-      hard = setTimeout(() => reject(timeoutError), observation.clock.turnTimeoutMs + CANCELLATION_HARD_GRACE_MS);
+      }, timeoutMs);
+      hard = setTimeout(() => reject(timeoutError), timeoutMs + CANCELLATION_HARD_GRACE_MS);
     });
     try {
       return await Promise.race([actPromise, timeout]);
+    } catch (error) {
+      if (control.signal.aborted && control.signal.reason instanceof WallTimeExceededError) throw control.signal.reason;
+      throw error;
     } finally {
       if (primary) clearTimeout(primary);
       if (hard) clearTimeout(hard);
@@ -777,6 +810,7 @@ export class MatchController {
   }
 
   private finish(match: MatchRecord, game: GameDefinition<unknown>, state: unknown, result: MatchResult, status: "finished" | "forfeit" = "finished"): void {
+    endMatchTime(match);
     match.result = result;
     match.status = status;
     match.currentPlayerId = undefined;

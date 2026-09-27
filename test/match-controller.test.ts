@@ -596,4 +596,106 @@ test("new matches capture requested budgets and environment provenance", async (
   assert.deepEqual(match.settings.budgets, { maxPlies: 42, maxRequests: 7, maxWallMinutes: 5, maxReportedCostUsd: 1.5 });
   assert.equal(match.environment?.adapterVersion, "agent-battle/adapter-v2");
   assert.equal(match.environment?.cliVersions.codex, "test");
+  assert.deepEqual(match.timeAccounting, { mode: "active-runtime-v1", elapsedMs: 0 });
+});
+
+test("an exhausted game-time budget stops before spawning a provider request", async () => {
+  let calls = 0;
+  const { controller } = harness(async () => { calls += 1; return resign; });
+  const match = await controller.create({
+    gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30,
+    budgets: { maxWallMinutes: 5 },
+  });
+  match.timeAccounting!.elapsedMs = 300_000;
+  await controller.start(match.id);
+  const stopped = await waitFor(controller, match.id, ["stopped"]);
+  assert.equal(calls, 0);
+  assert.equal(stopped.result, undefined);
+  assert.match(stopped.error ?? "", /active time/);
+});
+
+test("a retry cannot exceed the request budget", async () => {
+  let calls = 0;
+  const { controller } = harness(async () => { calls += 1; return action("a1a8"); });
+  const match = await controller.create({
+    gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30,
+    budgets: { maxRequests: 1 },
+  });
+  await controller.start(match.id);
+  const stopped = await waitFor(controller, match.id, ["stopped"]);
+  assert.equal(calls, 1);
+  assert.equal(stopped.result, undefined);
+  assert.equal(stopped.pendingTurn?.attempts[0]?.status, "invalid");
+});
+
+test("an in-flight game-time cutoff is a budget stop, not a chess forfeit", async () => {
+  let calls = 0;
+  const { controller } = harness(async () => { calls += 1; return new Promise<GameAction>(() => undefined); });
+  const match = await controller.create({
+    gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30,
+    budgets: { maxWallMinutes: 1 },
+  });
+  match.timeAccounting!.elapsedMs = 59_500;
+  await controller.start(match.id);
+  const stopped = await waitFor(controller, match.id, ["stopped"]);
+  assert.equal(calls, 1);
+  assert.equal(stopped.result, undefined);
+  assert.equal(stopped.pendingTurn?.attempts[0]?.status, "cancelled");
+  assert.equal(stopped.timeAccounting?.runningSince, undefined);
+  assert.ok((stopped.timeAccounting?.elapsedMs ?? 0) >= 60_000);
+});
+
+test("a provider that wraps abort errors still stops for game time", async () => {
+  const registry = new AgentRegistry();
+  registry.register("codex", (agentConfig) => ({
+    id: "wrapped-abort", config: agentConfig,
+    async initialize() {},
+    async act(_observation, control) {
+      return new Promise<AgentReply>((_resolve, reject) => {
+        control.signal.addEventListener("abort", () => reject(new AgentExecutionError("provider wrapped abort")), { once: true });
+      });
+    },
+    async shutdown() {},
+  }));
+  const controller = new MatchController(new GameRegistry().register(new ChessGame()), registry, [], async () => providers, () => undefined);
+  const match = await controller.create({ gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30, budgets: { maxWallMinutes: 1 } });
+  match.timeAccounting!.elapsedMs = 59_500;
+  await controller.start(match.id);
+  const stopped = await waitFor(controller, match.id, ["stopped", "error"]);
+  assert.equal(stopped.status, "stopped");
+  assert.equal(stopped.result, undefined);
+});
+
+test("pause and restart retain active time without charging a paused interval", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-active-time-"));
+  try {
+    const store = new MatchStore(join(folder, "matches.json"));
+    const records: MatchRecord[] = [];
+    const { controller, players } = harness(async () => new Promise<GameAction>(() => undefined), records, (items) => store.save(items));
+    const match = await create(controller);
+    await controller.start(match.id);
+    while ((players.get("white-model")?.[0]?.observations.length ?? 0) === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    await controller.pause(match.id);
+    const paused = controller.get(match.id)!;
+    const elapsed = paused.timeAccounting?.elapsedMs ?? 0;
+    assert.ok(elapsed > 0);
+    assert.equal(paused.timeAccounting?.runningSince, undefined);
+    const saved = store.load();
+    assert.equal(saved.quarantined, 0);
+    const resumed = harness(async () => resign, saved.matches);
+    await resumed.controller.start(match.id);
+    const done = await waitFor(resumed.controller, match.id, ["finished"]);
+    assert.ok((done.timeAccounting?.elapsedMs ?? 0) >= elapsed);
+    assert.equal(done.timeAccounting?.runningSince, undefined);
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("restart conservatively closes an unclosed active segment", () => {
+  const record = legacyRecord("crashed-active-timer");
+  record.status = "running";
+  record.timeAccounting = { mode: "active-runtime-v1", elapsedMs: 20_000, runningSince: new Date(Date.now() - 1_000).toISOString() };
+  const restored = harness(async () => resign, [record]).controller.get(record.id)!;
+  assert.equal(restored.status, "interrupted");
+  assert.equal(restored.timeAccounting?.runningSince, undefined);
+  assert.ok((restored.timeAccounting?.elapsedMs ?? 0) >= 21_000);
 });

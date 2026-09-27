@@ -76,7 +76,7 @@ Usage is modeled as reported categories plus a coverage flag (`none`/`partial`/`
 
 Each match stores an `environment` block (adapter version, prompt/schema versions, provider CLI versions captured at creation) and requested participant settings. Provider parsers do not yet populate resolved model identity, so CLI-default competitors may remain ambiguous across external default changes.
 
-Resource budgets (`maxPlies`, `maxRequests`, `maxWallMinutes`, optional `maxReportedCostUsd`) live in match settings and are currently checked between turns. A retry can cross a threshold; per-invocation enforcement is pending. Reaching a budget stops the match as a non-game outcome.
+Resource budgets (`maxPlies`, `maxRequests`, `maxWallMinutes`, optional `maxReportedCostUsd`) live in match settings. New records include `timeAccounting` with accumulated active milliseconds and the start of any open running segment; pause and terminal transitions close that segment. On restart, an unclosed segment is conservatively charged through recovery. Records without this field retain the former creation-age rule. Request, time, and reported-cost thresholds are checked before each invocation, including retries; the game clock can cancel an in-flight request without adjudicating a chess forfeit. Maximum plies remains a between-turn check. Provider invocation starts are not yet durably reserved, so crash-time request accounting remains incomplete. Reaching a budget stops the match as a non-game outcome.
 
 ### Transport projection and history
 

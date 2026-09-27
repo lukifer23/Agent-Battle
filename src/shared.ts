@@ -24,6 +24,13 @@ export interface MatchBudgets {
   maxReportedCostUsd: number | null;
 }
 
+/** New matches measure execution time; older records without this field retain creation-age semantics. */
+export interface MatchTimeAccounting {
+  mode: "active-runtime-v1";
+  elapsedMs: number;
+  runningSince?: string;
+}
+
 export interface MatchEnvironment {
   adapterVersion: string;
   promptVersion: string;
@@ -157,6 +164,7 @@ export interface MatchRecord {
   protocolVersion: string;
   createdAt: string;
   updatedAt: string;
+  timeAccounting?: MatchTimeAccounting;
   status: MatchStatus;
   players: [PlayerSeat, PlayerSeat];
   settings: {

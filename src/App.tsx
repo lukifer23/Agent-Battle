@@ -3,8 +3,9 @@ import { Chessboard } from "react-chessboard";
 import { applyMatchEvent, applyPresentationEvent, matchEventTypes } from "./client/matchEvents.js";
 import { highlightSquares, positionSummary } from "./client/chessView.js";
 import { aggregateUsage } from "./domain/usage.js";
+import { remainingMatchMs } from "./domain/matchTime.js";
 import { ArrowUpRight, BoardMark, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, FlipVertical, RefreshCw, Trophy } from "./components/icons.js";
-import { competitorLabel } from "./shared.js";
+import { competitorId, competitorLabel } from "./shared.js";
 import type { AppState, ChessSnapshot, MatchEvent, MatchRecord, Provider } from "./shared.js";
 
 const initialFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -16,6 +17,7 @@ const reasoningOptions: Record<Provider, string[]> = {
   opencode: [],
 };
 const REPLAYABLE = ["finished", "forfeit", "stopped", "error", "interrupted", "paused"];
+const timePresets = [5, 10, 30, 60] as const;
 
 interface Preferences {
   whiteProvider: Provider;
@@ -104,7 +106,9 @@ function App() {
   const [timeoutSeconds, setTimeoutSeconds] = useState(preferences.timeoutSeconds ?? 120);
   const [maxPlies, setMaxPlies] = useState(150);
   const [maxRequests, setMaxRequests] = useState(200);
-  const [maxWallMinutes, setMaxWallMinutes] = useState(30);
+  const [timePreset, setTimePreset] = useState<number | "custom">(30);
+  const [customMinutes, setCustomMinutes] = useState(45);
+  const maxWallMinutes = timePreset === "custom" ? customMinutes : timePreset;
   const [maxCost, setMaxCost] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -240,19 +244,21 @@ function App() {
   }, [viewingPly, totalPlies]);
 
   const standings = useMemo(() => {
-    const rows = new Map<string, { name: string; wins: number; draws: number; losses: number; points: number }>();
+    const rows = new Map<string, { name: string; control: string; wins: number; draws: number; losses: number; points: number }>();
     for (const match of state?.recentMatches ?? []) {
       if (!match.result || !["finished", "forfeit"].includes(match.status)) continue;
       for (const player of match.players) {
         const side = player.id;
         const name = competitorLabel(player.agent);
-        const row = rows.get(name) ?? { name, wins: 0, draws: 0, losses: 0, points: 0 };
+        const control = `${match.settings.budgets.maxWallMinutes}m ${match.timeAccounting ? "active" : "legacy"} · ${match.settings.turnTimeoutSeconds}s/turn`;
+        const key = `${competitorId(player.agent)}::${control}`;
+        const row = rows.get(key) ?? { name, control, wins: 0, draws: 0, losses: 0, points: 0 };
         const won = match.result.kind === "win" && match.result.winnerId === side;
         const drawn = match.result.kind === "draw";
         if (won) { row.wins += 1; row.points += 1; }
         else if (drawn) { row.draws += 1; row.points += 0.5; }
         else row.losses += 1;
-        rows.set(name, row);
+        rows.set(key, row);
       }
     }
     return [...rows.values()].sort((a, b) => b.points - a.points || b.wins - a.wins);
@@ -278,6 +284,7 @@ function App() {
   const currentTurnStart = selectedMatch?.events.filter((event) => event.type === "agent.started" && event.playerId === selectedMatch.currentPlayerId).at(-1)?.at;
   const currentTurnElapsed = currentIsRunning && currentTurnStart ? Math.max(0, Math.floor((now - Date.parse(currentTurnStart)) / 1000)) : 0;
   const turnSecondsLeft = Math.max(0, (selectedMatch?.settings.turnTimeoutSeconds ?? timeoutSeconds) - currentTurnElapsed);
+  const gameSecondsLeft = selectedMatch ? Math.max(0, Math.ceil(remainingMatchMs(selectedMatch, now) / 1000)) : 0;
 
   const startMatch = async () => {
     setPendingCommand("start"); setError("");
@@ -440,6 +447,16 @@ function App() {
                 <PlayerPicker color="black" provider={blackProvider} model={blackModel} reasoning={blackReasoning} providers={providers} loading={!providersChecked}
                   onProvider={chooseBlackProvider} onModel={setBlackModel} onReasoning={setBlackReasoning} />
               </div>
+              <fieldset className="time-control">
+                <legend>GAME TIME · ACTIVE PLAY</legend>
+                <div className="time-presets" role="group" aria-label="Game time limit">
+                  {timePresets.map((minutes) => <button key={minutes} type="button" aria-pressed={timePreset === minutes}
+                    onClick={() => setTimePreset(minutes)}>{minutes} MIN</button>)}
+                  <button type="button" aria-pressed={timePreset === "custom"} onClick={() => setTimePreset("custom")}>CUSTOM</button>
+                  {timePreset === "custom" && <label className="timeout-setting">MINUTES <input type="number" min={1} max={10000} value={customMinutes}
+                    onChange={(event) => setCustomMinutes(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></label>}
+                </div>
+              </fieldset>
               <div className="setup-footer">
                 <div className="budget-settings">
                   <label className="timeout-setting">MOVE TIMEOUT <input type="number" min={30} max={600} step={30} value={timeoutSeconds}
@@ -448,8 +465,6 @@ function App() {
                     onChange={(event) => setMaxPlies(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></label>
                   <label className="timeout-setting">MAX REQUESTS <input type="number" min={1} max={100000} value={maxRequests}
                     onChange={(event) => setMaxRequests(Math.max(1, Math.min(100000, Number(event.target.value) || 1)))} /></label>
-                  <label className="timeout-setting">MAX MINUTES <input type="number" min={1} max={10000} value={maxWallMinutes}
-                    onChange={(event) => setMaxWallMinutes(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></label>
                   <label className="timeout-setting">COST LIMIT <input type="number" min={0} step="0.01" placeholder="none" value={maxCost}
                     onChange={(event) => setMaxCost(event.target.value)} /> <span>USD</span></label>
                 </div>
@@ -457,7 +472,7 @@ function App() {
                   {busy || pendingCommand === "start" ? "PREPARING…" : "START MATCH"} <ArrowUpRight className="inline-icon" />
                 </button>
               </div>
-              <div className="inline-note">Limits are checked between requests. The cost limit is a best-effort threshold on reported provider cost, not a hard billing cap; unknown usage still counts against the request and time limits.</div>
+              <div className="inline-note">Game time counts while the match runs, including an active provider request; pause stops its clock. Move timeout is a separate per-request limit. Short presets may stop before a chess result. Cost remains a best-effort threshold on reported provider usage.</div>
               {(whiteProvider === blackProvider) && <div className="inline-note">Both sides can use the same CLI with different models.</div>}
               {providersChecked && providers.some((entry) => !entry.installed) && <div className="inline-note">Install a supported CLI and sign in before choosing it. Agent Battle uses its existing login.</div>}
             </>}
@@ -468,6 +483,7 @@ function App() {
           <section className="board-panel panel">
             <div className="board-heading">
               <div><span className="eyebrow">02 / THE ARENA</span><h2>{isReplayMatch ? "Match replay" : selectedMatch ? "Match board" : "Live board"}</h2></div>
+              {selectedMatch && <span className="game-time-badge">{selectedMatch.settings.budgets.maxWallMinutes} MIN · {selectedMatch.timeAccounting ? "ACTIVE" : "LEGACY WALL"}</span>}
               <div className={`match-state ${currentIsRunning ? "is-live" : ""}`}>
                 <span className="state-dot" />{selectedMatch ? selectedMatch.status.toUpperCase() : "WAITING"}
               </div>
@@ -532,6 +548,7 @@ function App() {
             {notice && <div className="notice" role="status">{notice}</div>}
             {currentIsRunning && <div className="turn-indicator">
               <span><span className="live-dot" /> THINKING · {currentTurnName ?? "AGENT"}</span>
+              <span className={`turn-clock ${gameSecondsLeft <= 60 ? "is-urgent" : ""}`}>GAME {formatClock(gameSecondsLeft)} LEFT</span>
               <span className={`turn-clock ${turnSecondsLeft <= 10 ? "is-urgent" : ""}`} aria-hidden="true">{formatClock(turnSecondsLeft)} LEFT</span>
             </div>}
             {canReplay && <div className="replay-control">
@@ -573,11 +590,11 @@ function App() {
           <section className="scoreboard panel">
             <div className="section-heading"><div><span className="eyebrow">HALL OF FAME</span><h2>Scoreboard</h2></div><Trophy className="trophy" /></div>
             {standings.length === 0 ? <div className="score-empty">The leaderboard starts after game one.</div> : <table className="score-table">
-              <caption className="sr-only">Scoreboard by competitor across recent matches</caption>
+              <caption className="sr-only">Scoreboard by competitor and time control across recent matches</caption>
               <thead><tr><th scope="col">AGENT</th><th scope="col">W</th><th scope="col">D</th><th scope="col">L</th><th scope="col">PTS</th></tr></thead>
               <tbody>
-                {standings.map((row, index) => <tr key={row.name}>
-                  <th scope="row" className="score-player"><span className={`rank-badge rank-${index + 1}`}>{String(index + 1).padStart(2, "0")}</span><span>{row.name}</span></th>
+                {standings.map((row, index) => <tr key={`${row.name}:${row.control}`}>
+                  <th scope="row" className="score-player"><span className={`rank-badge rank-${index + 1}`}>{String(index + 1).padStart(2, "0")}</span><span>{row.name}<small className="score-control">{row.control}</small></span></th>
                   <td>{row.wins}</td><td>{row.draws}</td><td>{row.losses}</td><td className="score-points">{row.points}</td>
                 </tr>)}
               </tbody>

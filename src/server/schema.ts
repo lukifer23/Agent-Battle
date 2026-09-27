@@ -165,6 +165,14 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
   if (raw.gameId === "chess" && raw.gameVersion !== "standard-1") return { error: "game version is unsupported" };
   if (raw.protocolVersion !== "game-action-v1") return { error: "protocol version is unsupported" };
   if (!isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)) return { error: "timestamps are invalid" };
+  if (raw.timeAccounting !== undefined) {
+    if (!isPlainObject(raw.timeAccounting) || raw.timeAccounting.mode !== "active-runtime-v1"
+      || !Number.isSafeInteger(raw.timeAccounting.elapsedMs) || (raw.timeAccounting.elapsedMs as number) < 0
+      || (raw.timeAccounting.runningSince !== undefined && !isIsoDate(raw.timeAccounting.runningSince))) {
+      return { error: "active time accounting is invalid" };
+    }
+    if (raw.status !== "running" && raw.timeAccounting.runningSince !== undefined) return { error: "non-running match has an open active timer" };
+  }
   if (!MATCH_STATUSES.includes(raw.status as MatchStatus)) return { error: `status "${String(raw.status)}" is unsupported` };
   if (!Array.isArray(raw.players) || raw.players.length !== 2) return { error: "exactly two participants are required" };
   const players = raw.players.map(validatePlayer);
@@ -236,6 +244,11 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
       protocolVersion: raw.protocolVersion,
       createdAt: raw.createdAt,
       updatedAt: raw.updatedAt,
+      ...(isPlainObject(raw.timeAccounting) ? { timeAccounting: {
+        mode: "active-runtime-v1" as const,
+        elapsedMs: raw.timeAccounting.elapsedMs as number,
+        ...(isString(raw.timeAccounting.runningSince) ? { runningSince: raw.timeAccounting.runningSince } : {}),
+      } } : {}),
       status,
       players: players.map((player) => player.value!) as [PlayerSeat, PlayerSeat],
       settings: {

@@ -5,6 +5,7 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+- Added 5/10/30/60-minute and custom active-play time controls for new matches, with durable pause/restart accounting, an in-flight cutoff, and scoreboard separation by time control. Older records retain their prior creation-age limit.
 - F1.1: accepted chess actions now commit canonical state, telemetry and event evidence together; retry exhaustion commits the forfeit with its invalid-attempt evidence. Serialized chess snapshots are detached, and presentation events no longer force a full-store write. Crash-boundary reload regressions pass without provider calls.
 - Focused storage durability and recovery repair: transitions commit before
   publication, concurrent store ownership is atomic, unsupported roots stop

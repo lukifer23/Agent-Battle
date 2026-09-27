@@ -20,7 +20,7 @@ The implementation has been hardened across lifecycle, provider execution, persi
 - A validated, versioned store with quarantine, pre-migration backups, atomic single-writer ownership, `fsync` + rename writes, a configurable data directory, and failure-aware shutdown. Unsupported roots stop startup; storage failures stop requests and are reported rather than acknowledged as saved.
 - Accepted moves save detached canonical game state, turn telemetry, events, revision, next player, and any terminal result in one commit. Retry exhaustion saves invalid-attempt evidence and its forfeit together. Presentation-only SSE activity is transient and does not trigger a full-store write.
 - One snapshot projector for HTTP and SSE with revisions, ordered event ids, idempotent client reduction, gap recovery, and a hardened local API (Host/Origin checks, JSON errors, `/api` 404, request deadlines).
-- Resource budget settings and checks between turns. Per-invocation budget enforcement, complete usage coverage, and observed resolved-model identity remain pending.
+- Resource budget settings and per-invocation checks for request, active time, and reported-cost thresholds. New matches offer 5/10/30/60-minute or custom active-play limits and cancel an in-flight request when game time expires. Legacy records keep creation-age semantics. Durable invocation reservation, complete usage coverage, and observed resolved-model identity remain pending.
 - Bounded transport projections, paginated history/detail/events/attempts endpoints, and `npm run benchmark` / `AGENT_BATTLE_METRICS` measurement.
 - Spectator UI with correct replay (first/previous/next/last/return-to-current), clickable notation, board flip, last-move and check highlighting, a readable position summary, FEN/PGN/JSON export, and accessibility work (labelled controls, scoreboard table, reduced motion, polite announcements).
 
@@ -33,6 +33,7 @@ The test suite covers:
 - Controller alternation, invalid-action correction, timeout/forfeit, provider failure, non-running stop, idempotent start, pending-turn resume, multiple-active recovery, budget stops, and fault-injected move/result/retry/pause/stop/shutdown writes.
 - Store validation, quarantine, supported migration, cross-process lock competition and API recovery notices; parser/API trust checks and SSE snapshot delivery.
 - Accepted-move and retry-forfeit crash-boundary reloads, detached chess serialization, and presentation-event revision behavior.
+- Active-time pause/restart accounting, legacy timing compatibility, pre-retry request limits, and in-flight game-time cutoff as a non-game stop.
 
 F1.1 passed 78 local tests, lint, typecheck, build, and [Node 20/22 CI](https://github.com/lukifer23/Agent-Battle/actions/runs/36354254832). The original five-match store was not modified.
 

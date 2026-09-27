@@ -124,6 +124,8 @@ test("malformed saved settings and unsupported protocol do not enter the usable 
   assert.match(validateMatchRecord(malformed).error ?? "", /maxRequests/);
   assert.match(validateMatchRecord({ ...base, protocolVersion: "unknown" }).error ?? "", /protocol version/);
   assert.match(validateMatchRecord({ ...base, revision: -1 }).error ?? "", /revision/);
+  assert.match(validateMatchRecord({ ...base, timeAccounting: { mode: "active-runtime-v1", elapsedMs: -1 } }).error ?? "", /active time/);
+  assert.match(validateMatchRecord({ ...base, timeAccounting: { mode: "active-runtime-v1", elapsedMs: 1, runningSince: new Date().toISOString() } }).error ?? "", /open active timer/);
   assert.match(validateMatchRecord({ ...base, status: "forfeit", result: { kind: "win", winnerId: "white", notation: "1-0", reason: "x" } }).error ?? "", /evidence/);
 });
 
