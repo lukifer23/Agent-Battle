@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import { join } from "node:path";
-import { AgentExecutionError, AgentRegistry, type AgentAdapter, type AgentReply } from "../src/domain/agent.js";
+import { AgentExecutionError, AgentRegistry, type AgentAdapter, type AgentReply, type AttemptControl } from "../src/domain/agent.js";
 import { MatchController } from "../src/domain/MatchController.js";
 import { GameRegistry, type GameDefinition, type ObservationContext } from "../src/domain/game.js";
 import { parseActionEnvelope } from "../src/domain/actions.js";
@@ -21,9 +21,15 @@ class ScriptedAgent implements AgentAdapter {
     this.id = `test:${config.model}`;
   }
   async initialize(): Promise<void> {}
-  async act(observation: GameObservation): Promise<AgentReply> {
+  async act(observation: GameObservation, control: AttemptControl): Promise<AgentReply> {
     this.observations.push(observation);
-    const action = await this.actFn(observation, this.observations.length);
+    const action = await Promise.race([
+      this.actFn(observation, this.observations.length),
+      new Promise<never>((_resolve, reject) => {
+        if (control.signal.aborted) { reject(control.signal.reason); return; }
+        control.signal.addEventListener("abort", () => reject(control.signal.reason), { once: true });
+      }),
+    ]);
     return {
       action,
       latencyMs: 12,
@@ -227,6 +233,21 @@ class ToyGame implements GameDefinition<ToyState> {
   actionLabel(): string { return "inc"; }
   eventProjection(): Record<string, unknown> { return {}; }
 }
+
+test("stop during an active request cancels without applying a move", async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const { controller } = harness(async () => { await gate; return action("e2e4"); });
+  const match = await create(controller);
+  await controller.start(match.id);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await controller.stop(match.id);
+  const stopped = controller.get(match.id)!;
+  assert.equal(stopped.status, "stopped");
+  assert.equal((stopped.gameState as { moves: unknown[] }).moves.length, 0);
+  assert.equal(stopped.result, undefined);
+  release();
+});
 
 test("controller advances a game that returns fresh immutable state", async () => {
   const registry = new AgentRegistry();

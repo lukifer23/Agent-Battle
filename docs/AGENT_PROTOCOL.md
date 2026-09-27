@@ -74,17 +74,20 @@ Both the provider parser and the game boundary enforce the same strict envelope:
 
 ## Errors, retries and timeouts
 
-- Per-move timeout is configurable from 30 to 600 seconds in the current UI. Both the controller and CLI adapter enforce it.
+- Per-move timeout is configurable from 30 to 600 seconds in the current UI. One attempt runner owns the deadline and process cleanup; the controller passes a cancellation signal and waits for the spawned process group to settle before starting another attempt, so a retry cannot overlap a live process.
 - A malformed, illegal or timed-out action receives one retry with an explicit feedback reason and the same board position.
-- Retry exhaustion records a forfeit and a winner. A crashed CLI or authentication/provider error marks the match `error` without awarding a win.
-- Pause stops the active process and preserves the current position; resume starts a fresh request for that same player. Stop ends the match.
-- Adapter output is capped at 256 KB. Processes run in unique temporary working directories and are killed as a process group on timeout or shutdown.
+- Retry exhaustion records a forfeit and a winner. A crashed CLI or authentication/provider error marks the match `error` without awarding a win. A provider error envelope (for example a Claude `is_error` result) is an execution error, not a forfeit.
+- Pause cancels the active attempt and preserves the current position; resume starts a fresh request for that same player. Stop ends the match. Both wait for termination and the saved checkpoint.
+- Adapter output is capped at 256 KB, final response files are size-checked before reading, and streams are decoded with a UTF-8 decoder so multibyte characters split across chunks are preserved. Processes run in unique temporary working directories and are terminated as a process group, escalating to SIGKILL even when the group leader has already exited but descendants remain. A descendant that changes its own session/group is outside this boundary; Windows process-group semantics are not qualified.
+- Response excerpts and stderr diagnostics are bounded and passed through a central redactor before storage. Redaction is best-effort, not a guarantee; keep diagnostics local.
 
 ## CLI adapters
 
 - **Codex CLI:** `codex exec` with the selected model, ephemeral session, read-only sandbox, `-c approval_policy="never"`, JSONL events and a JSON Schema-constrained final action file. Optional reasoning effort is passed as `model_reasoning_effort`; accepted values depend on the selected model (the CLI default is safest when uncertain).
-- **Claude Code:** `claude --print` with the selected model, JSON output/schema, `dontAsk`, no session persistence, no built-in tools and strict MCP config.
+- **Claude Code:** `claude --print` with the selected model, JSON output/schema, `dontAsk`, no session persistence, no built-in tools and strict MCP config. The adapter prefers the documented `structured_output` field and also accepts a documented JSON `result` field; an `is_error`/error-subtype envelope is reported as an execution error.
 - **OpenCode:** `opencode run --format json --pure --agent agent-battle` with an isolated turn directory and a per-invocation primary agent that denies all built-in and custom tools, including MCP tools. See [OpenCode agent tool permissions](https://opencode.ai/docs/agents) for the wildcard permission behavior this relies on.
+
+Each adapter processes its provider envelope once and reports usage and tool-call metadata from that single pass. Tool-call counts are `null` when the provider emitted no parseable event stream, rather than being assumed to be zero. Codex inherits the user configuration and can still use read-only tools/MCP; reported tool calls are rejected after the fact, which does not undo a tool's observation or external effect.
 
 The user authenticates each CLI separately before starting a match. Agent Battle passes no API key arguments, never stores credentials and does not call model endpoints directly. Optional model/reasoning values are passed as separate CLI arguments, not shell text. Blank model fields use each CLI's own configured default.
 

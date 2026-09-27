@@ -9,11 +9,17 @@ export interface AgentReply {
   usage: AgentAttempt["usage"];
 }
 
+export interface AttemptControl {
+  signal: AbortSignal;
+}
+
 export interface AgentAdapter {
   readonly id: string;
   readonly config: PlayerConfig;
+  /** Describes the effective per-invocation restrictions as applied, or undefined when unknown. */
+  readonly restrictions?: string;
   initialize(): Promise<void>;
-  act(observation: GameObservation): Promise<AgentReply>;
+  act(observation: GameObservation, control: AttemptControl): Promise<AgentReply>;
   shutdown(): Promise<void>;
 }
 

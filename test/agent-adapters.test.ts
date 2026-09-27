@@ -10,8 +10,9 @@ import { ChessGame } from "../src/games/chess/ChessGame.js";
 const action = { type: "move", payload: { move: "e2e4" } };
 const observation = new ChessGame().observe(new ChessGame().createState(), {
   matchId: "adapter-test", turnId: "turn-1", player: { id: "white", label: "White", agent: { provider: "codex", model: "test", name: "test" } },
-  moveNumber: 1, turnTimeoutMs: 1200,
+  ply: 1, turnIndex: 1, turnTimeoutMs: 1200,
 });
+const control = () => ({ signal: new AbortController().signal });
 
 test("strict protocol parser accepts only a JSON action envelope", () => {
   assert.deepEqual(parseStructuredAction(JSON.stringify(action), "codex"), action);
@@ -20,6 +21,15 @@ test("strict protocol parser accepts only a JSON action envelope", () => {
   assert.throws(() => parseStructuredAction("I would like to move e2 to e4.", "codex"), AgentProtocolError);
   assert.throws(() => parseStructuredAction('{"move":"e2e4"}', "codex"), AgentProtocolError);
   assert.throws(() => parseStructuredAction(`${JSON.stringify(action)} extra`, "claude"), AgentProtocolError);
+});
+
+test("Claude structured_output is preferred and an error subtype is an execution error, not a forfeit", () => {
+  assert.deepEqual(parseStructuredAction(JSON.stringify({ structured_output: action, result: "" }), "claude"), action);
+  assert.deepEqual(parseStructuredAction(JSON.stringify({ structured_output: null, result: JSON.stringify(action) }), "claude"), action);
+  assert.throws(
+    () => parseStructuredAction(JSON.stringify({ is_error: true, subtype: "error_during_execution", result: "authentication failed" }), "claude"),
+    (error: unknown) => error instanceof AgentExecutionError && !error.timedOut && /authentication failed/.test(error.message),
+  );
 });
 
 async function withFakeCodex(body: (folder: string) => Promise<void>, mode: "valid" | "timeout" | "fail"): Promise<void> {
@@ -45,7 +55,7 @@ test("Codex CLI adapter uses supported headless policy options and reads a struc
   await withFakeCodex(async (folder) => {
     const adapter = new CodexCLIAdapter({ provider: "codex", model: "test-model", name: "test" });
     await adapter.initialize();
-    const reply = await adapter.act(observation);
+    const reply = await adapter.act(observation, control());
     assert.deepEqual(reply.action, action);
     assert.equal(reply.usage.inputTokens, 42);
     assert.equal(reply.usage.outputTokens, 3);
@@ -61,7 +71,7 @@ test("agent timeout kills the CLI process group", async () => {
   await withFakeCodex(async () => {
     const adapter = new CodexCLIAdapter({ provider: "codex", model: "test-model", name: "test" });
     await adapter.initialize();
-    await assert.rejects(adapter.act(observation), (error: unknown) => error instanceof AgentExecutionError && error.timedOut);
+    await assert.rejects(adapter.act(observation, control()), (error: unknown) => error instanceof AgentExecutionError && error.timedOut);
   }, "timeout");
 });
 
@@ -69,7 +79,7 @@ test("nonzero CLI exit is reported as a process failure", async () => {
   await withFakeCodex(async () => {
     const adapter = new CodexCLIAdapter({ provider: "codex", model: "test-model", name: "test" });
     await adapter.initialize();
-    await assert.rejects(adapter.act(observation), (error: unknown) => error instanceof AgentExecutionError && !error.timedOut && error.stderrExcerpt.includes("controlled provider failure"));
+    await assert.rejects(adapter.act(observation, control()), (error: unknown) => error instanceof AgentExecutionError && !error.timedOut && error.stderrExcerpt.includes("controlled provider failure"));
   }, "fail");
 });
 
@@ -91,7 +101,7 @@ test("OpenCode adapter selects a dedicated no-tools agent even when user config 
   try {
     const adapter = new OpenCodeAdapter({ provider: "opencode", model: "test-model", name: "test" });
     await adapter.initialize();
-    const reply = await adapter.act(observation);
+    const reply = await adapter.act(observation, control());
     assert.deepEqual(reply.action, action);
     const config = JSON.parse(readFileSync(captureConfig, "utf8")) as {
       agent: Record<string, { tools: Record<string, boolean>; permission: Record<string, string> }>;

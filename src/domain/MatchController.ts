@@ -18,7 +18,11 @@ import type {
 interface RunningMatch {
   control: "continue" | "pause" | "stop";
   agents: Map<string, AgentAdapter>;
+  inFlight: Set<AbortController>;
+  done: Promise<void>;
 }
+
+const CANCELLATION_HARD_GRACE_MS = 2500;
 
 export interface CreateMatchRequest {
   gameId: string;
@@ -163,13 +167,14 @@ export class MatchController {
     if (otherActive) throw new Error("Another match is already active. Stop or finish it before resuming this match.");
     const game = this.games.get(match.gameId);
     if (!this.runtime.has(id)) this.runtime.set(id, game.deserialize(match.gameState));
-    const running: RunningMatch = { control: "continue", agents: new Map() };
+    const running: RunningMatch = { control: "continue", agents: new Map(), inFlight: new Set(), done: Promise.resolve() };
     this.runs.set(id, running);
     match.status = "running";
     match.error = undefined;
     match.currentPlayerId = undefined;
     this.emit(match, match.history.length === 0 ? "match.started" : "match.resumed", match.history.length === 0 ? "Match started" : "Match resumed");
-    void this.run(id, game, running).catch((error: unknown) => {
+    running.done = this.run(id, game, running);
+    void running.done.catch((error: unknown) => {
       const current = this.get(id);
       if (!current) return;
       current.status = "error";
@@ -198,7 +203,12 @@ export class MatchController {
     const running = this.runs.get(id);
     if (match.status !== "running" || !running) throw new Error("This match is not running.");
     running.control = control;
-    for (const agent of running.agents.values()) await agent.shutdown();
+    const reason = new AgentExecutionError(
+      control === "pause" ? "Match paused during an active request." : "Match stopped during an active request.",
+      false,
+    );
+    for (const controller of running.inFlight) controller.abort(reason);
+    await running.done;
   }
 
   private require(id: string): MatchRecord {
@@ -288,10 +298,16 @@ export class MatchController {
           this.emit(match, "agent.started", `${seat.agent.name} request ${attemptNumber}`, { turnId, attempt: attemptNumber }, playerId);
           let reply: Awaited<ReturnType<typeof adapter.act>> | undefined;
           let failure: unknown;
+          const control = new AbortController();
+          running.inFlight.add(control);
           try {
             const attemptObservation = feedback ? { ...observation, feedback } : observation;
-            reply = await this.invokeWithTimeout(adapter, attemptObservation);
+            reply = await this.invokeWithTimeout(adapter, attemptObservation, control);
           } catch (error) { failure = error; }
+          finally {
+            running.inFlight.delete(control);
+            await adapter.shutdown();
+          }
 
           if (running.control !== "continue") {
             attempts.push(this.attempt(attemptNumber, startedAt, "cancelled", {
@@ -448,18 +464,28 @@ export class MatchController {
     };
   }
 
-  private async invokeWithTimeout(adapter: AgentAdapter, observation: ReturnType<GameDefinition<unknown>["observe"]>): Promise<Awaited<ReturnType<AgentAdapter["act"]>>> {
-    let timer: NodeJS.Timeout | undefined;
+  private async invokeWithTimeout(
+    adapter: AgentAdapter,
+    observation: ReturnType<GameDefinition<unknown>["observe"]>,
+    control: AbortController,
+  ): Promise<Awaited<ReturnType<AgentAdapter["act"]>>> {
+    const actPromise = adapter.act(observation, { signal: control.signal });
+    const timeoutError = new AgentExecutionError(`Move timed out after ${Math.ceil(observation.clock.turnTimeoutMs / 1000)} seconds.`, true);
+    let primary: NodeJS.Timeout | undefined;
+    let hard: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        void adapter.shutdown();
-        reject(new AgentExecutionError(`Move timed out after ${Math.ceil(observation.clock.turnTimeoutMs / 1000)} seconds.`, true));
+      primary = setTimeout(() => {
+        control.abort(timeoutError);
+        actPromise.then(() => reject(timeoutError), () => reject(timeoutError));
       }, observation.clock.turnTimeoutMs);
+      hard = setTimeout(() => reject(timeoutError), observation.clock.turnTimeoutMs + CANCELLATION_HARD_GRACE_MS);
     });
     try {
-      return await Promise.race([adapter.act(observation), timeout]);
+      return await Promise.race([actPromise, timeout]);
     } finally {
-      if (timer) clearTimeout(timer);
+      if (primary) clearTimeout(primary);
+      if (hard) clearTimeout(hard);
+      actPromise.catch(() => undefined);
     }
   }
 
