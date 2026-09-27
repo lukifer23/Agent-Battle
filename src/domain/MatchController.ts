@@ -4,6 +4,7 @@ import type { AgentAdapter, AgentRegistry } from "./agent.js";
 import { AgentExecutionError, AgentProtocolError } from "./agent.js";
 import type { ActionValidation, GameDefinition, GameRegistry } from "./game.js";
 import { buildSnapshot } from "./snapshot.js";
+import { projectTurn } from "./projection.js";
 import { matchReportedCost, matchRequests } from "./usage.js";
 import type {
   AgentAttempt,
@@ -74,13 +75,13 @@ export class MatchController {
             && (derived.winnerId ?? null) === (match.result.winnerId ?? null);
           if (!matches) throw new Error("Saved result does not match the replayed game position.");
         }
-        this.runtime.set(match.id, state);
         if (match.status === "running") {
           match.status = "interrupted";
           match.currentPlayerId = undefined;
           match.error = "The app restarted during this match. Its saved game state is intact; resume to ask the current player again.";
           migrated = true;
         }
+        if (ACTIVE_STATUSES.includes(match.status)) this.runtime.set(match.id, state);
       } catch (error) {
         match.status = "error";
         match.error = `Could not restore saved ${match.gameId || "game"} state: ${error instanceof Error ? error.message : "invalid snapshot"}`;
@@ -559,7 +560,7 @@ export class MatchController {
           turnId, turnIndex, ply, latencyMs: record.latencyMs, retryCount: record.retryCount,
           toolCalls: attempts.reduce((sum, attempt) => sum + (attempt.toolCalls ?? 0), 0),
           inputTokens: totalUsage(attempts, "inputTokens"), outputTokens: totalUsage(attempts, "outputTokens"),
-          record,
+          record: projectTurn(record),
         }, playerId);
         if (!this.persistCheckpoint(match, game, state)) return;
 

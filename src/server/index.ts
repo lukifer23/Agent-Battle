@@ -7,6 +7,7 @@ import { AgentRegistry } from "../domain/agent.js";
 import { MatchController } from "../domain/MatchController.js";
 import { GameRegistry } from "../domain/game.js";
 import { buildSnapshot } from "../domain/snapshot.js";
+import { summaryOf } from "../domain/projection.js";
 import { ChessGame } from "../games/chess/ChessGame.js";
 import { agentRegistryDefaults, detectProviders } from "./adapters.js";
 import { acquireStoreOwnership, loadMatches, releaseStoreOwnership, saveMatches, STORE_VERSION } from "./store.js";
@@ -85,17 +86,31 @@ function writeToClient(response: Response, event: string, data: string, id?: str
   }
 }
 
+const metricsEnabled = process.env.AGENT_BATTLE_METRICS === "1";
+
+function logMetric(name: string, fields: Record<string, number | string>): void {
+  if (!metricsEnabled) return;
+  console.log(`[metrics] ${name} ${Object.entries(fields).map(([key, value]) => `${key}=${value}`).join(" ")}`);
+}
+
 function publishSnapshot(): void {
+  const started = Date.now();
   void providerCache.value.then((providers) => buildSnapshot(storedMatches, providers)).then((snapshot) => {
     const encoded = JSON.stringify(snapshot);
+    logMetric("snapshot", { bytes: Buffer.byteLength(encoded), matches: snapshot.recentMatches.length, ms: Date.now() - started });
     for (const response of eventClients) writeToClient(response, "snapshot", encoded);
   }).catch(() => undefined);
 }
 
 function stateChanged(record: MatchRecord, event?: import("../shared.js").MatchEvent): void {
-  if (shouldPersistChange(event)) saveMatches(storedMatches.slice(0, 100));
+  if (shouldPersistChange(event)) {
+    const started = Date.now();
+    saveMatches(storedMatches);
+    logMetric("checkpoint", { matches: storedMatches.length, ms: Date.now() - started });
+  }
   if (event) {
     const encoded = JSON.stringify({ matchId: record.id, revision: record.revision, event });
+    logMetric("event", { type: event.type, bytes: Buffer.byteLength(encoded) });
     for (const response of eventClients) writeToClient(response, event.type, encoded, `${record.id}:${event.sequence ?? record.revision}`);
   }
   if (shouldPublishSnapshot(event)) publishSnapshot();
@@ -151,6 +166,45 @@ function matchIdOf(request: Request): string {
 app.get("/api/state", asyncRoute(async (_request, response) => {
   response.json(await controller.snapshot());
 }));
+
+function pageParams(request: Request): { limit: number; offset: number } {
+  const rawLimit = Number(request.query.limit ?? 50);
+  const rawOffset = Number(request.query.offset ?? 0);
+  const limit = Number.isFinite(rawLimit) ? Math.min(200, Math.max(1, Math.floor(rawLimit))) : 50;
+  const offset = Number.isFinite(rawOffset) ? Math.min(1_000_000, Math.max(0, Math.floor(rawOffset))) : 0;
+  return { limit, offset };
+}
+
+app.get("/api/matches", (request, response) => {
+  const { limit, offset } = pageParams(request);
+  response.json({
+    total: storedMatches.length,
+    offset,
+    limit,
+    matches: storedMatches.slice(offset, offset + limit).map(summaryOf),
+  });
+});
+
+app.get("/api/matches/:id", (request, response) => {
+  const match = controller.get(matchIdOf(request));
+  if (!match) { response.status(404).json({ error: "Match not found.", code: "not_found" }); return; }
+  response.json({ match });
+});
+
+app.get("/api/matches/:id/events", (request, response) => {
+  const match = controller.get(matchIdOf(request));
+  if (!match) { response.status(404).json({ error: "Match not found.", code: "not_found" }); return; }
+  const { limit, offset } = pageParams(request);
+  response.json({ total: match.events.length, offset, limit, events: match.events.slice(offset, offset + limit) });
+});
+
+app.get("/api/matches/:id/attempts", (request, response) => {
+  const match = controller.get(matchIdOf(request));
+  if (!match) { response.status(404).json({ error: "Match not found.", code: "not_found" }); return; }
+  const { limit, offset } = pageParams(request);
+  const attempts = match.history.flatMap((turn) => turn.attempts.map((attempt) => ({ turnId: turn.turnId, ply: turn.ply, turnIndex: turn.turnIndex, playerId: turn.playerId, ...attempt })));
+  response.json({ total: attempts.length, offset, limit, attempts: attempts.slice(offset, offset + limit) });
+});
 
 app.get("/api/games", (_request, response) => response.json({ games: games.list() }));
 

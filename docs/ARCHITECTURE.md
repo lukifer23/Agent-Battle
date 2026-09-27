@@ -78,6 +78,12 @@ Each match stores an `environment` block (adapter version, prompt/schema version
 
 Resource budgets (`maxPlies`, `maxRequests`, `maxWallMinutes`, optional `maxReportedCostUsd`) live in match settings and are enforced between requests. Reaching a budget stops the match as a non-game outcome; it never produces a win or draw.
 
+### Transport projection and history
+
+The durable store keeps full records, but transports use a projection (`src/domain/projection.ts`). Snapshots carry summaries for history (identity, participants, result, counts) and a full transport projection only for the active match; a selected historical match is fetched through `GET /api/matches/:id`. The projection drops bulky diagnostics (`responseExcerpt`, `stderrExcerpt`, legacy `stateBefore`/`stateAfter`) and bounds the streamed event window. Full diagnostics remain available from the detail, events and attempts endpoints, which read the durable record.
+
+History is not silently pruned: the store writes every retained record, summaries are paginated, and the readable event feed is explicitly a bounded recent window rather than complete history. The in-memory deserialized game state is held only for active matches and rehydrated on demand. With `AGENT_BATTLE_METRICS=1` the server logs snapshot and checkpoint sizes and durations; `npm run benchmark` reports projection sizes and timings for 0/1/50/100 records and a long game.
+
 New turn records store FEN checkpoints rather than repeating the full serialized game state for every ply. Older records may still contain `stateBefore`/`stateAfter`; those optional fields remain readable for compatibility. Accepted moves, rejections, errors and lifecycle changes are persisted at their state boundary.
 
 On restore, ChessGame verifies that saved PGN, FEN, move records and resignation metadata agree. The controller additionally verifies that a stored `finished` result matches the replayed game; a mismatch marks the record `error` rather than feeding the scoreboard.

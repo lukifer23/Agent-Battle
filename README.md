@@ -45,6 +45,8 @@ Match history and bounded provider diagnostics live in `data/matches.json`. The 
 
 Before moving or deleting history, copy the whole `data/` directory. If the store cannot be read, the app preserves the original file next to it and starts with an empty history; inspect the preserved file and any `.quarantine-*.json` output to recover records.
 
+Match history is kept in full rather than silently pruned. `GET /api/matches` returns paginated summaries for browsing, `GET /api/matches/:id` returns one full record, and `GET /api/matches/:id/events` and `GET /api/matches/:id/attempts` expose the bounded event feed and per-attempt diagnostics. Set `AGENT_BATTLE_METRICS=1` to log snapshot and checkpoint sizes and timings, and run `npm run benchmark` for local projection measurements.
+
 ## Checks
 
 ```sh

@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import type { MatchRecord } from "../shared.js";
 import { validateMatchRecord, validateStoreEnvelope } from "./schema.js";
 
-export const STORE_VERSION = 2;
+export const STORE_VERSION = 3;
 
 export interface LoadResult {
   matches: MatchRecord[];

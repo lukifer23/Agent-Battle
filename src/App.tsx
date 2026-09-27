@@ -76,6 +76,7 @@ function App() {
   const [now, setNow] = useState(() => Date.now());
   const [connection, setConnection] = useState<"connecting" | "live" | "reconnecting" | "offline">("connecting");
   const [pendingCommand, setPendingCommand] = useState<null | "create" | "start" | "pause" | "stop">(null);
+  const [detailById, setDetailById] = useState<Map<string, MatchRecord>>(() => new Map());
   const revisions = useRef<Map<string, number>>(new Map());
 
   const rememberSnapshot = useCallback((next: AppState) => {
@@ -130,10 +131,24 @@ function App() {
     return () => source.close();
   }, [refresh, rememberSnapshot]);
 
-  const selectedMatch = useMemo(
-    () => state?.recentMatches.find((match) => match.id === selectedId) ?? state?.activeMatch ?? null,
-    [state, selectedId],
-  );
+  const selectedMatch = useMemo(() => {
+    if (!state) return null;
+    if (selectedId && state.activeMatch && selectedId === state.activeMatch.id) return state.activeMatch;
+    const detail = selectedId ? detailById.get(selectedId) : undefined;
+    if (detail) return detail;
+    return state.activeMatch ?? state.recentMatches.find((match) => match.id === selectedId) ?? state.recentMatches[0] ?? null;
+  }, [state, selectedId, detailById]);
+
+  useEffect(() => {
+    if (!selectedId || !state) return;
+    if (selectedId === state.activeMatchId) return;
+    if (detailById.has(selectedId)) return;
+    let cancelled = false;
+    void api<{ match: MatchRecord }>(`/api/matches/${selectedId}`).then((result) => {
+      if (!cancelled) setDetailById((current) => new Map(current).set(result.match.id, result.match));
+    }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load the selected match."));
+    return () => { cancelled = true; };
+  }, [selectedId, state, detailById]);
 
   const boardFen = useMemo(() => {
     const snapshot = selectedMatch?.gameState as ChessSnapshot | undefined;

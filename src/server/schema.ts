@@ -149,8 +149,6 @@ function validateTurnTelemetry(raw: unknown, index: number): ValidationResult<Tu
       latencyMs: isFiniteNumber(raw.latencyMs) ? raw.latencyMs : null,
       retryCount: isFiniteNumber(raw.retryCount) ? raw.retryCount : 0,
       attempts,
-      ...(raw.stateBefore !== undefined ? { stateBefore: raw.stateBefore } : {}),
-      ...(raw.stateAfter !== undefined ? { stateAfter: raw.stateAfter } : {}),
       ...(isString(raw.fenAfter) ? { fenAfter: raw.fenAfter } : {}),
       timestamp: isIsoDate(raw.timestamp) ? raw.timestamp : new Date().toISOString(),
     },
