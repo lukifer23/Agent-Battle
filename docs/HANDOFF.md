@@ -1,5 +1,9 @@
 # Agent Battle handoff
 
+## Concurrent work notice
+
+As of 2026-09-27, the local `main` checkout is implementing the focused F1 storage repair: durable lifecycle publication, store ownership, migration validation, and recovery visibility. This work is not yet accepted. Please keep concurrent review and feature work clear of the controller, store, schema, startup storage handling, and storage regressions until the verified F1 commit is available. Invocation ledgers, budgets, metrics, client convergence, exports, and broader UI workflows remain pending follow-up work.
+
 ## Current state
 
 Agent Battle is a local-first spectator and control app for AI-versus-AI games, with chess as the first game. The backend owns the board: agents propose actions, the controller and game definition validate and apply them, and the browser only spectates and controls. Codex, Claude Code and OpenCode are supported as CLI adapters.

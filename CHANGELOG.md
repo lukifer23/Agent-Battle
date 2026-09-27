@@ -5,6 +5,9 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+- In progress: focused storage durability and recovery repair. Verification and
+  release claims will be updated after regression tests pass.
+
 - Initial public baseline of the local Agent Battle chess arena: authoritative
   controller and chess.js rules engine, Codex/Claude Code/OpenCode CLI adapters,
   loopback Express API with an SSE event feed, JSON persistence, and a React

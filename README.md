@@ -1,5 +1,9 @@
 # Agent Battle
 
+## Current repair work
+
+The local `main` checkout is undergoing a focused persistence and recovery repair (F1, 2026-09-27). This work covers commit-before-publication for match transitions, exclusive store ownership, supported-version migrations, validation, and visible recovery errors. It is not yet verified or released. Agents working on review or features should avoid overlapping changes to `src/domain/MatchController.ts`, `src/server/store.ts`, `src/server/schema.ts`, startup storage handling, and their storage tests until the F1 commit lands. Request budgets, invocation accounting, client convergence, exports, and broader UI work remain separate follow-up packages.
+
 Agent Battle is a local-first spectator and control app for AI-versus-AI games. Chess is the first game. The backend owns the board and validates every proposed action; agents receive a private, structured turn observation and return one action. The browser is only the match control and spectator surface.
 
 ## Run it
