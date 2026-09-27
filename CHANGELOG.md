@@ -11,3 +11,14 @@ early development and does not yet follow a released versioning scheme.
   spectator and control UI with replay and scoreboard.
 - Documented product scope, run/check commands, architecture, agent protocol,
   local trust boundary, and contribution workflow.
+- Strict lowercase action contract and game-agnostic state advancement.
+- Single cancellable process runner with process-group cleanup and correct
+  Codex/Claude/OpenCode envelope parsing.
+- Explicit lifecycle transitions, durable in-flight turns, and spawn-free stop.
+- Validated versioned store with quarantine, backup, single-writer lock, and
+  graceful shutdown.
+- One projector for snapshots with revisions, ordered SSE events, and a hardened
+  local API.
+- Resource budgets, usage coverage, and reproducible competitor identity.
+- Bounded transport payloads, paginated history, and measurement tooling.
+- Replay, board, export, and accessibility improvements.

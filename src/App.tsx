@@ -1,14 +1,49 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import { applyMatchEvent, matchEventTypes } from "./client/matchEvents.js";
+import { highlightSquares, positionSummary } from "./client/chessView.js";
 import { aggregateUsage } from "./domain/usage.js";
-import { ArrowUpRight, BoardMark, ChevronDown, RefreshCw, Trophy } from "./components/icons.js";
+import { ArrowUpRight, BoardMark, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, FlipVertical, RefreshCw, Trophy } from "./components/icons.js";
 import { competitorLabel } from "./shared.js";
 import type { AppState, ChessSnapshot, MatchEvent, MatchRecord, Provider } from "./shared.js";
 
 const initialFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const pretty: Record<Provider, string> = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode" };
 const marks: Record<Provider, string> = { codex: "CX", claude: "CC", opencode: "OC" };
+const reasoningOptions: Record<Provider, string[]> = {
+  codex: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  opencode: [],
+};
+const REPLAYABLE = ["finished", "forfeit", "stopped", "error", "interrupted", "paused"];
+
+interface Preferences {
+  whiteProvider: Provider;
+  blackProvider: Provider;
+  whiteModel: string;
+  blackModel: string;
+  whiteReasoning: string;
+  blackReasoning: string;
+  timeoutSeconds: number;
+}
+
+const PREFERENCES_KEY = "agent-battle.preferences";
+
+function loadPreferences(): Partial<Preferences> {
+  try {
+    const raw = window.localStorage.getItem(PREFERENCES_KEY);
+    return raw ? JSON.parse(raw) as Partial<Preferences> : {};
+  } catch { return {}; }
+}
+
+function triggerDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -40,8 +75,10 @@ function resultLine(match: MatchRecord): string {
 
 function statusForPlayer(match: MatchRecord, playerId: string, isActiveTurn: boolean): string {
   const latest = [...match.history].reverse().find((turn) => turn.playerId === playerId);
+  if (match.status === "ready") return "READY";
   if (match.status === "running") return isActiveTurn ? "THINKING" : "WAITING";
-  if (match.status === "paused") return isActiveTurn ? "PAUSED" : "WAITING";
+  if (match.status === "paused" || match.status === "interrupted") return "PAUSED";
+  if (match.status === "stopped") return match.error?.startsWith("Budget") ? "BUDGET STOP" : "STOPPED";
   if (latest?.attempts.at(-1)?.status === "error") return "REQUEST FAILED";
   if (match.status === "forfeit") return match.result?.winnerId === playerId ? "WINNER" : "FORFEIT";
   if (match.result?.kind === "draw") return "DRAW";
@@ -54,30 +91,54 @@ function formatClock(seconds: number): string {
 }
 
 function App() {
+  const preferences = useMemo(() => loadPreferences(), []);
   const [state, setState] = useState<AppState | null>(null);
   const [providersChecked, setProvidersChecked] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [whiteProvider, setWhiteProvider] = useState<Provider>("codex");
-  const [blackProvider, setBlackProvider] = useState<Provider>("codex");
-  const [whiteModel, setWhiteModel] = useState("");
-  const [blackModel, setBlackModel] = useState("");
-  const [whiteReasoning, setWhiteReasoning] = useState("");
-  const [blackReasoning, setBlackReasoning] = useState("");
-  const [timeoutSeconds, setTimeoutSeconds] = useState(120);
+  const [selectedId, setSelectedId] = useState<string | null>(() => window.localStorage.getItem("agent-battle.selected"));
+  const [whiteProvider, setWhiteProvider] = useState<Provider>(preferences.whiteProvider ?? "codex");
+  const [blackProvider, setBlackProvider] = useState<Provider>(preferences.blackProvider ?? "codex");
+  const [whiteModel, setWhiteModel] = useState(preferences.whiteModel ?? "");
+  const [blackModel, setBlackModel] = useState(preferences.blackModel ?? "");
+  const [whiteReasoning, setWhiteReasoning] = useState(preferences.whiteReasoning ?? "");
+  const [blackReasoning, setBlackReasoning] = useState(preferences.blackReasoning ?? "");
+  const [timeoutSeconds, setTimeoutSeconds] = useState(preferences.timeoutSeconds ?? 120);
   const [maxPlies, setMaxPlies] = useState(150);
   const [maxRequests, setMaxRequests] = useState(200);
   const [maxWallMinutes, setMaxWallMinutes] = useState(30);
   const [maxCost, setMaxCost] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [replayPly, setReplayPly] = useState<number | null>(null);
   const [replayOpen, setReplayOpen] = useState(false);
+  const [boardOrientation, setBoardOrientation] = useState<"white" | "black">("white");
   const [newMatchOpen, setNewMatchOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [connection, setConnection] = useState<"connecting" | "live" | "reconnecting" | "offline">("connecting");
   const [pendingCommand, setPendingCommand] = useState<null | "create" | "start" | "pause" | "stop">(null);
   const [detailById, setDetailById] = useState<Map<string, MatchRecord>>(() => new Map());
   const revisions = useRef<Map<string, number>>(new Map());
+  const moveListRef = useRef<HTMLDivElement | null>(null);
+
+  const chooseWhiteProvider = (provider: Provider) => {
+    setWhiteProvider(provider);
+    if (!reasoningOptions[provider].includes(whiteReasoning.toLowerCase())) setWhiteReasoning("");
+  };
+  const chooseBlackProvider = (provider: Provider) => {
+    setBlackProvider(provider);
+    if (!reasoningOptions[provider].includes(blackReasoning.toLowerCase())) setBlackReasoning("");
+  };
+
+  useEffect(() => {
+    const value: Preferences = { whiteProvider, blackProvider, whiteModel, blackModel, whiteReasoning, blackReasoning, timeoutSeconds };
+    try { window.localStorage.setItem(PREFERENCES_KEY, JSON.stringify(value)); }
+    catch { /* Preferences are best-effort. */ }
+  }, [whiteProvider, blackProvider, whiteModel, blackModel, whiteReasoning, blackReasoning, timeoutSeconds]);
+
+  useEffect(() => {
+    try { window.localStorage.setItem("agent-battle.selected", selectedId ?? ""); }
+    catch { /* Selection persistence is best-effort. */ }
+  }, [selectedId]);
 
   const rememberSnapshot = useCallback((next: AppState) => {
     const map = revisions.current;
@@ -91,7 +152,7 @@ function App() {
     rememberSnapshot(next);
     setState(next);
     setProvidersChecked(true);
-    setSelectedId((current) => current ?? next.activeMatchId ?? next.recentMatches[0]?.id ?? null);
+    setSelectedId((current) => (current && (next.activeMatchId === current || next.recentMatches.some((match) => match.id === current)) ? current : next.activeMatchId ?? next.recentMatches[0]?.id ?? null));
   }, [rememberSnapshot]);
 
   useEffect(() => {
@@ -104,7 +165,7 @@ function App() {
         setState(next);
         setProvidersChecked(true);
         setConnection("live");
-        setSelectedId((current) => current ?? next.activeMatchId ?? next.recentMatches[0]?.id ?? null);
+        setSelectedId((current) => (current && (next.activeMatchId === current || next.recentMatches.some((match) => match.id === current)) ? current : next.activeMatchId ?? next.recentMatches[0]?.id ?? null));
       } catch (reason) {
         setError(reason instanceof Error ? `Could not read the server state: ${reason.message}` : "Could not read the server state.");
       }
@@ -150,12 +211,29 @@ function App() {
     return () => { cancelled = true; };
   }, [selectedId, state, detailById]);
 
+  const selectedSnapshot = selectedMatch?.gameState as ChessSnapshot | undefined;
+  const totalPlies = selectedSnapshot?.moves.length ?? 0;
+  const viewingPly = replayPly ?? totalPlies;
+  const displayedMove = viewingPly > 0 ? selectedSnapshot?.moves[viewingPly - 1] : undefined;
+
   const boardFen = useMemo(() => {
     const snapshot = selectedMatch?.gameState as ChessSnapshot | undefined;
-    if (!selectedMatch || replayPly === null) return snapshot?.fen ?? initialFen;
-    if (replayPly === 0) return initialFen;
-    return snapshot?.moves[replayPly - 1]?.fen ?? snapshot?.fen ?? initialFen;
-  }, [selectedMatch, replayPly]);
+    if (!selectedMatch) return initialFen;
+    if (viewingPly === 0) return initialFen;
+    return displayedMove?.fen ?? snapshot?.fen ?? initialFen;
+  }, [selectedMatch, viewingPly, displayedMove]);
+
+  const squareStyles = useMemo(() => highlightSquares(boardFen, displayedMove?.uci), [boardFen, displayedMove]);
+
+  const moveToPly = (ply: number) => {
+    const clamped = Math.max(0, Math.min(totalPlies, ply));
+    setReplayPly(clamped >= totalPlies ? null : clamped);
+    if (clamped < totalPlies) setReplayOpen(true);
+  };
+
+  useEffect(() => {
+    if (moveListRef.current) moveListRef.current.scrollTop = moveListRef.current.scrollHeight;
+  }, [viewingPly, totalPlies]);
 
   const standings = useMemo(() => {
     const rows = new Map<string, { name: string; wins: number; draws: number; losses: number; points: number }>();
@@ -185,7 +263,6 @@ function App() {
   ));
   const canStart = Boolean(selectedMatch && ["ready", "paused", "interrupted"].includes(selectedMatch.status) && state?.activeMatch?.id === selectedMatch.id);
   const canCreate = !state?.activeMatch || !["ready", "running", "paused"].includes(state.activeMatch.status);
-  const selectedSnapshot = selectedMatch?.gameState as ChessSnapshot | undefined;
 
   useEffect(() => {
     if (!currentIsRunning) return;
@@ -277,8 +354,38 @@ function App() {
   const currentTurnPlayer = selectedMatch?.players.find((player) => player.id === selectedMatch.currentPlayerId);
   const currentTurnName = currentTurnPlayer ? competitorLabel(currentTurnPlayer.agent) : undefined;
   const isHistorical = Boolean(selectedMatch && selectedMatch.id !== state?.activeMatch?.id);
-  const isReplayMatch = Boolean(isHistorical && (selectedSnapshot?.moves.length ?? 0) > 0);
-  const finishedForReplay = selectedMatch && ["finished", "forfeit", "stopped", "error", "interrupted"].includes(selectedMatch.status);
+  const isReplayMatch = Boolean(isHistorical && totalPlies > 0);
+  const canReplay = Boolean(selectedMatch && totalPlies > 0 && REPLAYABLE.includes(selectedMatch.status));
+
+  const matchTotals = useMemo(() => {
+    if (!selectedMatch) return null;
+    return aggregateUsage(selectedMatch.history.flatMap((turn) => turn.attempts));
+  }, [selectedMatch]);
+
+  const shortId = selectedMatch ? selectedMatch.id.slice(0, 8) : "";
+
+  const copyText = async (text: string, label: string) => {
+    try { await navigator.clipboard.writeText(text); setNotice(`${label} copied.`); }
+    catch { setNotice(`Could not copy ${label.toLowerCase()}.`); }
+    window.setTimeout(() => setNotice(""), 2500);
+  };
+
+  const downloadJson = async () => {
+    if (!selectedMatch) return;
+    try {
+      const result = await api<{ match: MatchRecord }>(`/api/matches/${selectedMatch.id}`);
+      const blob = new Blob([JSON.stringify(result.match, null, 2)], { type: "application/json" });
+      triggerDownload(blob, `agent-battle-${shortId}.json`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not export the match.");
+    }
+  };
+
+  const downloadPgn = () => {
+    if (!selectedMatch) return;
+    const snapshot = selectedMatch.gameState as ChessSnapshot | undefined;
+    triggerDownload(new Blob([snapshot?.pgn ?? ""], { type: "application/x-chess-pgn" }), `agent-battle-${shortId}.pgn`);
+  };
 
   return (
     <main className="app-shell">
@@ -318,10 +425,10 @@ function App() {
             </div> : <>
               <div className="players-grid">
                 <PlayerPicker color="white" provider={whiteProvider} model={whiteModel} reasoning={whiteReasoning} providers={providers} loading={!providersChecked}
-                  onProvider={setWhiteProvider} onModel={setWhiteModel} onReasoning={setWhiteReasoning} />
+                  onProvider={chooseWhiteProvider} onModel={setWhiteModel} onReasoning={setWhiteReasoning} />
                 <div className="versus"><span>VS</span></div>
                 <PlayerPicker color="black" provider={blackProvider} model={blackModel} reasoning={blackReasoning} providers={providers} loading={!providersChecked}
-                  onProvider={setBlackProvider} onModel={setBlackModel} onReasoning={setBlackReasoning} />
+                  onProvider={chooseBlackProvider} onModel={setBlackModel} onReasoning={setBlackReasoning} />
               </div>
               <div className="setup-footer">
                 <div className="budget-settings">
@@ -379,37 +486,60 @@ function App() {
               <div className="chessboard-wrap">
                 <Chessboard options={{
                   position: boardFen,
-                  boardOrientation: "white",
+                  boardOrientation,
                   allowDragging: false,
                   showAnimations: true,
                   animationDurationInMs: 240,
                   boardStyle: { borderRadius: "3px", width: "100%" },
                   lightSquareStyle: { backgroundColor: "#d8cfb7" },
                   darkSquareStyle: { backgroundColor: "#526c61" },
+                  squareStyles,
                   showNotation: false,
                 }} />
               </div>
               <div className="board-rank rank-right"><span>8</span><span>7</span><span>6</span><span>5</span><span>4</span><span>3</span><span>2</span><span>1</span></div>
               <div className="board-files"><span>a</span><span>b</span><span>c</span><span>d</span><span>e</span><span>f</span><span>g</span><span>h</span></div>
             </div>
+            <p className="board-summary" aria-live="polite">{selectedMatch ? positionSummary(boardFen, displayedMove?.san) : "Starting position. Select or start a match."}</p>
             <div className="board-caption">
-              <span>{selectedMatch ? resultLine(selectedMatch) : "The board is ready for its first match."}</span>
+              <span>{selectedMatch ? (replayPly !== null ? `Reviewing ply ${replayPly} of ${totalPlies}` : resultLine(selectedMatch)) : "The board is ready for its first match."}</span>
               {selectedMatch && (
                 <div className="match-actions">
+                  <button className="quiet-button" onClick={() => setBoardOrientation((value) => value === "white" ? "black" : "white")} aria-label="Flip board orientation"><FlipVertical className="button-icon" /> FLIP</button>
                   {currentIsRunning && <button className="quiet-button" onClick={() => void pauseMatch()} disabled={pendingCommand !== null}>{pendingCommand === "pause" ? "PAUSING…" : "PAUSE"}</button>}
                   {canStart && <button className="primary-button compact" onClick={() => void resumeMatch()} disabled={pendingCommand !== null}>{selectedMatch.status === "ready" ? "START THIS MATCH" : pendingCommand === "start" ? "RESUMING…" : "RESUME MATCH"}</button>}
                   {["ready", "running", "paused", "interrupted"].includes(selectedMatch.status) && <button className="stop-button" onClick={() => void stopMatch()} disabled={pendingCommand !== null}>{pendingCommand === "stop" ? "STOPPING…" : "STOP"}</button>}
                 </div>
               )}
             </div>
-            {currentIsRunning && <div className="turn-indicator" role="status" aria-live="polite">
-              <span><span className="live-dot" /> THINKING · {currentTurnName ?? "AGENT"}</span>
-              <span className={`turn-clock ${turnSecondsLeft <= 10 ? "is-urgent" : ""}`}>{formatClock(turnSecondsLeft)} LEFT</span>
+            {selectedMatch?.result && replayPly !== null && <div className="replay-note">Viewing a historical position. Final result: {selectedMatch.result.notation} · {selectedMatch.result.reason}.</div>}
+            {selectedMatch && <div className="export-bar">
+              <span className="export-totals">{matchTotals ? `MATCH ${matchTotals.requests} req · ${matchTotals.inputTokens + matchTotals.outputTokens} tok${coverageMark(matchTotals.coverage)} · $${matchTotals.costUsd.toFixed(4)}` : ""}</span>
+              <button className="quiet-button" onClick={() => void copyText(boardFen, "FEN")}><Copy className="button-icon" /> FEN</button>
+              <button className="quiet-button" onClick={downloadPgn} disabled={!totalPlies}><Download className="button-icon" /> PGN</button>
+              <button className="quiet-button" onClick={() => void downloadJson()}><Download className="button-icon" /> JSON</button>
             </div>}
-            {finishedForReplay && selectedMatch && (selectedSnapshot?.moves.length ?? 0) > 0 && <div className="replay-control">
-              <div><span className="eyebrow">REPLAY</span><button className="quiet-button" onClick={() => setReplayOpen((open) => !open)}>{replayOpen ? "Hide" : "Review moves"}</button></div>
-              {replayOpen && <><input type="range" min={0} max={selectedSnapshot?.moves.length ?? 0} value={replayPly ?? selectedSnapshot?.moves.length ?? 0}
-                onChange={(event) => setReplayPly(Number(event.target.value))} /><span className="replay-step">{replayPly ?? selectedSnapshot?.moves.length ?? 0} / {selectedSnapshot?.moves.length ?? 0} ply</span></>}
+            {notice && <div className="notice" role="status">{notice}</div>}
+            {currentIsRunning && <div className="turn-indicator">
+              <span><span className="live-dot" /> THINKING · {currentTurnName ?? "AGENT"}</span>
+              <span className={`turn-clock ${turnSecondsLeft <= 10 ? "is-urgent" : ""}`} aria-hidden="true">{formatClock(turnSecondsLeft)} LEFT</span>
+            </div>}
+            {canReplay && <div className="replay-control">
+              <div className="replay-header">
+                <span className="eyebrow">REPLAY</span>
+                <span className="replay-step" role="status">Ply {viewingPly} of {totalPlies}</span>
+                <button className="quiet-button" onClick={() => { setReplayOpen((open) => !open); setReplayPly(null); }}>{replayOpen ? "Hide and return to current" : "Review moves"}</button>
+              </div>
+              {replayOpen && <>
+                <input type="range" aria-label="Replay position" aria-valuetext={`Ply ${viewingPly} of ${totalPlies}`} min={0} max={totalPlies} value={viewingPly}
+                  onChange={(event) => moveToPly(Number(event.target.value))} />
+                <div className="replay-buttons">
+                  <button className="quiet-button" onClick={() => moveToPly(0)} aria-label="First position"><ChevronLeft className="button-icon" /><ChevronLeft className="button-icon" /></button>
+                  <button className="quiet-button" onClick={() => moveToPly(viewingPly - 1)} aria-label="Previous position"><ChevronLeft className="button-icon" /></button>
+                  <button className="quiet-button" onClick={() => moveToPly(viewingPly + 1)} aria-label="Next position"><ChevronRight className="button-icon" /></button>
+                  <button className="quiet-button" onClick={() => moveToPly(totalPlies)} aria-label="Last position"><ChevronRight className="button-icon" /><ChevronRight className="button-icon" /></button>
+                </div>
+              </>}
             </div>}
           </section>
 
@@ -418,6 +548,7 @@ function App() {
             <div className="history-list">
               {(state?.recentMatches ?? []).length === 0 && <div className="empty-state">No matches yet. Pick two agents and let the first game begin.</div>}
               {(state?.recentMatches ?? []).map((match) => <button key={match.id} className={`history-row ${match.id === selectedMatch?.id ? "selected" : ""}`}
+                aria-current={match.id === selectedMatch?.id ? "true" : undefined}
                 onClick={() => { setSelectedId(match.id); setNewMatchOpen(false); setReplayPly(null); setReplayOpen(false); }}>
                 <span className="history-date">{new Date(match.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
                 <span className="history-players"><b>{competitorLabel(match.players[0].agent)}</b><small>vs</small><b>{competitorLabel(match.players[1].agent)}</b></span>
@@ -431,23 +562,36 @@ function App() {
         <aside className="side-column">
           <section className="scoreboard panel">
             <div className="section-heading"><div><span className="eyebrow">HALL OF FAME</span><h2>Scoreboard</h2></div><Trophy className="trophy" /></div>
-            <div className="score-header"><span>AGENT</span><span>W</span><span>D</span><span>L</span><span>PTS</span></div>
-            {standings.length === 0 ? <div className="score-empty">The leaderboard starts after game one.</div> : standings.map((row, index) => <div className="score-row" key={row.name}>
-              <div className="score-player"><span className={`rank-badge rank-${index + 1}`}>{String(index + 1).padStart(2, "0")}</span><span>{row.name}</span></div>
-              <span>{row.wins}</span><span>{row.draws}</span><span>{row.losses}</span><strong>{row.points}</strong>
-            </div>)}
-            <div className="score-legend">1 point for a win · ½ for a draw</div>
+            {standings.length === 0 ? <div className="score-empty">The leaderboard starts after game one.</div> : <table className="score-table">
+              <caption className="sr-only">Scoreboard by competitor across recent matches</caption>
+              <thead><tr><th scope="col">AGENT</th><th scope="col">W</th><th scope="col">D</th><th scope="col">L</th><th scope="col">PTS</th></tr></thead>
+              <tbody>
+                {standings.map((row, index) => <tr key={row.name}>
+                  <th scope="row" className="score-player"><span className={`rank-badge rank-${index + 1}`}>{String(index + 1).padStart(2, "0")}</span><span>{row.name}</span></th>
+                  <td>{row.wins}</td><td>{row.draws}</td><td>{row.losses}</td><td className="score-points">{row.points}</td>
+                </tr>)}
+              </tbody>
+            </table>}
+            <div className="score-legend">1 point for a win · ½ for a draw · recent {state?.recentMatches.length ?? 0} matches</div>
           </section>
 
           <section className="moves-panel panel">
-            <div className="section-heading"><div><span className="eyebrow">MOVE BY MOVE</span><h2>Notation</h2></div><span className="notation-chip">PGN</span></div>
-            {!selectedSnapshot?.moves.length ? <div className="score-empty">Moves will appear here as the agents play.</div> : <div className="move-list">
+            <div className="section-heading">
+              <div><span className="eyebrow">MOVE BY MOVE</span><h2>Notation</h2></div>
+              <div className="notation-actions">
+                <button className="quiet-button" onClick={downloadPgn} disabled={!totalPlies}><Download className="button-icon" /> PGN</button>
+                <button className="quiet-button" onClick={() => void downloadJson()} disabled={!selectedMatch}><Download className="button-icon" /> JSON</button>
+              </div>
+            </div>
+            {!selectedSnapshot?.moves.length ? <div className="score-empty">Moves will appear here as the agents play.</div> : <div className="move-list" ref={moveListRef}>
               {Array.from({ length: Math.ceil(selectedSnapshot.moves.length / 2) }, (_, index) => {
                 const white = selectedSnapshot.moves[index * 2];
                 const black = selectedSnapshot.moves[index * 2 + 1];
-                const activePly = replayPly ?? selectedSnapshot.moves.length;
+                const activePly = viewingPly;
                 return <div className={`move-row ${activePly === index * 2 + 1 || activePly === index * 2 + 2 ? "move-active" : ""}`} key={white.ply}>
-                  <span className="move-number">{index + 1}.</span><span>{white.san}</span><span>{black?.san ?? "·"}</span>
+                  <span className="move-number">{index + 1}.</span>
+                  <button className="move-cell" onClick={() => moveToPly(index * 2 + 1)} aria-label={`Go to ply ${index * 2 + 1}, ${white.san}`}>{white.san}</button>
+                  {black ? <button className="move-cell" onClick={() => moveToPly(index * 2 + 2)} aria-label={`Go to ply ${index * 2 + 2}, ${black.san}`}>{black.san}</button> : <span className="move-empty">·</span>}
                 </div>;
               })}
             </div>}
@@ -488,12 +632,13 @@ function PlayerPicker(props: {
 }) {
   const cardTitle = props.color === "white" ? "WHITE PLAYER" : "BLACK PLAYER";
   const providerInfo = props.providers.find((item) => item.provider === props.provider);
+  const options = reasoningOptions[props.provider];
   return <div className={`player-card player-${props.color}`}>
-    <div className="player-card-top"><span className={`piece-disc piece-disc-${props.color}`} aria-hidden="true" /><span>{cardTitle}</span><span className={`agent-presence ${props.loading ? "checking" : providerInfo?.installed ? "available" : ""}`} title={props.loading ? "Checking CLI" : providerInfo?.installed ? "CLI found" : "CLI not found"} /></div>
-    <label className="field-label">AGENT CLI</label>
+    <div className="player-card-top"><span className={`piece-disc piece-disc-${props.color}`} aria-hidden="true" /><span>{cardTitle}</span><span className={`agent-presence ${props.loading ? "checking" : providerInfo?.installed ? "available" : ""}`} title={props.loading ? "Checking CLI" : providerInfo?.installed ? "CLI found on PATH; authentication is not verified" : "CLI not found"} /></div>
+    <label className="field-label" htmlFor={`${props.color}-provider`}>AGENT CLI</label>
     <div className="provider-field">
-      <span className={`provider-mark provider-${props.provider}`}>{marks[props.provider]}</span>
-      <select value={props.provider} onChange={(event) => props.onProvider(event.target.value as Provider)}>
+      <span className={`provider-mark provider-${props.provider}`} aria-hidden="true">{marks[props.provider]}</span>
+      <select id={`${props.color}-provider`} value={props.provider} onChange={(event) => props.onProvider(event.target.value as Provider)}>
         {(["codex", "claude", "opencode"] as Provider[]).map((provider) => {
           const info = props.providers.find((item) => item.provider === provider);
           return <option value={provider} key={provider}>{pretty[provider]}{!props.loading && info && !info.installed ? " · not installed" : ""}</option>;
@@ -506,8 +651,9 @@ function PlayerPicker(props: {
       placeholder={props.loading ? "Checking local CLI…" : providerInfo?.defaultModel ?? "Use CLI default"} autoComplete="off" spellCheck={false} />
     <label className="field-label" htmlFor={`${props.color}-reasoning`}>REASONING <span>optional</span></label>
     <input id={`${props.color}-reasoning`} className="model-input" value={props.reasoning} onChange={(event) => props.onReasoning(event.target.value)}
-      placeholder="CLI default" autoComplete="off" spellCheck={false} />
-    <div className="model-hint">{props.loading ? "Checking local CLI…" : providerInfo?.version ?? (providerInfo?.installed ? "CLI ready" : "Not found on PATH")}</div>
+      list={options.length ? `${props.color}-reasoning-options` : undefined} placeholder="CLI default" autoComplete="off" spellCheck={false} />
+    {options.length > 0 && <datalist id={`${props.color}-reasoning-options`}>{options.map((option) => <option key={option} value={option} />)}</datalist>}
+    <div className="model-hint">{props.loading ? "Checking local CLI…" : providerInfo?.installed ? `${providerInfo.version ?? "CLI ready"} · availability only, authentication not verified` : "Not found on PATH"}</div>
   </div>;
 }
 

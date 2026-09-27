@@ -237,3 +237,31 @@ h2 { margin-top: 5px; font: 600 18px var(--display); letter-spacing: -.025em; }
   .scoreboard, .moves-panel, .log-panel { min-height: 0; }
   .page-footer { font-size: 7px; }
 }
+
+.board-summary { margin: 10px 2px 0; color: #8b988f; font: 10px var(--mono); letter-spacing: .02em; }
+.export-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.export-bar .quiet-button { display: inline-flex; align-items: center; gap: 5px; }
+.export-totals { margin-right: auto; color: #7f8d85; font: 9px var(--mono); letter-spacing: .05em; }
+.notice { margin-top: 8px; color: var(--lime); font: 10px var(--mono); }
+.replay-note { margin-top: 8px; color: #d8b45a; font: 10px var(--mono); }
+.replay-header { display: flex; align-items: center; gap: 12px; }
+.replay-header .replay-step { color: var(--soft); font: 10px var(--mono); }
+.replay-header .quiet-button { margin-left: auto; }
+.replay-buttons { display: flex; gap: 6px; margin-top: 8px; }
+.replay-buttons .quiet-button { display: inline-flex; align-items: center; padding: 6px 8px; }
+.replay-control input[type="range"] { width: 100%; margin-top: 10px; accent-color: var(--lime); }
+.notation-actions { display: flex; gap: 6px; }
+.notation-actions .quiet-button { display: inline-flex; align-items: center; gap: 4px; }
+.move-cell { padding: 2px 4px; border: 0; border-radius: 3px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.move-cell:hover { background: #26311e; color: var(--lime); }
+.move-empty { color: #77847d; }
+.score-table { width: 100%; border-collapse: collapse; }
+.score-table thead th { padding: 0 0 9px; border-bottom: 1px solid #29352f; color: #75837b; font: 500 9px var(--mono); letter-spacing: .1em; text-align: center; }
+.score-table thead th:first-child { text-align: left; }
+.score-table tbody td { padding: 10px 0; border-bottom: 1px solid #202b26; color: #9aa79f; font: 10px var(--mono); text-align: center; }
+.score-table tbody th { padding: 10px 0; border-bottom: 1px solid #202b26; }
+.score-table .score-points { color: var(--lime); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+}
