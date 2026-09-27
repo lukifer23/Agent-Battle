@@ -17,6 +17,7 @@ function sampleRecord(overrides: Partial<MatchRecord> = {}): MatchRecord {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     status: "ready",
+    revision: 0,
     players: [
       { id: "white", label: "White", agent: { provider: "codex", model: "", name: "Codex · CLI default" } },
       { id: "black", label: "Black", agent: { provider: "claude", model: "", name: "Claude Code · CLI default" } },

@@ -80,20 +80,24 @@ The JSON file is local and created with owner-only permissions. Back it up befor
 
 ## HTTP and real-time interface
 
-The API binds to `127.0.0.1:4173`; Vite serves the UI on `127.0.0.1:5173` during development and proxies `/api` requests.
+The API binds to `127.0.0.1:4173`; Vite serves the UI on `127.0.0.1:5173` during development and proxies `/api` requests. All routes live under `/api`; an unknown `/api` route returns a JSON 404 and never falls through to the SPA. Request bodies are JSON-only, malformed JSON returns a JSON 400, and errors use a stable `{ error, code }` envelope with meaningful 404/409/500/503 distinctions.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/state` | CLI availability, active match and recent records |
+| `GET /api/state` | Canonical snapshot: providers, `activeMatchId`, active match and recent records |
 | `GET /api/games` | Registered game IDs and player IDs |
 | `GET /api/events` | Server-Sent Events for named domain events and state snapshots |
 | `POST /api/matches` | Create a match from two player configs |
 | `POST /api/matches/:id/start` | Start or resume a ready, paused or interrupted match |
 | `POST /api/matches/:id/pause` | Cancel the active turn and preserve the position |
-| `POST /api/matches/:id/stop` | Stop the match and save its current position |
+| `POST /api/matches/:id/stop` | Stop the match, or stop a ready/paused/interrupted match without spawning |
 | `POST /api/providers/refresh` | Re-check local CLI executables and versions |
 
-The event stream sends one full `snapshot` on connection and again for match creation, start/resume, pause/stop, terminal results and agent errors. Between those boundaries it emits named domain events such as `turn.started`, `agent.started`, `agent.response`, `move.proposed`, `move.rejected`, `move.applied`, `turn.completed` and `agent.timeout`. The client applies event projections locally, so ordinary agent activity does not retransmit all saved games and telemetry.
+`GET /api/state` and the SSE `snapshot` event are produced by the same projector (`src/domain/snapshot.ts`), so the two paths cannot disagree. The active match is included both as `activeMatch` and within `recentMatches`; `activeMatchId` keeps it reachable from history. Each snapshot carries a monotonic `revision` (the maximum record revision included) and each streamed event carries its match `sequence`, emitted as the SSE `id`. The client reducer ignores duplicate or stale events and refetches the snapshot on a detected revision gap.
+
+Local-host requests are required: a `Host` header outside loopback is rejected, and state-changing requests with a cross-site `Origin` are rejected. Requests with no `Origin` (local CLI clients) are allowed. The event stream detects and drops a client whose socket buffer grows past a bound rather than buffering without limit.
+
+The event stream sends one full `snapshot` on connection and again for match creation, start/resume, pause/stop, terminal results and agent errors. Between those boundaries it emits named domain events such as `turn.started`, `agent.started`, `agent.response`, `move.proposed`, `move.rejected`, `move.applied`, `turn.completed` and `agent.timeout`. A completed turn includes its canonical telemetry record so the client can patch its history without a snapshot, and ordinary activity does not retransmit all saved games. PGN is derived on demand rather than streamed on every event.
 
 ## Adding another game
 

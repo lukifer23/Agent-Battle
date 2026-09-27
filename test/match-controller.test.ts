@@ -325,6 +325,7 @@ function legacyRecord(id: string): MatchRecord {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     status: "interrupted",
+    revision: 0,
     players: [
       { id: "white", label: "White", agent: { provider: "codex", model: "", name: "Codex · CLI default" } },
       { id: "black", label: "Black", agent: { provider: "codex", model: "", name: "Codex · CLI default" } },

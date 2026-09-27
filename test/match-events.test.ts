@@ -14,6 +14,7 @@ function runningState(): AppState {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     status: "running",
+    revision: 0,
     players: [
       { id: "white", label: "White", agent: { provider: "codex", model: "", name: "Codex" } },
       { id: "black", label: "Black", agent: { provider: "claude", model: "", name: "Claude Code" } },
@@ -24,7 +25,7 @@ function runningState(): AppState {
     events: [],
     currentPlayerId: "white",
   };
-  return { providers: [], activeMatch: match, recentMatches: [match] };
+  return { revision: 0, providers: [], activeMatchId: match.id, activeMatch: match, recentMatches: [match] };
 }
 
 test("move events update the spectator board and replay without replacing the match snapshot", () => {
@@ -63,4 +64,20 @@ test("terminal events update the result and clear the active match", () => {
   assert.deepEqual(updated.recentMatches[0]?.result, {
     kind: "win", winnerId: "black", notation: "0-1", reason: "Checkmate — black wins",
   });
+});
+
+test("the reducer is idempotent and ignores stale revisions", () => {
+  const event: MatchEvent = {
+    at: "2026-01-01T00:00:03.000Z",
+    type: "move.applied",
+    text: "Codex played e2e4",
+    playerId: "white",
+    payload: { fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1", move: { ply: 1, color: "white", san: "e4", uci: "e2e4", fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1", at: "2026-01-01T00:00:03.000Z" } },
+  };
+  const once = applyMatchEvent(runningState(), "match-1", event, 5);
+  assert.equal(once.recentMatches[0]?.revision, 5);
+  const twice = applyMatchEvent(once, "match-1", event, 5);
+  assert.equal(twice.recentMatches[0], once.recentMatches[0]);
+  const stale = applyMatchEvent(once, "match-1", { ...event, text: "stale" }, 4);
+  assert.equal(stale.recentMatches[0], once.recentMatches[0]);
 });

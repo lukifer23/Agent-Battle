@@ -32,7 +32,13 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .topbar-right { display: flex; align-items: center; gap: 20px; }
 .local-chip, .eyebrow, .setup-tag, .field-label, .player-card-top, .timeout-setting, .match-state, .score-header, .score-legend, .notation-chip, .turn-indicator, .stop-button, .page-footer, .footnote { font: 500 10px var(--mono); letter-spacing: .1em; }
 .local-chip { display: flex; align-items: center; gap: 8px; color: var(--soft); }
+.connection-chip { padding: 4px 7px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); font: 500 9px var(--mono); letter-spacing: .1em; }
+.connection-live { color: var(--lime); border-color: #596b3d; }
+.connection-connecting, .connection-reconnecting { color: #d8b45a; border-color: #6b5f34; }
+.connection-offline { color: #e89c82; border-color: #65433a; }
 .live-dot, .feed-light, .state-dot, .agent-presence { width: 7px; height: 7px; display: inline-block; border-radius: 50%; background: var(--lime); box-shadow: 0 0 10px #c4ed695c; }
+.live-dot { background: #46504b; box-shadow: none; }
+.live-dot.is-live { background: var(--lime); box-shadow: 0 0 10px #c4ed695c; }
 .quiet-button { color: var(--soft); border: 1px solid var(--line); padding: 8px 11px; border-radius: 5px; background: transparent; font: 500 11px var(--mono); cursor: pointer; transition: color .18s, border-color .18s; }
 .quiet-button:hover { color: var(--lime); border-color: #566450; }
 .quiet-button:disabled { opacity: .45; cursor: default; }

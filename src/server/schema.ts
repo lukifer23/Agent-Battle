@@ -158,7 +158,7 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
   if (!Array.isArray(raw.events)) return { error: "events are missing" };
   const events = raw.events.flatMap((event) => {
     if (!isPlainObject(event) || !isIsoDate(event.at) || !isString(event.type) || !isString(event.text)) return [];
-    return [{ at: event.at, type: event.type, text: event.text, ...(isString(event.playerId) ? { playerId: event.playerId } : {}), ...(isPlainObject(event.payload) ? { payload: event.payload } : {}) }];
+    return [{ at: event.at, type: event.type, text: event.text, ...(isFiniteNumber(event.sequence) ? { sequence: event.sequence } : {}), ...(isString(event.playerId) ? { playerId: event.playerId } : {}), ...(isPlainObject(event.payload) ? { payload: event.payload } : {}) }];
   });
 
   let result: MatchRecord["result"];
@@ -208,6 +208,7 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
       gameState: raw.gameState,
       history,
       events,
+      revision: isFiniteNumber(raw.revision) ? raw.revision : 0,
       ...(isString(raw.currentPlayerId) ? { currentPlayerId: raw.currentPlayerId } : {}),
       ...(result ? { result } : {}),
       ...(isString(raw.error) ? { error: raw.error } : {}),

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import { applyMatchEvent, matchEventTypes } from "./client/matchEvents.js";
 import { ArrowUpRight, BoardMark, ChevronDown, RefreshCw, Trophy } from "./components/icons.js";
@@ -12,9 +12,15 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers },
+    signal: init?.signal ?? AbortSignal.timeout(60_000),
   });
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.error ?? `Request failed (${response.status})`);
+  const text = await response.text();
+  let body: Record<string, unknown> = {};
+  if (text) {
+    try { body = JSON.parse(text) as Record<string, unknown>; }
+    catch { throw new Error(`Unexpected ${response.status} response from the server.`); }
+  }
+  if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : `Request failed (${response.status})`);
   return body as T;
 }
 
@@ -62,38 +68,61 @@ function App() {
   const [replayOpen, setReplayOpen] = useState(false);
   const [newMatchOpen, setNewMatchOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [connection, setConnection] = useState<"connecting" | "live" | "reconnecting" | "offline">("connecting");
+  const [pendingCommand, setPendingCommand] = useState<null | "create" | "start" | "pause" | "stop">(null);
+  const revisions = useRef<Map<string, number>>(new Map());
+
+  const rememberSnapshot = useCallback((next: AppState) => {
+    const map = revisions.current;
+    map.clear();
+    for (const match of next.recentMatches) map.set(match.id, match.revision ?? 0);
+    if (next.activeMatch) map.set(next.activeMatch.id, next.activeMatch.revision ?? 0);
+  }, []);
 
   const refresh = useCallback(async () => {
     const next = await api<AppState>("/api/state");
+    rememberSnapshot(next);
     setState(next);
     setProvidersChecked(true);
-    setSelectedId((current) => current ?? next.activeMatch?.id ?? next.recentMatches[0]?.id ?? null);
-  }, []);
+    setSelectedId((current) => current ?? next.activeMatchId ?? next.recentMatches[0]?.id ?? null);
+  }, [rememberSnapshot]);
 
   useEffect(() => {
     const source = new EventSource("/api/events");
+    source.onopen = () => setConnection("live");
     source.addEventListener("snapshot", (event) => {
       try {
         const next = JSON.parse((event as MessageEvent<string>).data) as AppState;
+        rememberSnapshot(next);
         setState(next);
         setProvidersChecked(true);
-        setSelectedId((current) => current ?? next.activeMatch?.id ?? next.recentMatches[0]?.id ?? null);
+        setConnection("live");
+        setSelectedId((current) => current ?? next.activeMatchId ?? next.recentMatches[0]?.id ?? null);
       } catch (reason) {
         setError(reason instanceof Error ? `Could not read the server state: ${reason.message}` : "Could not read the server state.");
       }
     });
     for (const type of matchEventTypes) source.addEventListener(type, (message) => {
       try {
-        const envelope = JSON.parse((message as MessageEvent<string>).data) as { matchId?: string; event?: MatchEvent };
+        const envelope = JSON.parse((message as MessageEvent<string>).data) as { matchId?: string; revision?: number; event?: MatchEvent };
         if (!envelope.matchId || !envelope.event) throw new Error("Event envelope is missing its match or event.");
-        setState((current) => current ? applyMatchEvent(current, envelope.matchId!, envelope.event!) : current);
+        const matchId = envelope.matchId;
+        const revision = envelope.revision ?? envelope.event.sequence ?? 0;
+        const current = revisions.current.get(matchId);
+        if (current !== undefined && revision <= current) return;
+        if (current !== undefined && revision > current + 1) { void refresh().catch(() => undefined); return; }
+        revisions.current.set(matchId, revision);
+        setState((existing) => existing ? applyMatchEvent(existing, matchId, envelope.event!, revision) : existing);
       } catch (reason) {
         setError(reason instanceof Error ? `Could not process ${type}: ${reason.message}` : `Could not process ${type}.`);
       }
     });
-    source.onerror = () => { void refresh().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not connect to the game server.")); };
+    source.onerror = () => {
+      setConnection((value) => (value === "live" ? "reconnecting" : "offline"));
+      void refresh().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not connect to the game server."));
+    };
     return () => source.close();
-  }, [refresh]);
+  }, [refresh, rememberSnapshot]);
 
   const selectedMatch = useMemo(
     () => state?.recentMatches.find((match) => match.id === selectedId) ?? state?.activeMatch ?? null,
@@ -148,7 +177,7 @@ function App() {
   const turnSecondsLeft = Math.max(0, (selectedMatch?.settings.turnTimeoutSeconds ?? timeoutSeconds) - currentTurnElapsed);
 
   const startMatch = async () => {
-    setBusy(true); setError("");
+    setPendingCommand("start"); setError("");
     try {
       const created = await api<{ match: MatchRecord }>("/api/matches", {
         method: "POST",
@@ -167,18 +196,44 @@ function App() {
       await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not start the match.");
-    } finally { setBusy(false); }
+      await refresh().catch(() => undefined);
+    } finally { setPendingCommand(null); }
   };
 
   const stopMatch = async () => {
     if (!selectedMatch) return;
-    setBusy(true); setError("");
+    setPendingCommand("stop"); setError("");
     try {
       await api(`/api/matches/${selectedMatch.id}/stop`, { method: "POST", body: "{}" });
       await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not stop the match.");
-    } finally { setBusy(false); }
+      await refresh().catch(() => undefined);
+    } finally { setPendingCommand(null); }
+  };
+
+  const pauseMatch = async () => {
+    if (!selectedMatch) return;
+    setPendingCommand("pause"); setError("");
+    try {
+      await api(`/api/matches/${selectedMatch.id}/pause`, { method: "POST", body: "{}" });
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not pause the match.");
+      await refresh().catch(() => undefined);
+    } finally { setPendingCommand(null); }
+  };
+
+  const resumeMatch = async () => {
+    if (!selectedMatch) return;
+    setPendingCommand("start"); setError("");
+    try {
+      await api(`/api/matches/${selectedMatch.id}/start`, { method: "POST", body: "{}" });
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not resume the match.");
+      await refresh().catch(() => undefined);
+    } finally { setPendingCommand(null); }
   };
 
   const refreshProviders = async () => {
@@ -206,7 +261,8 @@ function App() {
           <span>AGENT<span className="brand-light">BATTLE</span></span>
         </a>
         <div className="topbar-right">
-          <span className="local-chip"><span className="live-dot" /> LOCAL ARENA</span>
+          <span className={`connection-chip connection-${connection}`}>{connection === "live" ? "LIVE" : connection === "connecting" ? "CONNECTING" : connection === "reconnecting" ? "RECONNECTING" : "OFFLINE"}</span>
+          <span className="local-chip"><span className={`live-dot ${connection === "live" ? "is-live" : ""}`} /> LOCAL ARENA</span>
           <button className="quiet-button" onClick={() => void refreshProviders()} disabled={busy}><RefreshCw className="button-icon" /> Check CLIs</button>
         </div>
       </header>
@@ -243,8 +299,8 @@ function App() {
               <div className="setup-footer">
                 <label className="timeout-setting">MOVE TIMEOUT <input type="number" min={30} max={600} step={30} value={timeoutSeconds}
                   onChange={(event) => setTimeoutSeconds(Math.max(30, Math.min(600, Number(event.target.value) || 30)))} /> <span>sec</span></label>
-                <button className="primary-button" onClick={() => void startMatch()} disabled={busy || !providersChecked || !canCreate || !installed(whiteProvider) || !installed(blackProvider)}>
-                  {busy ? "PREPARING…" : "START MATCH"} <ArrowUpRight className="inline-icon" />
+                <button className="primary-button" onClick={() => void startMatch()} disabled={busy || pendingCommand !== null || !providersChecked || !canCreate || !installed(whiteProvider) || !installed(blackProvider)}>
+                  {busy || pendingCommand === "start" ? "PREPARING…" : "START MATCH"} <ArrowUpRight className="inline-icon" />
                 </button>
               </div>
               {(whiteProvider === blackProvider) && <div className="inline-note">Both sides can use the same CLI with different models.</div>}
@@ -304,9 +360,9 @@ function App() {
               <span>{selectedMatch ? resultLine(selectedMatch) : "The board is ready for its first match."}</span>
               {selectedMatch && (
                 <div className="match-actions">
-                  {currentIsRunning && <button className="quiet-button" onClick={() => void api(`/api/matches/${selectedMatch.id}/pause`, { method: "POST", body: "{}" }).then(refresh).catch((reason) => setError(reason.message))} disabled={busy}>PAUSE</button>}
-                  {canStart && <button className="primary-button compact" onClick={() => void api(`/api/matches/${selectedMatch.id}/start`, { method: "POST", body: "{}" }).then(refresh).catch((reason) => setError(reason.message))} disabled={busy}>{selectedMatch.status === "ready" ? "START THIS MATCH" : "RESUME MATCH"}</button>}
-                  {["ready", "running", "paused", "interrupted"].includes(selectedMatch.status) && <button className="stop-button" onClick={() => void stopMatch()} disabled={busy}>STOP</button>}
+                  {currentIsRunning && <button className="quiet-button" onClick={() => void pauseMatch()} disabled={pendingCommand !== null}>{pendingCommand === "pause" ? "PAUSING…" : "PAUSE"}</button>}
+                  {canStart && <button className="primary-button compact" onClick={() => void resumeMatch()} disabled={pendingCommand !== null}>{selectedMatch.status === "ready" ? "START THIS MATCH" : pendingCommand === "start" ? "RESUMING…" : "RESUME MATCH"}</button>}
+                  {["ready", "running", "paused", "interrupted"].includes(selectedMatch.status) && <button className="stop-button" onClick={() => void stopMatch()} disabled={pendingCommand !== null}>{pendingCommand === "stop" ? "STOPPING…" : "STOP"}</button>}
                 </div>
               )}
             </div>

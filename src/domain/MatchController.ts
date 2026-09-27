@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentAdapter, AgentRegistry } from "./agent.js";
 import { AgentExecutionError, AgentProtocolError } from "./agent.js";
 import type { ActionValidation, GameDefinition, GameRegistry } from "./game.js";
+import { buildSnapshot } from "./snapshot.js";
 import type {
   AgentAttempt,
   AppState,
@@ -89,14 +90,7 @@ export class MatchController {
   }
 
   async snapshot(): Promise<AppState> {
-    const activeMatch = this.active();
-    return {
-      providers: await this.providers(),
-      activeMatch,
-      // The active record is already available through activeMatch. Sending it
-      // again in recentMatches doubles the largest payload during live/replay updates.
-      recentMatches: this.records.filter((match) => match.id !== activeMatch?.id).slice(0, 50),
-    };
+    return buildSnapshot(this.records, await this.providers());
   }
 
   async create(request: CreateMatchRequest): Promise<MatchRecord> {
@@ -152,6 +146,7 @@ export class MatchController {
       createdAt: now,
       updatedAt: now,
       status: "ready",
+      revision: 0,
       players,
       settings: {
         turnTimeoutSeconds: request.turnTimeoutSeconds,
@@ -291,10 +286,12 @@ export class MatchController {
   }
 
   private emit(match: MatchRecord, type: string, text: string, payload?: Record<string, unknown>, playerId?: string): void {
+    match.revision = (match.revision ?? 0) + 1;
     const event: MatchEvent = {
       at: new Date().toISOString(),
       type,
       text,
+      sequence: match.revision,
       ...(playerId ? { playerId } : {}),
       ...(payload ? { payload } : {}),
     };
@@ -531,6 +528,7 @@ export class MatchController {
           turnId, turnIndex, ply, latencyMs: record.latencyMs, retryCount: record.retryCount,
           toolCalls: attempts.reduce((sum, attempt) => sum + (attempt.toolCalls ?? 0), 0),
           inputTokens: totalUsage(attempts, "inputTokens"), outputTokens: totalUsage(attempts, "outputTokens"),
+          record,
         }, playerId);
         if (!this.persistCheckpoint(match, game, state)) return;
 

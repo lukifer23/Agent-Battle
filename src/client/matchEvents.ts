@@ -1,4 +1,4 @@
-import type { AppState, ChessMoveRecord, ChessSnapshot, MatchEvent, MatchRecord } from "../shared.js";
+import type { AppState, ChessMoveRecord, ChessSnapshot, MatchEvent, MatchRecord, TurnTelemetry } from "../shared.js";
 
 export const matchEventTypes = [
   "match.created", "match.started", "match.resumed", "match.paused", "match.stopped", "match.finished",
@@ -6,13 +6,24 @@ export const matchEventTypes = [
   "agent.response", "agent.timeout", "agent.error", "move.proposed", "move.rejected", "move.applied",
 ];
 
-export function applyMatchEvent(state: AppState, matchId: string, event: MatchEvent): AppState {
+const activeStatuses = ["ready", "running", "paused", "interrupted"];
+
+/**
+ * Idempotent reducer: an event whose revision is not newer than the record's is
+ * ignored, so duplicate or out-of-order delivery cannot corrupt state. Missing
+ * domain events are recovered by refetching the canonical snapshot (handled by
+ * the caller when a revision gap is detected).
+ */
+export function applyMatchEvent(state: AppState, matchId: string, event: MatchEvent, revision?: number): AppState {
   const apply = (match: MatchRecord | null): MatchRecord | null => {
     if (!match || match.id !== matchId) return match;
+    const nextRevision = revision ?? event.sequence ?? (match.revision ?? 0) + 1;
+    if ((match.revision ?? 0) >= nextRevision) return match;
     const payload = event.payload ?? {};
     const updated: MatchRecord = {
       ...match,
       updatedAt: event.at,
+      revision: nextRevision,
       events: [...match.events, event].slice(-500),
     };
     if (event.type === "match.created") updated.status = "ready";
@@ -27,6 +38,12 @@ export function applyMatchEvent(state: AppState, matchId: string, event: MatchEv
         fen,
         ...(move ? { moves: [...snapshot.moves.filter((item) => item.ply !== move.ply), move].sort((left, right) => left.ply - right.ply) } : {}),
       } satisfies ChessSnapshot;
+    }
+    if (event.type === "turn.completed") {
+      const record = payload.record as TurnTelemetry | undefined;
+      if (record && typeof record === "object" && !match.history.some((turn) => turn.turnId === record.turnId)) {
+        updated.history = [...match.history, record];
+      }
     }
     if (event.type === "match.paused" || event.type === "match.stopped") {
       updated.status = event.type === "match.paused" ? "paused" : "stopped";
@@ -56,6 +73,12 @@ export function applyMatchEvent(state: AppState, matchId: string, event: MatchEv
 
   const recentMatches = state.recentMatches.map((match) => apply(match) ?? match);
   const activeUpdated = state.activeMatch?.id === matchId ? apply(state.activeMatch) : state.activeMatch;
-  const activeMatch = activeUpdated && ["ready", "running", "paused", "interrupted"].includes(activeUpdated.status) ? activeUpdated : null;
-  return { ...state, activeMatch, recentMatches };
+  const activeMatch = activeUpdated && activeStatuses.includes(activeUpdated.status) ? activeUpdated : null;
+  return {
+    ...state,
+    revision: Math.max(state.revision, ...recentMatches.map((match) => match.revision ?? 0)),
+    activeMatch,
+    activeMatchId: activeMatch?.id ?? null,
+    recentMatches,
+  };
 }

@@ -45,6 +45,8 @@ export interface MatchEvent {
   at: string;
   type: string;
   text: string;
+  /** Monotonic match revision reached after this event; used for ordered/idempotent client application. */
+  sequence?: number;
   playerId?: string;
   payload?: Record<string, unknown>;
 }
@@ -138,6 +140,8 @@ export interface MatchRecord {
   currentPlayerId?: string;
   result?: MatchResult;
   error?: string;
+  /** Monotonic revision for this record; every event/checkpoint bumps it. */
+  revision: number;
   /** Incremented on every accepted start; used to reject stale controller commands. */
   runGeneration?: number;
   /** Durable in-flight turn so a resume keeps rejection feedback and retry budget. */
@@ -153,7 +157,10 @@ export interface ProviderInfo {
 }
 
 export interface AppState {
+  /** Monotonic snapshot revision: the maximum record revision included. */
+  revision: number;
   providers: ProviderInfo[];
+  activeMatchId: string | null;
   activeMatch: MatchRecord | null;
   recentMatches: MatchRecord[];
 }
