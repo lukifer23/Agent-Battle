@@ -55,7 +55,10 @@ export class HangmanGame implements GameDefinition<HangmanState> {
       schemaVersion: this.observationVersion, gameId: this.id, matchId: context.matchId, turnId: context.turnId,
       playerId: role, playerLabel: this.playerLabel(role), sideToMove: role,
       ply: lane.actionsTaken + 1, turnIndex: lane.actionsTaken + 1,
-      state: { pattern: this.pattern(state, role), wordLength: state.word.length, guessedLetters: [...lane.guessedLetters], misses: lane.misses, missesAllowed: 7, actionsTaken: lane.actionsTaken },
+      state: { pattern: this.pattern(state, role), wordLength: state.word.length, guessedLetters: [...lane.guessedLetters], misses: lane.misses, missesAllowed: 7, actionsTaken: lane.actionsTaken,
+        rules: { version: this.version, incorrectLetterMisses: 1, incorrectSolutionMisses: 2, repeatedLetter: "invalid; one correction allowed", failureAtMisses: 7,
+          objective: "Solve the word. A solved lane wins over an ordinary failed lane. Among solved lanes minimize misses, then accepted actions. Among failed lanes maximize distinct correctly guessed letters. A forfeited lane loses to a non-forfeited lane." },
+      },
       history: state.entries.filter((entry) => entry.playerId === role).map((entry) => structuredClone(entry.action)),
       legalActions: [..."abcdefghijklmnopqrstuvwxyz"].filter((letter) => !lane.guessedLetters.includes(letter)).map((letter) => ({ type: "guess_letter", payload: { letter } })),
       actionSchema: { type: "object", oneOf: [
