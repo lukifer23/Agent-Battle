@@ -16,7 +16,7 @@ test("full SSE snapshots are limited to match lifecycle events", () => {
   assert.equal(shouldPublishSnapshot(event("match.finished")), true);
 });
 
-test("persistence is reserved for explicit checkpoints, not streamed events", () => {
+test("the commit callback is distinct from streamed event notification", () => {
   assert.equal(shouldPersistChange(undefined), true);
   assert.equal(shouldPersistChange(event("agent.started")), false);
   assert.equal(shouldPersistChange(event("turn.completed")), false);

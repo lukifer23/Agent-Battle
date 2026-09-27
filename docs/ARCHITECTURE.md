@@ -55,34 +55,34 @@ All agents receive a new complete observation every turn. No transcript is neede
 
 ## Persistence and telemetry
 
-`data/matches.json` (override the directory with `AGENT_BATTLE_DATA_DIR`) stores match records in a versioned envelope. The current store version is 2; legacy files that are a bare JSON array are migrated on load with a pre-migration backup. The store is validated on load:
+`data/matches.json` (override the directory with `AGENT_BATTLE_DATA_DIR`) stores match records in a versioned envelope. The current store version is 3; bare JSON arrays and supported older envelopes are migrated on load with a pre-migration backup. The store is validated on load:
 
-- A root that is not an array or a versioned envelope is preserved (renamed aside), and the app refuses to silently replace it with an empty history.
+- An unreadable, unsupported, or future-version root remains in place and prevents server startup.
 - Individual records that fail runtime validation are written to a quarantine file and excluded; valid records are retained.
 - Migration is idempotent and keeps a `.bak` copy; losing a valid record is never used as a recovery path.
 
-A single-writer lock (`matches.json.lock`) is acquired at startup; a second instance with a live lock is refused, and a stale lock from a dead process is recovered. Writes use a unique temporary file with `fsync` and an atomic rename with owner-only permissions. Durability happens at explicit controller checkpoints (turn start, each attempt, accepted move, and lifecycle changes), not on every streamed event, so a failed write can end the match instead of proceeding under a false durability claim.
+A single-writer lock (`matches.json.lock`) is acquired atomically at startup before data is loaded. A recovery guard serializes stale-lock reclamation; uncertain ownership fails closed. Writes use a unique temporary file with `fsync` and an atomic rename with owner-only permissions. The controller commits state and its event before publication. A failed write restores the last committed position in memory, stops further requests, reports a storage error, and prevents a success acknowledgement for the failed transition. The last durable running state is marked interrupted on restart.
 
 Each record contains:
 
 - Game ID and game version, protocol/schema versions, participants, model/reasoning selection and timeout/retry settings.
 - The serialized authoritative game state, including chess PGN and replay moves.
 - An event feed and one telemetry record per agent turn, including every retry attempt, FEN before/after, and usage data. The event feed is a bounded recent window, not the complete history.
-- Match result and timestamps, plus an optional durable in-flight turn (used to keep retry budget and feedback across a pause or restart).
+- Match result and timestamps, plus an optional pending turn (used to keep saved retry feedback across a pause or restart). Invocation start is not yet durably recorded before provider spawn.
 
 Token counts and cost are nullable because CLIs expose different metadata. No chain-of-thought is requested or used. Successful responses are stored as canonical action JSON; malformed response excerpts and stderr diagnostics are bounded and token-redacted through `src/server/diagnostics.ts`.
 
-Usage is modeled as reported categories plus a coverage flag (`none`/`partial`/`full`); aggregation in `src/domain/usage.ts` sums only reported values and never treats unknown as zero. Cache and reasoning token categories are captured when a provider reports them. Failed, timed-out, cancelled and retried attempts are retained and counted toward request and cost totals.
+Usage is modeled as reported categories plus a coverage flag (`none`/`partial`/`full`). Coverage and totals remain incomplete: unknown cost can render as zero, and pending or error-path usage can be omitted. The invocation ledger and metric-specific coverage are follow-up work.
 
-Each match stores an `environment` block (adapter version, prompt/schema versions, provider CLI versions captured at creation) and each participant keeps requested and resolved model/reasoning separately. Competitor identity (`competitorId`) is derived from provider, resolved-or-requested model, and reasoning, so changing a CLI default does not retroactively relabel an old competitor.
+Each match stores an `environment` block (adapter version, prompt/schema versions, provider CLI versions captured at creation) and requested participant settings. Provider parsers do not yet populate resolved model identity, so CLI-default competitors may remain ambiguous across external default changes.
 
-Resource budgets (`maxPlies`, `maxRequests`, `maxWallMinutes`, optional `maxReportedCostUsd`) live in match settings and are enforced between requests. Reaching a budget stops the match as a non-game outcome; it never produces a win or draw.
+Resource budgets (`maxPlies`, `maxRequests`, `maxWallMinutes`, optional `maxReportedCostUsd`) live in match settings and are currently checked between turns. A retry can cross a threshold; per-invocation enforcement is pending. Reaching a budget stops the match as a non-game outcome.
 
 ### Transport projection and history
 
 The durable store keeps full records, but transports use a projection (`src/domain/projection.ts`). Snapshots carry summaries for history (identity, participants, result, counts) and a full transport projection only for the active match; a selected historical match is fetched through `GET /api/matches/:id`. The projection drops bulky diagnostics (`responseExcerpt`, `stderrExcerpt`, legacy `stateBefore`/`stateAfter`) and bounds the streamed event window. Full diagnostics remain available from the detail, events and attempts endpoints, which read the durable record.
 
-History is not silently pruned: the store writes every retained record, summaries are paginated, and the readable event feed is explicitly a bounded recent window rather than complete history. The in-memory deserialized game state is held only for active matches and rehydrated on demand. With `AGENT_BATTLE_METRICS=1` the server logs snapshot and checkpoint sizes and durations; `npm run benchmark` reports projection sizes and timings for 0/1/50/100 records and a long game.
+History is not silently pruned: the store writes every retained record, summaries are paginated, and the readable event feed is explicitly a bounded recent window rather than complete history. Terminal runtime entries are not yet evicted consistently. With `AGENT_BATTLE_METRICS=1` the server logs snapshot and checkpoint sizes and durations; `npm run benchmark` currently uses synthetic data and does not qualify full persistence or browser latency.
 
 New turn records store FEN checkpoints rather than repeating the full serialized game state for every ply. Older records may still contain `stateBefore`/`stateAfter`; those optional fields remain readable for compatibility. Accepted moves, rejections, errors and lifecycle changes are persisted at their state boundary.
 

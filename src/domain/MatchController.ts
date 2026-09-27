@@ -28,6 +28,7 @@ interface RunningMatch {
   inFlight: Set<AbortController>;
   done: Promise<void>;
   generation: number;
+  failure?: Error;
 }
 
 const CANCELLATION_HARD_GRACE_MS = 2500;
@@ -53,6 +54,8 @@ export class MatchController {
   private readonly runs = new Map<string, RunningMatch>();
   private readonly records: MatchRecord[];
   private creatingMatch = false;
+  private readonly durableRecords = new Map<string, MatchRecord>();
+  private storageFailure?: Error;
 
   constructor(
     private readonly games: GameRegistry,
@@ -60,8 +63,10 @@ export class MatchController {
     initialRecords: MatchRecord[],
     private readonly providers: () => Promise<ProviderInfo[]>,
     private readonly onChange: (record: MatchRecord, event?: MatchEvent) => void,
+    private readonly onStorageFailure: (message: string) => void = () => undefined,
   ) {
     this.records = initialRecords;
+    for (const record of initialRecords) this.durableRecords.set(record.id, structuredClone(record));
     let migrated = false;
     for (const match of this.records) {
       try {
@@ -91,6 +96,33 @@ export class MatchController {
     if (migrated) this.save();
   }
 
+  getStorageError(): string | null { return this.storageFailure?.message ?? null; }
+
+  private assertWritable(): void {
+    if (this.storageFailure) throw this.storageFailure;
+  }
+
+  private commit(match: MatchRecord): void {
+    this.assertWritable();
+    try {
+      this.onChange(match);
+      for (const record of this.records) this.durableRecords.set(record.id, structuredClone(record));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "storage failure";
+      this.storageFailure = new Error(`Could not save match state: ${message}. The last saved position needs recovery.`);
+      const durable = this.durableRecords.get(match.id);
+      if (durable) {
+        for (const key of Object.keys(match)) delete (match as unknown as Record<string, unknown>)[key];
+        Object.assign(match, structuredClone(durable));
+        match.status = "error";
+        match.error = this.storageFailure.message;
+        match.currentPlayerId = undefined;
+      }
+      try { this.onStorageFailure(this.storageFailure.message); } catch { /* Reporting cannot make a failed write succeed. */ }
+      throw this.storageFailure;
+    }
+  }
+
   get(id: string): MatchRecord | undefined {
     return this.records.find((match) => match.id === id);
   }
@@ -108,6 +140,7 @@ export class MatchController {
   }
 
   async create(request: CreateMatchRequest): Promise<MatchRecord> {
+    this.assertWritable();
     if (this.creatingMatch) throw new Error("A match is already being created.");
     this.creatingMatch = true;
     try {
@@ -193,7 +226,7 @@ export class MatchController {
     this.runtime.set(match.id, state);
     this.records.unshift(match);
     try {
-      this.onChange(match);
+      this.commit(match);
     } catch (error) {
       this.records.shift();
       this.runtime.delete(match.id);
@@ -204,6 +237,7 @@ export class MatchController {
   }
 
   async start(id: string): Promise<MatchRecord> {
+    this.assertWritable();
     const match = this.require(id);
     const existingRun = this.runs.get(id);
     if (existingRun && match.status === "running") return match;
@@ -224,7 +258,7 @@ export class MatchController {
     const state = this.runtime.get(id);
     if (!this.persistCheckpoint(match, game, state)) {
       this.runs.delete(id);
-      return match;
+      throw this.storageFailure ?? new Error("Could not save the match start.");
     }
     this.emit(match, resuming ? "match.resumed" : "match.started", resuming ? "Match resumed" : "Match started");
     running.done = this.run(id, game, running);
@@ -245,6 +279,7 @@ export class MatchController {
   }
 
   async pause(id: string): Promise<void> {
+    this.assertWritable();
     const match = this.require(id);
     const running = this.runs.get(id);
     if (running && match.status === "running") {
@@ -256,6 +291,7 @@ export class MatchController {
   }
 
   async stop(id: string): Promise<void> {
+    this.assertWritable();
     const match = this.require(id);
     const running = this.runs.get(id);
     if (running && match.status === "running") {
@@ -267,7 +303,6 @@ export class MatchController {
       match.currentPlayerId = undefined;
       match.error = undefined;
       match.updatedAt = new Date().toISOString();
-      this.onChange(match);
       this.emit(match, "match.stopped", match.pendingTurn
         ? "Match stopped before resuming. The saved position and the retained in-flight attempt are kept for the record."
         : "Match stopped before a controller was attached. The saved position is retained.");
@@ -278,8 +313,7 @@ export class MatchController {
   async shutdown(): Promise<void> {
     const active = this.active();
     if (active?.status === "running") {
-      try { await this.pause(active.id); }
-      catch { /* Continue shutdown even if the checkpoint fails. */ }
+      await this.pause(active.id);
     }
     await Promise.all([...this.runs.values()].map((running) => running.done.catch(() => undefined)));
   }
@@ -293,18 +327,14 @@ export class MatchController {
     for (const controller of running.inFlight) controller.abort(reason);
     await running.done;
     if (this.runs.get(id) === running) this.runs.delete(id);
+    if (running.failure) throw running.failure;
   }
 
   private persistCheckpoint(match: MatchRecord, game: GameDefinition<unknown>, state: unknown): boolean {
     try {
       this.persistState(match, game, state);
       return true;
-    } catch (error) {
-      match.status = "error";
-      match.error = `Could not save match state: ${error instanceof Error ? error.message : "storage failure"}. No further move was requested.`;
-      match.currentPlayerId = undefined;
-      try { this.emit(match, "agent.error", match.error); }
-      catch { /* Streaming is best-effort when the store is unavailable. */ }
+    } catch {
       return false;
     }
   }
@@ -328,11 +358,13 @@ export class MatchController {
     match.events.push(event);
     if (match.events.length > 500) match.events.splice(0, match.events.length - 500);
     match.updatedAt = event.at;
-    this.onChange(match, event);
+    this.commit(match);
+    try { this.onChange(match, event); }
+    catch (error) { console.error("Could not publish a committed match event.", error); }
   }
 
   private save(): void {
-    this.onChange(this.records[0] ?? ({} as MatchRecord));
+    if (this.records[0]) this.commit(this.records[0]);
   }
 
   private player(match: MatchRecord, playerId: string): PlayerSeat {
@@ -579,16 +611,18 @@ export class MatchController {
         match.currentPlayerId = undefined;
         this.emit(match, "match.stopped", "Match stopped. The current position and telemetry are saved.");
       }
-      try { this.onChange(match); }
-      catch { /* The pause/stop checkpoint is best-effort; the in-memory state is already settled. */ }
+      this.commit(match);
     } catch (error) {
+      if (this.storageFailure) {
+        running.failure = this.storageFailure;
+        return;
+      }
       match.status = "error";
       match.error = error instanceof Error ? error.message : "Unexpected match controller failure.";
       match.currentPlayerId = undefined;
       match.pendingTurn = undefined;
       this.emit(match, "agent.error", match.error);
-      try { this.persistState(match, game, state); }
-      catch { /* A storage failure already ended the match; do not rethrow. */ }
+      this.persistCheckpoint(match, game, state);
     } finally {
       await Promise.all([...running.agents.values()].map((agent) => agent.shutdown()));
       if (this.runs.get(id) === running) this.runs.delete(id);
@@ -613,12 +647,9 @@ export class MatchController {
   private budgetStop(match: MatchRecord, reason: string): void {
     match.status = "stopped";
     match.currentPlayerId = undefined;
-    match.pendingTurn = undefined;
     match.error = `Budget reached: ${reason}. No further request was made.`;
     match.updatedAt = new Date().toISOString();
     this.emit(match, "match.stopped", `Stopped: ${match.error}`, { reason: "budget" });
-    try { this.onChange(match); }
-    catch { /* The in-memory stop is already settled. */ }
   }
 
   private nextAttemptNumber(attempts: AgentAttempt[]): number {
@@ -700,7 +731,7 @@ export class MatchController {
   private persistState(match: MatchRecord, game: GameDefinition<unknown>, state: unknown): void {
     match.gameState = game.serialize(state);
     match.updatedAt = new Date().toISOString();
-    this.onChange(match);
+    this.commit(match);
   }
 
   private finish(match: MatchRecord, game: GameDefinition<unknown>, state: unknown, result: MatchResult, status: "finished" | "forfeit" = "finished"): void {
@@ -714,8 +745,6 @@ export class MatchController {
     this.emit(match, "match.finished", `${result.notation} · ${result.reason}`, {
       result: result.notation, kind: result.kind, winnerId: result.winnerId ?? null, reason: result.reason, status,
     });
-    try { this.onChange(match); }
-    catch { /* The result is already in memory; a failed final write is surfaced by the server. */ }
   }
 }
 

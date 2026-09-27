@@ -55,17 +55,19 @@ function validateUsage(raw: unknown): AgentUsage {
 
 function validateAttempt(raw: unknown): ValidationResult<AgentAttempt> {
   if (!isPlainObject(raw)) return { error: "attempt is not an object" };
-  if (!isFiniteNumber(raw.attempt) || raw.attempt < 1) return { error: "attempt number is invalid" };
+  if (!Number.isSafeInteger(raw.attempt) || (raw.attempt as number) < 1) return { error: "attempt number is invalid" };
   if (!isIsoDate(raw.startedAt)) return { error: "attempt start time is invalid" };
   const status = raw.status;
   if (!["valid", "invalid", "timeout", "error", "cancelled"].includes(status as string)) return { error: "attempt status is unsupported" };
+  if (raw.phase !== undefined && !["initialization", "provider", "protocol", "controller", "storage"].includes(String(raw.phase))) return { error: "attempt phase is unsupported" };
   return {
     value: {
-      attempt: raw.attempt,
+      attempt: raw.attempt as number,
       startedAt: raw.startedAt,
       ...(isIsoDate(raw.completedAt) ? { completedAt: raw.completedAt } : {}),
       ...(isFiniteNumber(raw.latencyMs) ? { latencyMs: raw.latencyMs } : {}),
       status: status as AgentAttempt["status"],
+      ...(["initialization", "provider", "protocol", "controller", "storage"].includes(String(raw.phase)) ? { phase: raw.phase as AgentAttempt["phase"] } : {}),
       ...(isString(raw.error) ? { error: raw.error } : {}),
       ...(isString(raw.responseExcerpt) ? { responseExcerpt: raw.responseExcerpt } : {}),
       ...(isString(raw.stderrExcerpt) ? { stderrExcerpt: raw.stderrExcerpt } : {}),
@@ -92,7 +94,7 @@ function validateEnvironment(raw: unknown): MatchEnvironment | undefined {
 function validatePendingTurn(raw: unknown): ValidationResult<PendingTurn> {
   if (!isPlainObject(raw)) return { error: "pending turn is not an object" };
   if (!isString(raw.turnId) || !isString(raw.playerId)) return { error: "pending turn identity is invalid" };
-  if (!isFiniteNumber(raw.turnIndex) || !isFiniteNumber(raw.ply)) return { error: "pending turn numbering is invalid" };
+  if (!Number.isSafeInteger(raw.turnIndex) || (raw.turnIndex as number) < 1 || !Number.isSafeInteger(raw.ply) || (raw.ply as number) < 1) return { error: "pending turn numbering is invalid" };
   if (!isIsoDate(raw.startedAt)) return { error: "pending turn start time is invalid" };
   if (!Array.isArray(raw.attempts)) return { error: "pending turn attempts are invalid" };
   const attempts: AgentAttempt[] = [];
@@ -104,8 +106,8 @@ function validatePendingTurn(raw: unknown): ValidationResult<PendingTurn> {
   return {
     value: {
       turnId: raw.turnId,
-      turnIndex: raw.turnIndex,
-      ply: raw.ply,
+      turnIndex: raw.turnIndex as number,
+      ply: raw.ply as number,
       playerId: raw.playerId,
       startedAt: raw.startedAt,
       ...(isString(raw.feedback) ? { feedback: raw.feedback } : {}),
@@ -117,8 +119,8 @@ function validatePendingTurn(raw: unknown): ValidationResult<PendingTurn> {
 function validateTurnTelemetry(raw: unknown, index: number): ValidationResult<TurnTelemetry> {
   if (!isPlainObject(raw)) return { error: "turn record is not an object" };
   if (!isString(raw.matchId) || !isString(raw.turnId) || !isString(raw.playerId)) return { error: "turn identity is invalid" };
-  if (!isFiniteNumber(raw.ply)) return { error: "turn numbering is invalid (missing ply)" };
-  const turnIndex = isFiniteNumber(raw.turnIndex) ? raw.turnIndex : index + 1;
+  if (!Number.isSafeInteger(raw.ply) || (raw.ply as number) < 1) return { error: "turn numbering is invalid (missing ply)" };
+  const turnIndex = Number.isSafeInteger(raw.turnIndex) && (raw.turnIndex as number) > 0 ? raw.turnIndex as number : index + 1;
   if (typeof raw.valid !== "boolean") return { error: "turn validity is invalid" };
   if (!Array.isArray(raw.attempts)) return { error: "turn attempts are invalid" };
   const attempts: AgentAttempt[] = [];
@@ -131,7 +133,7 @@ function validateTurnTelemetry(raw: unknown, index: number): ValidationResult<Tu
   return {
     value: {
       matchId: raw.matchId,
-      ply: raw.ply,
+      ply: raw.ply as number,
       turnIndex,
       turnId: raw.turnId,
       agentId: isString(raw.agentId) ? raw.agentId : "",
@@ -160,6 +162,8 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
   if (!isString(raw.id) || !raw.id) return { error: "id is missing" };
   if (!isString(raw.gameId) || !raw.gameId) return { error: "gameId is missing" };
   if (!isString(raw.gameVersion) || !isString(raw.protocolVersion)) return { error: "version fields are missing" };
+  if (raw.gameId === "chess" && raw.gameVersion !== "standard-1") return { error: "game version is unsupported" };
+  if (raw.protocolVersion !== "game-action-v1") return { error: "protocol version is unsupported" };
   if (!isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)) return { error: "timestamps are invalid" };
   if (!MATCH_STATUSES.includes(raw.status as MatchStatus)) return { error: `status "${String(raw.status)}" is unsupported` };
   if (!Array.isArray(raw.players) || raw.players.length !== 2) return { error: "exactly two participants are required" };
@@ -167,8 +171,17 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
   if (players.some((player) => player.error || !player.value)) return { error: players.find((player) => player.error)?.error ?? "participant is invalid" };
   if (!isPlainObject(raw.settings)) return { error: "settings are missing" };
   const settings = raw.settings;
-  if (!isFiniteNumber(settings.turnTimeoutSeconds) || settings.turnTimeoutSeconds <= 0) return { error: "turn timeout is invalid" };
-  if (!isFiniteNumber(settings.maxRetries) || settings.maxRetries < 0) return { error: "max retries is invalid" };
+  if (!Number.isSafeInteger(settings.turnTimeoutSeconds) || (settings.turnTimeoutSeconds as number) < 30 || (settings.turnTimeoutSeconds as number) > 600) return { error: "turn timeout is invalid" };
+  if (!Number.isSafeInteger(settings.maxRetries) || (settings.maxRetries as number) < 0 || (settings.maxRetries as number) > 10) return { error: "max retries is invalid" };
+  if (settings.budgets !== undefined) {
+    if (!isPlainObject(settings.budgets)) return { error: "budgets are invalid" };
+    for (const key of ["maxPlies", "maxRequests", "maxWallMinutes"] as const) {
+      const value = settings.budgets[key];
+      if (!Number.isSafeInteger(value) || (value as number) < 1) return { error: `${key} budget is invalid` };
+    }
+    const cost = settings.budgets.maxReportedCostUsd;
+    if (cost !== null && (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0)) return { error: "reported cost budget is invalid" };
+  }
   if (raw.gameState === undefined || raw.gameState === null) return { error: "game state is missing" };
   if (!Array.isArray(raw.history)) return { error: "history is missing" };
   const history: TurnTelemetry[] = [];
@@ -193,11 +206,13 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
   }
 
   const playerIds = players.map((player) => player.value!.id);
+  if (new Set(playerIds).size !== playerIds.length) return { error: "participant ids are duplicated" };
   const status = raw.status as MatchStatus;
   if (typeof raw.currentPlayerId === "string" && !playerIds.includes(raw.currentPlayerId)) return { error: "current player is not a participant" };
   if (result?.winnerId && !playerIds.includes(result.winnerId)) return { error: "result winner is not a participant" };
   if ((status === "finished" || status === "forfeit") && !result) return { error: `${status} match has no result` };
   if (status === "forfeit" && result?.kind !== "win") return { error: "forfeit result must be a win" };
+  if (status === "forfeit" && !history.some((turn) => !turn.valid && turn.playerId !== result?.winnerId && turn.attempts.length > 0)) return { error: "forfeit has no losing attempt evidence" };
   if (status === "stopped" && result) return { error: "stopped match must not have a result" };
   if (["ready", "running", "paused", "interrupted"].includes(status) && result) return { error: `${status} match must not have a result` };
 
@@ -210,6 +225,8 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
   }
 
   const environment = validateEnvironment(raw.environment);
+  if (raw.revision !== undefined && (!Number.isSafeInteger(raw.revision) || (raw.revision as number) < 0)) return { error: "revision is invalid" };
+  if (raw.runGeneration !== undefined && (!Number.isSafeInteger(raw.runGeneration) || (raw.runGeneration as number) < 0)) return { error: "run generation is invalid" };
 
   return {
     value: {
@@ -222,8 +239,8 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
       status,
       players: players.map((player) => player.value!) as [PlayerSeat, PlayerSeat],
       settings: {
-        turnTimeoutSeconds: settings.turnTimeoutSeconds,
-        maxRetries: settings.maxRetries,
+        turnTimeoutSeconds: settings.turnTimeoutSeconds as number,
+        maxRetries: settings.maxRetries as number,
         retryPolicy: "retry-invalid-once-then-forfeit",
         promptVersion: isString(settings.promptVersion) ? settings.promptVersion : "legacy",
         toolSchemaVersion: isString(settings.toolSchemaVersion) ? settings.toolSchemaVersion : "legacy",
@@ -252,8 +269,9 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
 export function validateStoreEnvelope(root: unknown): { version: number; records: unknown[] } {
   if (Array.isArray(root)) return { version: 1, records: root };
   if (isPlainObject(root) && Array.isArray(root.matches)) {
-    const version = isFiniteNumber(root.version) ? root.version : 1;
-    return { version, records: root.matches };
+    const version = root.version;
+    if (!Number.isSafeInteger(version) || (version as number) < 2 || (version as number) > 3) throw new Error(`Unsupported store version ${String(version)}.`);
+    return { version: version as number, records: root.matches };
   }
   throw new Error("Saved store must be an array of matches or a versioned envelope with a matches array.");
 }

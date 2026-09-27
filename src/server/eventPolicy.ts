@@ -9,9 +9,9 @@ export function shouldPublishSnapshot(event: MatchEvent | undefined): boolean {
 }
 
 /**
- * Durability is driven by explicit checkpoints (an onChange call with no event),
- * not by every streamed event. This keeps commit points deliberate and lets the
- * controller surface a failed write before requesting another move.
+ * The controller commits the current state and event before invoking the
+ * notification callback. This predicate distinguishes that commit callback
+ * (no event argument) from the subsequent streamed notification.
  */
 export function shouldPersistChange(event: MatchEvent | undefined): boolean {
   return !event;

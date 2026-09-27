@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { MatchStore, STORE_VERSION } from "../src/server/store.js";
 import { validateMatchRecord } from "../src/server/schema.js";
 import type { MatchRecord } from "../src/shared.js";
@@ -64,6 +64,123 @@ test("a legacy array is migrated with a backup and keeps valid records", () => {
   } finally { cleanup(); }
 });
 
+test("a future store version is refused without changing its bytes", () => {
+  const { store, path, cleanup } = tempStore();
+  try {
+    const original = JSON.stringify({ version: 999, matches: [sampleRecord()] });
+    writeFileSync(path, original);
+    assert.throws(() => store.load(), /unsupported|future|version/i);
+    assert.equal(readFileSync(path, "utf8"), original);
+  } finally { cleanup(); }
+});
+
+test("attempt phase survives a current-version load", () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const record = sampleRecord({ pendingTurn: {
+      turnId: "turn-1", turnIndex: 1, ply: 1, playerId: "white", startedAt: "2026-01-01T00:00:00.000Z",
+      attempts: [{ attempt: 1, startedAt: "2026-01-01T00:00:00.000Z", status: "invalid", phase: "protocol", toolCalls: null, usage: { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" } }],
+    } });
+    store.save([record]);
+    assert.equal(store.load().matches[0].pendingTurn?.attempts[0].phase, "protocol");
+  } finally { cleanup(); }
+});
+
+test("unsupported numeric versions and duplicate IDs preserve recoverable records", () => {
+  const { store, path, cleanup } = tempStore();
+  try {
+    for (const version of [-1, 2.5, 999]) {
+      const source = JSON.stringify({ version, matches: [sampleRecord()] });
+      writeFileSync(path, source);
+      assert.throws(() => store.load(), /version/i);
+      assert.equal(readFileSync(path, "utf8"), source);
+    }
+    writeFileSync(path, JSON.stringify({ version: STORE_VERSION, matches: [sampleRecord(), sampleRecord()] }));
+    const loaded = store.load();
+    assert.equal(loaded.matches.length, 1);
+    assert.equal(loaded.quarantined, 1);
+    assert.match(loaded.recoveryWarning ?? "", /quarantined/i);
+    assert.ok(loaded.backupPath && existsSync(loaded.backupPath));
+  } finally { cleanup(); }
+});
+
+test("a fabricated finished result is quarantined before it reaches the controller", () => {
+  const { store, path, cleanup } = tempStore();
+  try {
+    writeFileSync(path, JSON.stringify({ version: STORE_VERSION, matches: [
+      sampleRecord({ id: "valid" }),
+      sampleRecord({ id: "fabricated", status: "finished", result: { kind: "win", winnerId: "white", notation: "1-0", reason: "fabricated" } }),
+    ] }));
+    const loaded = store.load();
+    assert.deepEqual(loaded.matches.map((record) => record.id), ["valid"]);
+    assert.equal(loaded.quarantined, 1);
+    assert.ok(loaded.backupPath && readFileSync(loaded.backupPath, "utf8").includes("fabricated"));
+  } finally { cleanup(); }
+});
+
+test("malformed saved settings and unsupported protocol do not enter the usable store", () => {
+  const base = sampleRecord();
+  const malformed = { ...base, settings: { ...base.settings, budgets: { ...base.settings.budgets, maxRequests: 1.5 } } };
+  assert.match(validateMatchRecord(malformed).error ?? "", /maxRequests/);
+  assert.match(validateMatchRecord({ ...base, protocolVersion: "unknown" }).error ?? "", /protocol version/);
+  assert.match(validateMatchRecord({ ...base, revision: -1 }).error ?? "", /revision/);
+  assert.match(validateMatchRecord({ ...base, status: "forfeit", result: { kind: "win", winnerId: "white", notation: "1-0", reason: "x" } }).error ?? "", /evidence/);
+});
+
+test("two simultaneous store workers have exactly one owner", async () => {
+  const { folder, path, cleanup } = tempStore();
+  const gate = join(folder, "go");
+  const workerPath = new URL("./fixtures/store-lock-worker.ts", import.meta.url).pathname;
+  const run = () => new Promise<string>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", workerPath, path, gate], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    child.on("error", reject);
+    child.on("exit", (code) => code === 0 ? resolve(output.trim()) : reject(new Error(output)));
+  });
+  try {
+    const first = run();
+    const second = run();
+    writeFileSync(gate, "go");
+    const outcomes = await Promise.all([first, second]);
+    assert.deepEqual(outcomes.sort(), ["acquired", "blocked"]);
+  } finally { cleanup(); }
+});
+
+test("a nonowner cannot release another store's lock", () => {
+  const { store, path, cleanup } = tempStore();
+  try {
+    store.acquireOwnership();
+    const other = new MatchStore(path);
+    other.releaseOwnership();
+    assert.ok(existsSync(`${path}.lock`));
+    store.releaseOwnership();
+    assert.equal(existsSync(`${path}.lock`), false);
+  } finally { cleanup(); }
+});
+
+test("stale-lock recovery competition has one winner", async () => {
+  const { folder, path, cleanup } = tempStore();
+  const gate = join(folder, "go");
+  writeFileSync(`${path}.lock`, "999999999\n");
+  const workerPath = new URL("./fixtures/store-lock-worker.ts", import.meta.url).pathname;
+  const run = () => new Promise<string>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", workerPath, path, gate], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    child.on("error", reject);
+    child.on("exit", (code) => code === 0 ? resolve(output.trim()) : reject(new Error(output)));
+  });
+  try {
+    const first = run();
+    const second = run();
+    writeFileSync(gate, "go");
+    assert.deepEqual((await Promise.all([first, second])).sort(), ["acquired", "blocked"]);
+  } finally { cleanup(); }
+});
+
 test("invalid records are quarantined while valid records survive", () => {
   const { store, folder, path, cleanup } = tempStore();
   try {
@@ -81,14 +198,12 @@ test("invalid records are quarantined while valid records survive", () => {
 });
 
 test("a corrupt root is preserved and never replaced silently", () => {
-  const { store, folder, path, cleanup } = tempStore();
+  const { store, path, cleanup } = tempStore();
   try {
     writeFileSync(path, "{ not valid json");
     assert.throws(() => store.load(), /preserved/i);
-    assert.equal(existsSync(path), false);
-    const preservedName = readdirSync(folder).find((entry) => entry.startsWith(`${basename(path)}.unreadable-`));
-    assert.ok(preservedName, "the unreadable store should be preserved");
-    assert.equal(readFileSync(join(folder, preservedName!), "utf8"), "{ not valid json");
+    assert.equal(readFileSync(path, "utf8"), "{ not valid json");
+    assert.throws(() => store.load(), /preserved/i);
   } finally { cleanup(); }
 });
 

@@ -59,7 +59,7 @@ function harness(
   const game = new ChessGame();
   const controller = new MatchController(
     new GameRegistry().register(game), registry, records, async () => providers,
-    () => onChange(records),
+    (_record, event) => { if (!event) onChange(records); },
   );
   return { controller, players };
 }
@@ -135,6 +135,12 @@ test("controller enforces a timeout and forfeits after its bounded retry", async
   assert.equal(done.history[0].attempts.length, 2);
   assert.ok(done.history[0].attempts.every((attempt) => attempt.status === "timeout"));
   assert.ok((players.get("white-model")?.[0].shutdownCount ?? 0) >= 2);
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-forfeit-reload-"));
+  try {
+    const store = new MatchStore(join(folder, "matches.json"));
+    store.save([{ ...done, settings: { ...done.settings, turnTimeoutSeconds: 30 } }]);
+    assert.equal(store.load().matches[0]?.result?.winnerId, "black");
+  } finally { rmSync(folder, { recursive: true, force: true }); }
 });
 
 test("CLI execution failure is visible and does not count as an opponent victory", async () => {
@@ -376,11 +382,101 @@ test("a failed start checkpoint ends the match without creating an adapter", asy
   const controller = new MatchController(new GameRegistry().register(new ChessGame()), registry, [], async () => providers, () => { if (fail) throw new Error("disk full"); });
   const match = await controller.create({ gameId: "chess", players: { white: config("w"), black: config("b") }, turnTimeoutSeconds: 30 });
   fail = true;
-  await controller.start(match.id);
+  await assert.rejects(controller.start(match.id), /Could not save|disk full/i);
   const done = controller.get(match.id)!;
   assert.equal(done.status, "error");
   assert.match(done.error ?? "", /Could not save|disk full/i);
   assert.equal(created, 0);
+});
+
+test("a failed final checkpoint never reports a saved result", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-final-failure-"));
+  try {
+    const store = new MatchStore(join(folder, "matches.json"));
+    const records: MatchRecord[] = [];
+    let failFinal = true;
+    const { controller } = harness(async () => resign, records, (items) => {
+      if (failFinal && items[0]?.status === "finished") throw new Error("disk full");
+      store.save(items);
+    });
+    const match = await create(controller);
+    await controller.start(match.id);
+    const failed = await waitFor(controller, match.id, ["error", "finished"]);
+    assert.equal(failed.status, "error");
+    assert.equal(failed.result, undefined);
+    assert.match(failed.error ?? "", /storage|save|disk full/i);
+    assert.equal(store.load().matches[0].result, undefined);
+    failFinal = false;
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("a failed stop checkpoint rejects the stop acknowledgement", async () => {
+  let failStop = false;
+  const { controller } = harness(async () => resign, [], (items) => {
+    if (failStop && items[0]?.status === "stopped") throw new Error("disk full");
+  });
+  const match = await create(controller);
+  failStop = true;
+  await assert.rejects(controller.stop(match.id), /disk full|storage|save/i);
+  assert.equal(controller.get(match.id)?.status, "error");
+});
+
+test("a failed accepted-move checkpoint halts before the next request", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-move-failure-"));
+  try {
+    const store = new MatchStore(join(folder, "matches.json"));
+    const records: MatchRecord[] = [];
+    let calls = 0;
+    const { controller } = harness(async () => { calls += 1; return action("e2e4"); }, records, (items) => {
+      if (items[0]?.events.at(-1)?.type === "move.applied") throw new Error("rename failed");
+      store.save(items);
+    });
+    const match = await create(controller);
+    await controller.start(match.id);
+    const failed = await waitFor(controller, match.id, ["error"]);
+    assert.equal(calls, 1);
+    assert.equal((failed.gameState as { moves: unknown[] }).moves.length, 0);
+    assert.equal(store.load().matches[0].status, "running");
+    await assert.rejects(controller.start(match.id), /Could not save/i);
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("a failed retry checkpoint keeps the first attempt and prevents a second call", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-retry-failure-"));
+  try {
+    const store = new MatchStore(join(folder, "matches.json"));
+    const records: MatchRecord[] = [];
+    let calls = 0;
+    const { controller } = harness(async () => { calls += 1; return action("a1a8"); }, records, (items) => {
+      if (items[0]?.events.at(-1)?.type === "turn.retry") throw new Error("rename failed");
+      store.save(items);
+    });
+    const match = await create(controller);
+    await controller.start(match.id);
+    await waitFor(controller, match.id, ["error"]);
+    assert.equal(calls, 1);
+    assert.equal(store.load().matches[0].pendingTurn?.attempts[0].status, "invalid");
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("failed pause and shutdown checkpoints report failure after cancelling a request", async () => {
+  for (const command of ["pause", "shutdown"] as const) {
+    const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-control-failure-"));
+    try {
+      const store = new MatchStore(join(folder, "matches.json"));
+      const records: MatchRecord[] = [];
+      const { controller } = harness(async () => new Promise<GameAction>(() => undefined), records, (items) => {
+        if (items[0]?.status === "paused") throw new Error("disk full");
+        store.save(items);
+      });
+      const match = await create(controller);
+      await controller.start(match.id);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await assert.rejects(command === "pause" ? controller.pause(match.id) : controller.shutdown(), /disk full|save/i);
+      assert.equal(controller.get(match.id)?.status, "error");
+      assert.equal(store.load().matches[0].status, "running");
+    } finally { rmSync(folder, { recursive: true, force: true }); }
+  }
 });
 
 test("restore rejects a stored result that does not match the replayed game", () => {

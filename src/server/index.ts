@@ -26,14 +26,18 @@ try {
 }
 
 let storedMatches: MatchRecord[] = [];
+let storageWarning: string | null = null;
 try {
   const loaded = loadMatches();
   storedMatches = loaded.matches;
+  storageWarning = loaded.recoveryWarning ?? null;
   if (loaded.migrated) {
     console.log(`Migrated saved matches to store version ${STORE_VERSION}.${loaded.backupPath ? ` Backup: ${loaded.backupPath}.` : ""}${loaded.quarantined ? ` Quarantined ${loaded.quarantined} invalid record(s).` : ""}`);
   }
 } catch (error) {
   console.error(`Could not load saved matches: ${error instanceof Error ? error.message : "unknown error"}`);
+  releaseStoreOwnership();
+  process.exit(1);
 }
 
 const eventClients = new Set<Response>();
@@ -94,9 +98,16 @@ function logMetric(name: string, fields: Record<string, number | string>): void 
   console.log(`[metrics] ${name} ${Object.entries(fields).map(([key, value]) => `${key}=${value}`).join(" ")}`);
 }
 
+function withStorage(snapshot: import("../shared.js").AppState): import("../shared.js").AppState {
+  const failure = controller.getStorageError();
+  if (failure) return { ...snapshot, storage: { status: "write_failed", message: failure } };
+  if (storageWarning) return { ...snapshot, storage: { status: "quarantined", message: storageWarning } };
+  return { ...snapshot, storage: { status: "healthy", message: "" } };
+}
+
 function publishSnapshot(): void {
   const started = Date.now();
-  void providerCache.value.then((providers) => buildSnapshot(storedMatches, providers)).then((snapshot) => {
+  void providerCache.value.then((providers) => withStorage(buildSnapshot(storedMatches, providers))).then((snapshot) => {
     const encoded = JSON.stringify(snapshot);
     logMetric("snapshot", { bytes: Buffer.byteLength(encoded), matches: snapshot.recentMatches.length, ms: Date.now() - started });
     for (const response of eventClients) writeToClient(response, "snapshot", encoded);
@@ -123,7 +134,14 @@ const agents = new AgentRegistry()
   .register("codex", agentDefaults.codex)
   .register("claude", agentDefaults.claude)
   .register("opencode", agentDefaults.opencode);
-const controller = new MatchController(games, agents, storedMatches, () => providerCache.value, stateChanged);
+let controller: MatchController;
+try {
+  controller = new MatchController(games, agents, storedMatches, () => providerCache.value, stateChanged, () => publishSnapshot());
+} catch (error) {
+  console.error("Could not restore saved matches.", error);
+  releaseStoreOwnership();
+  process.exit(1);
+}
 
 function errorResponse(error: unknown): { status: number; code: string; message: string } {
   const message = error instanceof Error ? error.message : "Request failed.";
@@ -165,7 +183,7 @@ function matchIdOf(request: Request): string {
 }
 
 app.get("/api/state", asyncRoute(async (_request, response) => {
-  response.json(await controller.snapshot());
+  response.json(withStorage(await controller.snapshot()));
 }));
 
 function pageParams(request: Request): { limit: number; offset: number } {
@@ -215,7 +233,7 @@ app.get("/api/events", (request: Request, response: Response) => {
   response.setHeader("Connection", "keep-alive");
   response.flushHeaders();
   eventClients.add(response);
-  void controller.snapshot().then((snapshot) => writeToClient(response, "snapshot", JSON.stringify(snapshot))).catch(() => undefined);
+  void controller.snapshot().then((snapshot) => writeToClient(response, "snapshot", JSON.stringify(withStorage(snapshot)))).catch(() => undefined);
   const heartbeat = setInterval(() => writeToClient(response, "keepalive", JSON.stringify({ at: new Date().toISOString() })), 20_000);
   heartbeat.unref();
   request.on("close", () => { clearInterval(heartbeat); eventClients.delete(response); });
@@ -294,8 +312,9 @@ function shutdown(): void {
   const budget = setTimeout(() => process.exit(1), 10_000);
   budget.unref();
   void (async () => {
+    let failed = false;
     try { await controller.shutdown(); }
-    catch { /* Continue closing even if the final checkpoint fails. */ }
+    catch (error) { failed = true; console.error("Shutdown checkpoint failed.", error); }
     for (const client of [...eventClients]) {
       try { client.end(); } catch { /* The client may already be gone. */ }
     }
@@ -307,7 +326,7 @@ function shutdown(): void {
     });
     releaseStoreOwnership();
     clearTimeout(budget);
-    process.exit(0);
+    process.exit(failed || controller.getStorageError() ? 1 : 0);
   })();
 }
 process.on("SIGINT", shutdown);

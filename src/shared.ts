@@ -199,6 +199,7 @@ export interface AppState {
   activeMatchId: string | null;
   activeMatch: MatchRecord | null;
   recentMatches: MatchRecord[];
+  storage?: { status: "healthy" | "quarantined" | "write_failed"; message: string };
 }
 
 export interface ChessMoveRecord {

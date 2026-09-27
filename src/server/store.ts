@@ -1,6 +1,8 @@
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { MatchRecord } from "../shared.js";
+import { ChessGame } from "../games/chess/ChessGame.js";
 import { validateMatchRecord, validateStoreEnvelope } from "./schema.js";
 
 export const STORE_VERSION = 3;
@@ -10,6 +12,7 @@ export interface LoadResult {
   migrated: boolean;
   quarantined: number;
   backupPath?: string;
+  recoveryWarning?: string;
 }
 
 function stamp(): string {
@@ -21,9 +24,28 @@ function isProcessAlive(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
+const chess = new ChessGame();
+
+function validateSavedGame(record: MatchRecord): string | undefined {
+  if (record.gameId !== chess.id || record.gameVersion !== chess.version) return "game contract is unsupported";
+  try {
+    const state = chess.deserialize(record.gameState);
+    if (record.status === "finished") {
+      const result = chess.isTerminal(state) ? chess.result(state) : undefined;
+      if (!result || !record.result || result.kind !== record.result.kind || result.notation !== record.result.notation || (result.winnerId ?? null) !== (record.result.winnerId ?? null)) {
+        return "finished result does not match the replayed game";
+      }
+    }
+  } catch (error) {
+    return `saved game cannot be replayed: ${error instanceof Error ? error.message : "invalid state"}`;
+  }
+  return undefined;
+}
+
 export class MatchStore {
   private readonly lockPath: string;
   private ownsLock = false;
+  private lockToken?: string;
 
   constructor(readonly storePath: string) {
     this.lockPath = `${storePath}.lock`;
@@ -31,23 +53,51 @@ export class MatchStore {
 
   acquireOwnership(): void {
     mkdirSync(dirname(this.storePath), { recursive: true });
-    if (existsSync(this.lockPath)) {
-      const raw = readFileSync(this.lockPath, "utf8").trim();
-      const pid = Number(raw);
-      if (Number.isInteger(pid) && pid !== process.pid && isProcessAlive(pid)) {
-        throw new Error(`Another Agent Battle process (pid ${pid}) is already using ${this.storePath}. Stop it before starting a second instance.`);
+    if (this.ownsLock) return;
+    const token = randomUUID();
+    const claim = (): boolean => {
+      let fd: number;
+      try { fd = openSync(this.lockPath, "wx", 0o600); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+        throw error;
       }
-      rmSync(this.lockPath, { force: true });
+      try { writeFileSync(fd, JSON.stringify({ pid: process.pid, token })); fsyncSync(fd); }
+      finally { closeSync(fd); }
+      this.lockToken = token;
+      this.ownsLock = true;
+      return true;
+    };
+    if (claim()) return;
+    const recoveryGuard = `${this.lockPath}.recovery`;
+    try { mkdirSync(recoveryGuard, { mode: 0o700 }); }
+    catch {
+      throw new Error(`Store ownership or stale-lock recovery is already in progress for ${this.storePath}. No data was loaded.`);
     }
-    writeFileSync(this.lockPath, `${process.pid}\n`, { mode: 0o600 });
-    this.ownsLock = true;
+    try {
+      const raw = readFileSync(this.lockPath, "utf8").trim();
+      let pid: number;
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        pid = typeof parsed === "object" && parsed !== null && "pid" in parsed ? Number(parsed.pid) : Number(raw);
+      } catch { pid = Number(raw); }
+      if (!Number.isSafeInteger(pid) || pid < 1 || isProcessAlive(pid)) {
+        throw new Error(`Another Agent Battle process is already using ${this.storePath}, or the lock is uncertain. Stop it or inspect the lock before recovery.`);
+      }
+      rmSync(this.lockPath);
+      if (!claim()) throw new Error(`Another Agent Battle process acquired ${this.storePath} during stale-lock recovery.`);
+    } finally { rmdirSync(recoveryGuard); }
   }
 
   releaseOwnership(): void {
     if (!this.ownsLock) return;
-    try { rmSync(this.lockPath, { force: true }); }
+    try {
+      const parsed = JSON.parse(readFileSync(this.lockPath, "utf8")) as { token?: string };
+      if (parsed.token === this.lockToken) rmSync(this.lockPath);
+    }
     catch { /* The lock may already be gone. */ }
     this.ownsLock = false;
+    this.lockToken = undefined;
   }
 
   load(): LoadResult {
@@ -57,22 +107,27 @@ export class MatchStore {
     try {
       root = JSON.parse(text);
     } catch {
-      const preserved = this.preserve(`unreadable-${stamp()}`);
-      throw new Error(`Saved matches at ${this.storePath} are not valid JSON. The original was preserved at ${preserved}.`);
+      throw new Error(`Saved matches at ${this.storePath} are not valid JSON. The original was preserved in place; the server cannot start until it is repaired or restored.`);
     }
     let envelope: { version: number; records: unknown[] };
     try {
       envelope = validateStoreEnvelope(root);
     } catch (error) {
-      const preserved = this.preserve(`unexpected-root-${stamp()}`);
-      throw new Error(`Saved matches at ${this.storePath} have an unexpected structure. The original was preserved at ${preserved}. ${error instanceof Error ? error.message : ""}`);
+      throw new Error(`Saved matches at ${this.storePath} have an unsupported version or structure. The original was preserved in place. ${error instanceof Error ? error.message : ""}`);
     }
 
     const matches: MatchRecord[] = [];
     const invalid: Array<{ error?: string; record: unknown }> = [];
+    const seenIds = new Set<string>();
     for (const record of envelope.records) {
       const result = validateMatchRecord(record);
-      if (result.value) matches.push(result.value);
+      const gameError = result.value ? validateSavedGame(result.value) : undefined;
+      if (result.value && !gameError && !seenIds.has(result.value.id)) {
+        seenIds.add(result.value.id);
+        matches.push(result.value);
+      }
+      else if (gameError) invalid.push({ error: gameError, record });
+      else if (result.value) invalid.push({ error: `duplicate match id ${result.value.id}`, record });
       else invalid.push({ error: result.error, record });
     }
 
@@ -82,7 +137,8 @@ export class MatchStore {
     const backupPath = this.backup(`pre-migration-${stamp()}`);
     if (invalid.length > 0) this.writeQuarantine(invalid);
     this.save(matches);
-    return { matches, migrated: true, quarantined: invalid.length, backupPath };
+    return { matches, migrated: true, quarantined: invalid.length, backupPath,
+      ...(invalid.length ? { recoveryWarning: `${invalid.length} saved match record(s) were quarantined. Review the backup and quarantine file.` } : {}) };
   }
 
   save(matches: MatchRecord[]): void {
@@ -104,12 +160,6 @@ export class MatchStore {
     const target = `${this.storePath}.${label}.bak`;
     copyFileSync(this.storePath, target);
     return target;
-  }
-
-  private preserve(label: string): string {
-    const target = `${this.storePath}.${label}.json`;
-    try { renameSync(this.storePath, target); return target; }
-    catch { return this.storePath; }
   }
 
   private writeQuarantine(entries: Array<{ error?: string; record: unknown }>): void {

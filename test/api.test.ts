@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import os from "node:os";
 import { join } from "node:path";
@@ -121,4 +121,36 @@ test("the event stream opens with a canonical snapshot event", async () => {
     await stopServer(child);
     rmSync(folder, { recursive: true, force: true });
   }
+});
+
+test("unsupported saved versions stop startup without rewriting the store", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-unsupported-store-"));
+  const path = join(folder, "matches.json");
+  const source = JSON.stringify({ version: 999, matches: [] });
+  writeFileSync(path, source);
+  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], {
+    cwd: projectRoot, env: { ...process.env, PORT: "0", AGENT_BATTLE_DATA_DIR: folder }, stdio: "ignore",
+  });
+  try {
+    const code = await new Promise<number | null>((resolve) => child.once("exit", resolve));
+    assert.equal(code, 1);
+    assert.equal(readFileSync(path, "utf8"), source);
+  } finally { child.kill("SIGKILL"); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("quarantined records produce a recovery notice in the state API", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-quarantine-api-"));
+  const path = join(folder, "matches.json");
+  const port = 4800 + Math.floor(Math.random() * 200);
+  writeFileSync(path, JSON.stringify({ version: 3, matches: [{ id: "bad" }] }));
+  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], {
+    cwd: projectRoot, env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  try {
+    await waitForListening(child, port);
+    const response = await probe(port, { path: "/api/state" });
+    const state = JSON.parse(response.body) as { storage?: { status: string; message: string } };
+    assert.equal(state.storage?.status, "quarantined");
+    assert.match(state.storage?.message ?? "", /quarantined/);
+  } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
 });

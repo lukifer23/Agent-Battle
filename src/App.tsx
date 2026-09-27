@@ -255,14 +255,15 @@ function App() {
   }, [state]);
 
   const providers = state?.providers ?? [];
+  const storageBlocked = state?.storage?.status === "write_failed";
   const installed = (provider: Provider) => providers.find((item) => item.provider === provider)?.installed ?? false;
   const currentIsRunning = selectedMatch?.status === "running";
   const terminalMatchSelected = Boolean(selectedMatch && ["finished", "forfeit", "stopped", "error"].includes(selectedMatch.status));
   const condenseSetup = Boolean(selectedMatch && (
     ["running", "paused", "interrupted"].includes(selectedMatch.status) || (terminalMatchSelected && !newMatchOpen)
   ));
-  const canStart = Boolean(selectedMatch && ["ready", "paused", "interrupted"].includes(selectedMatch.status) && state?.activeMatch?.id === selectedMatch.id);
-  const canCreate = !state?.activeMatch || !["ready", "running", "paused"].includes(state.activeMatch.status);
+  const canStart = Boolean(!storageBlocked && selectedMatch && ["ready", "paused", "interrupted"].includes(selectedMatch.status) && state?.activeMatch?.id === selectedMatch.id);
+  const canCreate = !storageBlocked && (!state?.activeMatch || !["ready", "running", "paused", "interrupted"].includes(state.activeMatch.status));
 
   useEffect(() => {
     if (!currentIsRunning) return;
@@ -400,6 +401,11 @@ function App() {
           <button className="quiet-button" onClick={() => void refreshProviders()} disabled={busy}><RefreshCw className="button-icon" /> Check CLIs</button>
         </div>
       </header>
+
+      {state?.storage && state.storage.status !== "healthy" && <div className="error-banner" role="alert">
+        <strong>{state.storage.status === "write_failed" ? "Storage unavailable — requests stopped" : "Saved history needs review"}</strong>
+        <p>{state.storage.message}</p>
+      </div>}
 
       <section className={`intro ${condenseSetup ? "is-condensed" : ""}`} id="top">
         <div>
