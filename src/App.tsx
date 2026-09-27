@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import { applyMatchEvent, matchEventTypes } from "./client/matchEvents.js";
+import { aggregateUsage } from "./domain/usage.js";
 import { ArrowUpRight, BoardMark, ChevronDown, RefreshCw, Trophy } from "./components/icons.js";
+import { competitorLabel } from "./shared.js";
 import type { AppState, ChessSnapshot, MatchEvent, MatchRecord, Provider } from "./shared.js";
 
 const initialFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -24,8 +26,8 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-function nameFor(provider: Provider, model: string): string {
-  return `${pretty[provider]}${model.trim() ? ` · ${model.trim()}` : " · CLI default"}`;
+function coverageMark(coverage: "none" | "partial" | "full"): string {
+  return coverage === "full" ? "" : coverage === "partial" ? "~" : " n/a";
 }
 
 function resultLine(match: MatchRecord): string {
@@ -62,6 +64,10 @@ function App() {
   const [whiteReasoning, setWhiteReasoning] = useState("");
   const [blackReasoning, setBlackReasoning] = useState("");
   const [timeoutSeconds, setTimeoutSeconds] = useState(120);
+  const [maxPlies, setMaxPlies] = useState(150);
+  const [maxRequests, setMaxRequests] = useState(200);
+  const [maxWallMinutes, setMaxWallMinutes] = useState(30);
+  const [maxCost, setMaxCost] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [replayPly, setReplayPly] = useState<number | null>(null);
@@ -142,7 +148,7 @@ function App() {
       if (!match.result || !["finished", "forfeit"].includes(match.status)) continue;
       for (const player of match.players) {
         const side = player.id;
-        const name = nameFor(player.agent.provider, player.agent.model);
+        const name = competitorLabel(player.agent);
         const row = rows.get(name) ?? { name, wins: 0, draws: 0, losses: 0, points: 0 };
         const won = match.result.kind === "win" && match.result.winnerId === side;
         const drawn = match.result.kind === "draw";
@@ -186,6 +192,12 @@ function App() {
           white: { provider: whiteProvider, model: whiteModel, reasoning: whiteReasoning },
           black: { provider: blackProvider, model: blackModel, reasoning: blackReasoning },
           turnTimeoutSeconds: timeoutSeconds,
+          budgets: {
+            maxPlies,
+            maxRequests,
+            maxWallMinutes,
+            maxReportedCostUsd: maxCost.trim() ? Number(maxCost) : null,
+          },
         }),
       });
       setSelectedId(created.match.id);
@@ -248,7 +260,7 @@ function App() {
   };
 
   const currentTurnPlayer = selectedMatch?.players.find((player) => player.id === selectedMatch.currentPlayerId);
-  const currentTurnName = currentTurnPlayer ? nameFor(currentTurnPlayer.agent.provider, currentTurnPlayer.agent.model) : undefined;
+  const currentTurnName = currentTurnPlayer ? competitorLabel(currentTurnPlayer.agent) : undefined;
   const isHistorical = Boolean(selectedMatch && selectedMatch.id !== state?.activeMatch?.id);
   const isReplayMatch = Boolean(isHistorical && (selectedSnapshot?.moves.length ?? 0) > 0);
   const finishedForReplay = selectedMatch && ["finished", "forfeit", "stopped", "error", "interrupted"].includes(selectedMatch.status);
@@ -285,7 +297,7 @@ function App() {
             </div>
             {condenseSetup ? <div className="active-setup-note">
               <span className="live-dot" />
-              <span>{selectedMatch?.players.map((player) => nameFor(player.agent.provider, player.agent.model)).join(" vs ")}</span>
+              <span>{selectedMatch?.players.map((player) => competitorLabel(player.agent)).join(" vs ")}</span>
               <span className="active-setup-status">{selectedMatch?.result ? `${selectedMatch.result.notation} · ${selectedMatch.result.reason}` : selectedMatch?.status === "error" ? "Stopped · review match log" : selectedMatch?.currentPlayerId ? `${selectedMatch.players.find((player) => player.id === selectedMatch.currentPlayerId)?.label} to move` : "Resume when ready"}</span>
               {terminalMatchSelected && <button className="active-setup-new" onClick={() => setNewMatchOpen(true)}>NEW MATCH <ArrowUpRight className="inline-icon" /></button>}
             </div> : <>
@@ -297,12 +309,23 @@ function App() {
                   onProvider={setBlackProvider} onModel={setBlackModel} onReasoning={setBlackReasoning} />
               </div>
               <div className="setup-footer">
-                <label className="timeout-setting">MOVE TIMEOUT <input type="number" min={30} max={600} step={30} value={timeoutSeconds}
-                  onChange={(event) => setTimeoutSeconds(Math.max(30, Math.min(600, Number(event.target.value) || 30)))} /> <span>sec</span></label>
+                <div className="budget-settings">
+                  <label className="timeout-setting">MOVE TIMEOUT <input type="number" min={30} max={600} step={30} value={timeoutSeconds}
+                    onChange={(event) => setTimeoutSeconds(Math.max(30, Math.min(600, Number(event.target.value) || 30)))} /> <span>sec</span></label>
+                  <label className="timeout-setting">MAX PLIES <input type="number" min={1} max={10000} value={maxPlies}
+                    onChange={(event) => setMaxPlies(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></label>
+                  <label className="timeout-setting">MAX REQUESTS <input type="number" min={1} max={100000} value={maxRequests}
+                    onChange={(event) => setMaxRequests(Math.max(1, Math.min(100000, Number(event.target.value) || 1)))} /></label>
+                  <label className="timeout-setting">MAX MINUTES <input type="number" min={1} max={10000} value={maxWallMinutes}
+                    onChange={(event) => setMaxWallMinutes(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></label>
+                  <label className="timeout-setting">COST LIMIT <input type="number" min={0} step="0.01" placeholder="none" value={maxCost}
+                    onChange={(event) => setMaxCost(event.target.value)} /> <span>USD</span></label>
+                </div>
                 <button className="primary-button" onClick={() => void startMatch()} disabled={busy || pendingCommand !== null || !providersChecked || !canCreate || !installed(whiteProvider) || !installed(blackProvider)}>
                   {busy || pendingCommand === "start" ? "PREPARING…" : "START MATCH"} <ArrowUpRight className="inline-icon" />
                 </button>
               </div>
+              <div className="inline-note">Limits are checked between requests. The cost limit is a best-effort threshold on reported provider cost, not a hard billing cap; unknown usage still counts against the request and time limits.</div>
               {(whiteProvider === blackProvider) && <div className="inline-note">Both sides can use the same CLI with different models.</div>}
               {providersChecked && providers.some((entry) => !entry.installed) && <div className="inline-note">Install a supported CLI and sign in before choosing it. Agent Battle uses its existing login.</div>}
             </>}
@@ -319,18 +342,16 @@ function App() {
             </div>
             {selectedMatch && <div className="player-strip">
               {selectedMatch.players.map((player) => {
-                const latest = [...selectedMatch.history].reverse().find((turn) => turn.playerId === player.id);
-                const completedTurn = [...selectedMatch.events].reverse().find((event) => event.type === "turn.completed" && event.playerId === player.id);
-                const completedTelemetry = completedTurn?.payload;
+                const playerTurns = selectedMatch.history.filter((turn) => turn.playerId === player.id);
+                const attempts = playerTurns.flatMap((turn) => turn.attempts);
+                const usage = aggregateUsage(attempts);
+                const latest = playerTurns.at(-1);
                 const active = selectedMatch.currentPlayerId === player.id;
-                const inputTokens = typeof completedTelemetry?.inputTokens === "number" ? completedTelemetry.inputTokens : latest?.attempts.reduce((sum, attempt) => sum + (attempt.usage.inputTokens ?? 0), 0) ?? 0;
-                const outputTokens = typeof completedTelemetry?.outputTokens === "number" ? completedTelemetry.outputTokens : latest?.attempts.reduce((sum, attempt) => sum + (attempt.usage.outputTokens ?? 0), 0) ?? 0;
-                const toolCalls = typeof completedTelemetry?.toolCalls === "number" ? completedTelemetry.toolCalls : latest?.attempts.reduce((sum, attempt) => sum + (attempt.toolCalls ?? 0), 0) ?? 0;
-                const latencyMs = typeof completedTelemetry?.latencyMs === "number" ? completedTelemetry.latencyMs : latest?.latencyMs;
+                const totalTokens = usage.inputTokens + usage.outputTokens;
                 return <div className={`player-strip-card ${player.id === "white" ? "strip-white" : "strip-black"}`} key={player.id}>
                   <span className={`strip-piece strip-piece-${player.id}`} aria-hidden="true" />
-                  <span className="strip-info"><b>{player.label} · {nameFor(player.agent.provider, player.agent.model)}</b><small>{statusForPlayer(selectedMatch, player.id, active)}</small></span>
-                  <span className="strip-metric"><b>{latencyMs !== null && latencyMs !== undefined ? `${(latencyMs / 1000).toFixed(1)}s` : "—"}</b><small>LAST MOVE</small><small>{inputTokens + outputTokens ? `${inputTokens + outputTokens} tok` : "tokens n/a"} · {toolCalls} tools</small></span>
+                  <span className="strip-info"><b>{player.label} · {competitorLabel(player.agent)}</b><small>{statusForPlayer(selectedMatch, player.id, active)}</small></span>
+                  <span className="strip-metric"><b>{latest?.latencyMs != null ? `${(latest.latencyMs / 1000).toFixed(1)}s` : "—"}</b><small>LAST MOVE</small><small>{usage.requests} req · {totalTokens || usage.coverage === "none" ? `${totalTokens} tok${coverageMark(usage.coverage)}` : "tokens n/a"} · {usage.costUsd || usage.coverage === "none" ? `$${usage.costUsd.toFixed(4)}` : "cost n/a"}</small></span>
                   {active && <span className="strip-live" />}
                 </div>;
               })}
@@ -384,7 +405,7 @@ function App() {
               {(state?.recentMatches ?? []).map((match) => <button key={match.id} className={`history-row ${match.id === selectedMatch?.id ? "selected" : ""}`}
                 onClick={() => { setSelectedId(match.id); setNewMatchOpen(false); setReplayPly(null); setReplayOpen(false); }}>
                 <span className="history-date">{new Date(match.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
-                <span className="history-players"><b>{nameFor(match.players[0].agent.provider, match.players[0].agent.model)}</b><small>vs</small><b>{nameFor(match.players[1].agent.provider, match.players[1].agent.model)}</b></span>
+                <span className="history-players"><b>{competitorLabel(match.players[0].agent)}</b><small>vs</small><b>{competitorLabel(match.players[1].agent)}</b></span>
                 <span className={`history-result ${match.result ? "" : "muted"}`}>{match.result?.notation ?? match.status}</span>
                 <span className="history-moves">{((match.gameState as ChessSnapshot)?.moves?.length ?? 0)} ply</span>
               </button>)}

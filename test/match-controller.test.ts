@@ -11,7 +11,7 @@ import { ChessGame } from "../src/games/chess/ChessGame.js";
 import type { GameAction, GameObservation, MatchRecord, PlayerConfig, ProviderInfo } from "../src/shared.js";
 import { MatchStore } from "../src/server/store.js";
 
-const providers: ProviderInfo[] = [{ provider: "codex", installed: true, executable: "/fake/codex", defaultModel: "test" }];
+const providers: ProviderInfo[] = [{ provider: "codex", installed: true, executable: "/fake/codex", version: "test", defaultModel: "test" }];
 
 class ScriptedAgent implements AgentAdapter {
   readonly id: string;
@@ -36,7 +36,7 @@ class ScriptedAgent implements AgentAdapter {
       responseExcerpt: JSON.stringify(action),
       stderrExcerpt: "",
       toolCalls: 0,
-      usage: { inputTokens: 50, outputTokens: 8, costUsd: null },
+      usage: { inputTokens: 50, outputTokens: 8, costUsd: null, coverage: "partial" },
     };
   }
   async shutdown(): Promise<void> { this.shutdownCount += 1; }
@@ -289,7 +289,7 @@ test("resume continues a durable in-flight turn with its prior retry budget", as
     playerId: "white",
     startedAt: new Date().toISOString(),
     feedback: 'Move "a1a8" is illegal in the current position.',
-    attempts: [{ attempt: 1, startedAt: new Date().toISOString(), status: "invalid", toolCalls: null, usage: { inputTokens: null, outputTokens: null, costUsd: null }, error: "illegal" }],
+    attempts: [{ attempt: 1, startedAt: new Date().toISOString(), status: "invalid", toolCalls: null, usage: { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" }, error: "illegal" }],
   };
   await controller.start(match.id);
   const done = await waitFor(controller, match.id, ["finished"]);
@@ -330,7 +330,7 @@ function legacyRecord(id: string): MatchRecord {
       { id: "white", label: "White", agent: { provider: "codex", model: "", name: "Codex · CLI default" } },
       { id: "black", label: "Black", agent: { provider: "codex", model: "", name: "Codex · CLI default" } },
     ],
-    settings: { turnTimeoutSeconds: 30, maxRetries: 1, retryPolicy: "retry-invalid-once-then-forfeit", promptVersion: "x", toolSchemaVersion: "game-action-v1", resultPolicy: "engine-terminal-with-arena-adjudication" },
+    settings: { turnTimeoutSeconds: 30, maxRetries: 1, retryPolicy: "retry-invalid-once-then-forfeit", promptVersion: "x", toolSchemaVersion: "game-action-v1", resultPolicy: "engine-terminal-with-arena-adjudication", budgets: { maxPlies: 150, maxRequests: 200, maxWallMinutes: 30, maxReportedCostUsd: null } },
     gameState: game.serialize(game.createState()),
     history: [],
     events: [],
@@ -392,4 +392,33 @@ test("restore rejects a stored result that does not match the replayed game", ()
   const controller = new MatchController(new GameRegistry().register(new ChessGame()), registry, [record], async () => providers, () => undefined);
   assert.equal(controller.get("tampered-result")?.status, "error");
   assert.match(controller.get("tampered-result")?.error ?? "", /does not match/i);
+});
+
+test("a match stops at the ply budget without a fabricated result", async () => {
+  const { controller } = harness(async (model) => model === "white-model" ? action("e2e4") : action("e7e5"));
+  const match = await controller.create({
+    gameId: "chess",
+    players: { white: config("white-model"), black: config("black-model") },
+    turnTimeoutSeconds: 30,
+    budgets: { maxPlies: 1, maxRequests: 50, maxWallMinutes: 30, maxReportedCostUsd: null },
+  });
+  await controller.start(match.id);
+  const done = await waitFor(controller, match.id, ["stopped"]);
+  assert.match(done.error ?? "", /Budget reached/);
+  assert.equal(done.result, undefined);
+  assert.equal((done.gameState as { moves: unknown[] }).moves.length, 1);
+  assert.equal(done.settings.budgets.maxPlies, 1);
+});
+
+test("new matches capture requested budgets and environment provenance", async () => {
+  const { controller } = harness(async () => resign);
+  const match = await controller.create({
+    gameId: "chess",
+    players: { white: config("w"), black: config("b") },
+    turnTimeoutSeconds: 30,
+    budgets: { maxPlies: 42, maxRequests: 7, maxWallMinutes: 5, maxReportedCostUsd: 1.5 },
+  });
+  assert.deepEqual(match.settings.budgets, { maxPlies: 42, maxRequests: 7, maxWallMinutes: 5, maxReportedCostUsd: 1.5 });
+  assert.equal(match.environment?.adapterVersion, "agent-battle/adapter-v2");
+  assert.equal(match.environment?.cliVersions.codex, "test");
 });

@@ -33,6 +33,12 @@ Open [http://127.0.0.1:4173](http://127.0.0.1:4173). Both servers bind to loopba
 
 The app intentionally starts as a chess arena. Other games, human players, Stockfish analysis, tournaments and remote agents are not implemented yet.
 
+## Billing, limits and provenance
+
+Every match has configurable limits: maximum plies, maximum requests (retries and failed attempts count), maximum wall-clock minutes, and an optional best-effort reported-cost threshold. The limits are checked between requests and stop the match with a visible "budget reached" outcome rather than a fabricated win or draw. The cost threshold uses provider-reported cost only and is not a hard billing cap; when a provider reports no cost, the request and time limits still apply.
+
+Each turn records the requested provider/model/reasoning separately from any model the provider actually resolved, and stores the provider CLI versions captured for the match. Token and cost totals carry a coverage marker: `full` when every category was reported, `~` partial, and `n/a` when the provider reported nothing. Unknown usage is never displayed as a confident zero. The scoreboard groups competitors by provider, model and reasoning, so two runs with different settings are not merged into one row.
+
 ## Data, backup and recovery
 
 Match history and bounded provider diagnostics live in `data/matches.json`. The file is written with owner-only permissions, uses a versioned format, and is validated on load: malformed records are quarantined and unreadable files are preserved rather than silently replaced. Set `AGENT_BATTLE_DATA_DIR` to use a different directory. A single-writer lock prevents two app instances from sharing one store.

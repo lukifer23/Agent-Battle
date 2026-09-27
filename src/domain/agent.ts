@@ -48,7 +48,7 @@ export class AgentProtocolError extends Error {
     readonly latencyMs?: number,
     readonly stderrExcerpt = "",
     readonly toolCalls: number | null = null,
-    readonly usage: AgentAttempt["usage"] = { inputTokens: null, outputTokens: null, costUsd: null },
+    readonly usage: AgentAttempt["usage"] = { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" },
   ) {
     super(message);
     this.name = "AgentProtocolError";

@@ -83,7 +83,11 @@ function safeEnvironment(): NodeJS.ProcessEnv {
 }
 
 function emptyUsage(): AgentUsage {
-  return { inputTokens: null, outputTokens: null, costUsd: null };
+  return { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" };
+}
+
+function usageCoverage(usage: { inputTokens: number | null; outputTokens: number | null; costUsd: number | null }): "none" | "partial" {
+  return usage.inputTokens === null && usage.outputTokens === null && usage.costUsd === null ? "none" : "partial";
 }
 
 function parseNumber(value: unknown): number | null {
@@ -119,16 +123,22 @@ function parseCodexEvents(stdout: string): { usage: AgentUsage; toolCalls: numbe
       if (event.type === "item.started" && event.item && /tool|command|search|mcp/i.test(event.item.type ?? "")) toolCalls += 1;
     } catch { /* JSONL can include non-event diagnostics. */ }
   }
-  return { usage: { inputTokens, outputTokens, costUsd: null }, toolCalls: sawEvents ? toolCalls : null };
+  return { usage: { inputTokens, outputTokens, costUsd: null, coverage: usageCoverage({ inputTokens, outputTokens, costUsd: null }) }, toolCalls: sawEvents ? toolCalls : null };
 }
 
 function claudeUsage(envelope: Record<string, unknown>): AgentUsage {
   const usage = isRecord(envelope.usage) ? envelope.usage : {};
-  return {
+  const result: AgentUsage = {
     inputTokens: parseNumber(usage.input_tokens),
     outputTokens: parseNumber(usage.output_tokens),
     costUsd: parseNumber(envelope.total_cost_usd ?? envelope.cost_usd),
+    cachedInputTokens: parseNumber(usage.cache_read_input_tokens),
+    cacheWriteTokens: parseNumber(usage.cache_creation_input_tokens),
+    reasoningTokens: null,
+    coverage: "none",
   };
+  result.coverage = usageCoverage(result);
+  return result;
 }
 
 function interpretCodex(root: { stdout: string; responseText: string }): InterpreterResult {
@@ -186,7 +196,7 @@ function interpretOpenCode(root: { stdout: string }): InterpreterResult {
   const action = tryParseAction(text.join("").trim());
   return {
     action,
-    usage: { inputTokens, outputTokens, costUsd },
+    usage: { inputTokens, outputTokens, costUsd, coverage: usageCoverage({ inputTokens, outputTokens, costUsd }) },
     toolCalls: sawEvents ? toolCalls : null,
     ...(action ? {} : { protocolError: "OpenCode response did not contain one structured action JSON object." }),
   };

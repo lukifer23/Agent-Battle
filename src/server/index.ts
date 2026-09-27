@@ -168,6 +168,8 @@ app.get("/api/events", (request: Request, response: Response) => {
 
 app.post("/api/matches", asyncRoute(async (request, response) => {
   const body = request.body as Record<string, unknown>;
+  const rawBudgets = (body.budgets && typeof body.budgets === "object" ? body.budgets : {}) as Record<string, unknown>;
+  const costLimit = rawBudgets.maxReportedCostUsd;
   const created = await controller.create({
     gameId: typeof body.gameId === "string" ? body.gameId : "chess",
     players: {
@@ -175,6 +177,12 @@ app.post("/api/matches", asyncRoute(async (request, response) => {
       black: parsePlayer(body.black),
     },
     turnTimeoutSeconds: Number(body.turnTimeoutSeconds ?? 120),
+    budgets: {
+      maxPlies: Number(rawBudgets.maxPlies ?? 150),
+      maxRequests: Number(rawBudgets.maxRequests ?? 200),
+      maxWallMinutes: Number(rawBudgets.maxWallMinutes ?? 30),
+      maxReportedCostUsd: costLimit === undefined || costLimit === null || costLimit === "" ? null : Number(costLimit),
+    },
   });
   response.status(201).json({ match: created });
 }));

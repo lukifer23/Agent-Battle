@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { competitorId } from "../shared.js";
 import type { AgentAdapter, AgentRegistry } from "./agent.js";
 import { AgentExecutionError, AgentProtocolError } from "./agent.js";
 import type { ActionValidation, GameDefinition, GameRegistry } from "./game.js";
 import { buildSnapshot } from "./snapshot.js";
+import { matchReportedCost, matchRequests } from "./usage.js";
 import type {
   AgentAttempt,
   AppState,
   GameAction,
+  MatchBudgets,
+  MatchEnvironment,
   MatchEvent,
   MatchRecord,
   MatchResult,
@@ -32,6 +36,15 @@ export interface CreateMatchRequest {
   gameId: string;
   players: Record<string, PlayerConfig>;
   turnTimeoutSeconds: number;
+  budgets?: Partial<MatchBudgets>;
+}
+
+const DEFAULT_BUDGETS: MatchBudgets = { maxPlies: 150, maxRequests: 200, maxWallMinutes: 30, maxReportedCostUsd: null };
+const ADAPTER_VERSION = "agent-battle/adapter-v2";
+
+function clampBudget(value: unknown, fallback: number, maximum: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(maximum, Math.max(1, Math.floor(value)));
 }
 
 export class MatchController {
@@ -138,6 +151,20 @@ export class MatchController {
     }) as [PlayerSeat, PlayerSeat];
     const now = new Date().toISOString();
     const state = game.createState();
+    const budgets: MatchBudgets = {
+      maxPlies: clampBudget(request.budgets?.maxPlies, DEFAULT_BUDGETS.maxPlies, 10_000),
+      maxRequests: clampBudget(request.budgets?.maxRequests, DEFAULT_BUDGETS.maxRequests, 100_000),
+      maxWallMinutes: clampBudget(request.budgets?.maxWallMinutes, DEFAULT_BUDGETS.maxWallMinutes, 10_000),
+      maxReportedCostUsd: typeof request.budgets?.maxReportedCostUsd === "number" && request.budgets.maxReportedCostUsd >= 0 ? request.budgets.maxReportedCostUsd : null,
+    };
+    const cliVersions: MatchEnvironment["cliVersions"] = {};
+    for (const provider of detected) if (provider.version) cliVersions[provider.provider] = provider.version;
+    const environment: MatchEnvironment = {
+      adapterVersion: ADAPTER_VERSION,
+      promptVersion: "observation-contract-v2",
+      toolSchemaVersion: game.actionSchemaVersion,
+      cliVersions,
+    };
     const match: MatchRecord = {
       id: randomUUID(),
       gameId: game.id,
@@ -152,10 +179,12 @@ export class MatchController {
         turnTimeoutSeconds: request.turnTimeoutSeconds,
         maxRetries: 1,
         retryPolicy: "retry-invalid-once-then-forfeit",
-        promptVersion: "observation-contract-v2",
+        promptVersion: environment.promptVersion,
         toolSchemaVersion: game.actionSchemaVersion,
         resultPolicy: "engine-terminal-with-arena-adjudication",
+        budgets,
       },
+      environment,
       gameState: game.serialize(state),
       history: [],
       events: [],
@@ -356,6 +385,8 @@ export class MatchController {
           this.finish(match, game, state, result ?? { kind: "draw", notation: "1/2-1/2", reason: "Game ended without a result." });
           return;
         }
+        const budgetReason = this.budgetStopReason(match, game, state);
+        if (budgetReason) { this.budgetStop(match, budgetReason); return; }
         const playerId = game.currentPlayer(state);
         if (!playerId) throw new Error("The game has no current player but is not terminal.");
         match.currentPlayerId = playerId;
@@ -563,6 +594,32 @@ export class MatchController {
     }
   }
 
+  private budgetStopReason(match: MatchRecord, game: GameDefinition<unknown>, state: unknown): string | undefined {
+    const budgets = match.settings.budgets;
+    const plies = game.plyCount(state);
+    if (plies >= budgets.maxPlies) return `maximum plies (${budgets.maxPlies}) reached`;
+    const requests = matchRequests(match);
+    if (requests >= budgets.maxRequests) return `maximum requests (${budgets.maxRequests}) reached`;
+    const wallMinutes = (Date.now() - Date.parse(match.createdAt)) / 60_000;
+    if (wallMinutes >= budgets.maxWallMinutes) return `maximum wall time (${budgets.maxWallMinutes} min) reached`;
+    if (budgets.maxReportedCostUsd !== null) {
+      const cost = matchReportedCost(match);
+      if (cost !== null && cost >= budgets.maxReportedCostUsd) return `reported cost threshold ($${budgets.maxReportedCostUsd}) reached`;
+    }
+    return undefined;
+  }
+
+  private budgetStop(match: MatchRecord, reason: string): void {
+    match.status = "stopped";
+    match.currentPlayerId = undefined;
+    match.pendingTurn = undefined;
+    match.error = `Budget reached: ${reason}. No further request was made.`;
+    match.updatedAt = new Date().toISOString();
+    this.emit(match, "match.stopped", `Stopped: ${match.error}`, { reason: "budget" });
+    try { this.onChange(match); }
+    catch { /* The in-memory stop is already settled. */ }
+  }
+
   private nextAttemptNumber(attempts: AgentAttempt[]): number {
     return attempts.filter((attempt) => attempt.status === "invalid" || attempt.status === "timeout").length + 1;
   }
@@ -573,7 +630,7 @@ export class MatchController {
       startedAt,
       status,
       toolCalls: null,
-      usage: { inputTokens: null, outputTokens: null, costUsd: null },
+      usage: { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" },
       ...details,
       completedAt: details.completedAt ?? new Date().toISOString(),
     };
@@ -620,9 +677,11 @@ export class MatchController {
       ply: observation.ply,
       turnIndex: observation.turnIndex,
       turnId,
-      agentId: `${seat.id}:${seat.agent.provider}:${seat.agent.model || "default"}`,
-      model: seat.agent.model,
+      agentId: competitorId(seat.agent),
+      model: seat.agent.resolvedModel ?? seat.agent.model,
       provider: seat.agent.provider,
+      ...(seat.agent.reasoning ? { reasoning: seat.agent.reasoning } : {}),
+      ...(seat.agent.resolvedModel ? { resolvedModel: seat.agent.resolvedModel } : {}),
       playerId: seat.id,
       playerLabel: seat.label,
       ...(typeof fen === "string" ? { fenBefore: fen } : {}),

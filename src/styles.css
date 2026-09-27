@@ -85,7 +85,8 @@ h2 { margin-top: 5px; font: 600 18px var(--display); letter-spacing: -.025em; }
 .model-hint { margin-top: 6px; color: #68766f; font: 9px var(--mono); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .versus { display: grid; place-items: center; color: #718078; font: 500 10px var(--mono); }
 .versus::before, .versus::after { content: ""; display: block; height: 17px; border-left: 1px solid var(--line); }
-.setup-footer { margin-top: 17px; padding-top: 14px; border-top: 1px solid #202c27; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.setup-footer { margin-top: 17px; padding-top: 14px; border-top: 1px solid #202c27; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.budget-settings { display: flex; flex-wrap: wrap; gap: 9px 15px; }
 .timeout-setting { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 9px; }
 .timeout-setting input { width: 58px; color: #dfe6de; text-align: center; background: #0d1311; border: 1px solid #29352f; border-radius: 4px; padding: 7px 3px; font: 11px var(--mono); }
 .timeout-setting span { letter-spacing: 0; text-transform: lowercase; }

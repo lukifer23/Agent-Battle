@@ -1,4 +1,4 @@
-import { PROVIDERS, type AgentAttempt, type AgentUsage, type MatchRecord, type MatchStatus, type PendingTurn, type PlayerSeat, type Provider, type TurnTelemetry } from "../shared.js";
+import { PROVIDERS, type AgentAttempt, type AgentUsage, type MatchEnvironment, type MatchRecord, type MatchStatus, type PendingTurn, type PlayerSeat, type Provider, type TurnTelemetry } from "../shared.js";
 
 export interface ValidationResult<T> {
   value?: T;
@@ -32,15 +32,24 @@ function validatePlayer(raw: unknown): ValidationResult<PlayerSeat> {
   if (!PROVIDERS.includes(agent.provider as Provider)) return { error: "participant provider is unsupported" };
   if (!isString(agent.model) || !isString(agent.name)) return { error: "participant agent fields are invalid" };
   if (agent.reasoning !== undefined && !isString(agent.reasoning)) return { error: "participant reasoning is invalid" };
-  return { value: { id: raw.id, label: raw.label, agent: { provider: agent.provider as Provider, model: agent.model, name: agent.name, ...(isString(agent.reasoning) ? { reasoning: agent.reasoning } : {}) } } };
+  return { value: { id: raw.id, label: raw.label, agent: { provider: agent.provider as Provider, model: agent.model, name: agent.name, ...(isString(agent.reasoning) ? { reasoning: agent.reasoning } : {}), ...(isString(agent.resolvedModel) ? { resolvedModel: agent.resolvedModel } : {}) } } };
 }
 
 function validateUsage(raw: unknown): AgentUsage {
-  if (!isPlainObject(raw)) return { inputTokens: null, outputTokens: null, costUsd: null };
+  if (!isPlainObject(raw)) return { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" };
+  const inputTokens = isFiniteNumber(raw.inputTokens) && raw.inputTokens >= 0 ? raw.inputTokens : null;
+  const outputTokens = isFiniteNumber(raw.outputTokens) && raw.outputTokens >= 0 ? raw.outputTokens : null;
+  const costUsd = isFiniteNumber(raw.costUsd) && raw.costUsd >= 0 ? raw.costUsd : null;
+  const provided = isString(raw.coverage) && ["none", "partial", "full"].includes(raw.coverage) ? (raw.coverage as AgentUsage["coverage"]) : undefined;
+  const coverage = provided ?? (inputTokens === null && outputTokens === null && costUsd === null ? "none" : "partial");
   return {
-    inputTokens: isFiniteNumber(raw.inputTokens) && raw.inputTokens >= 0 ? raw.inputTokens : null,
-    outputTokens: isFiniteNumber(raw.outputTokens) && raw.outputTokens >= 0 ? raw.outputTokens : null,
-    costUsd: isFiniteNumber(raw.costUsd) && raw.costUsd >= 0 ? raw.costUsd : null,
+    inputTokens,
+    outputTokens,
+    costUsd,
+    ...(isFiniteNumber(raw.cachedInputTokens) && raw.cachedInputTokens >= 0 ? { cachedInputTokens: raw.cachedInputTokens } : {}),
+    ...(isFiniteNumber(raw.cacheWriteTokens) && raw.cacheWriteTokens >= 0 ? { cacheWriteTokens: raw.cacheWriteTokens } : {}),
+    ...(isFiniteNumber(raw.reasoningTokens) && raw.reasoningTokens >= 0 ? { reasoningTokens: raw.reasoningTokens } : {}),
+    coverage,
   };
 }
 
@@ -65,6 +74,19 @@ function validateAttempt(raw: unknown): ValidationResult<AgentAttempt> {
       usage: validateUsage(raw.usage),
     },
   };
+}
+
+function validateEnvironment(raw: unknown): MatchEnvironment | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  if (!isString(raw.adapterVersion) || !isString(raw.promptVersion) || !isString(raw.toolSchemaVersion)) return undefined;
+  const cliVersions: MatchEnvironment["cliVersions"] = {};
+  if (isPlainObject(raw.cliVersions)) {
+    for (const provider of PROVIDERS) {
+      const version = raw.cliVersions[provider];
+      if (isString(version)) cliVersions[provider] = version;
+    }
+  }
+  return { adapterVersion: raw.adapterVersion, promptVersion: raw.promptVersion, toolSchemaVersion: raw.toolSchemaVersion, cliVersions };
 }
 
 function validatePendingTurn(raw: unknown): ValidationResult<PendingTurn> {
@@ -115,6 +137,8 @@ function validateTurnTelemetry(raw: unknown, index: number): ValidationResult<Tu
       agentId: isString(raw.agentId) ? raw.agentId : "",
       model: isString(raw.model) ? raw.model : "",
       provider: raw.provider as Provider,
+      ...(isString(raw.reasoning) ? { reasoning: raw.reasoning } : {}),
+      ...(isString(raw.resolvedModel) ? { resolvedModel: raw.resolvedModel } : {}),
       playerId: raw.playerId,
       playerLabel: isString(raw.playerLabel) ? raw.playerLabel : raw.playerId,
       ...(isString(raw.fenBefore) ? { fenBefore: raw.fenBefore } : {}),
@@ -187,6 +211,8 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
     pendingTurn = pendingResult.value;
   }
 
+  const environment = validateEnvironment(raw.environment);
+
   return {
     value: {
       id: raw.id,
@@ -204,11 +230,18 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
         promptVersion: isString(settings.promptVersion) ? settings.promptVersion : "legacy",
         toolSchemaVersion: isString(settings.toolSchemaVersion) ? settings.toolSchemaVersion : "legacy",
         resultPolicy: "engine-terminal-with-arena-adjudication",
+        budgets: {
+          maxPlies: isFiniteNumber((settings.budgets as { maxPlies?: unknown } | undefined)?.maxPlies) ? (settings.budgets as { maxPlies: number }).maxPlies : 150,
+          maxRequests: isFiniteNumber((settings.budgets as { maxRequests?: unknown } | undefined)?.maxRequests) ? (settings.budgets as { maxRequests: number }).maxRequests : 200,
+          maxWallMinutes: isFiniteNumber((settings.budgets as { maxWallMinutes?: unknown } | undefined)?.maxWallMinutes) ? (settings.budgets as { maxWallMinutes: number }).maxWallMinutes : 30,
+          maxReportedCostUsd: isFiniteNumber((settings.budgets as { maxReportedCostUsd?: unknown } | undefined)?.maxReportedCostUsd) ? (settings.budgets as { maxReportedCostUsd: number }).maxReportedCostUsd : null,
+        },
       },
       gameState: raw.gameState,
       history,
       events,
       revision: isFiniteNumber(raw.revision) ? raw.revision : 0,
+      ...(environment ? { environment } : {}),
       ...(isString(raw.currentPlayerId) ? { currentPlayerId: raw.currentPlayerId } : {}),
       ...(result ? { result } : {}),
       ...(isString(raw.error) ? { error: raw.error } : {}),

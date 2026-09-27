@@ -72,6 +72,12 @@ Each record contains:
 
 Token counts and cost are nullable because CLIs expose different metadata. No chain-of-thought is requested or used. Successful responses are stored as canonical action JSON; malformed response excerpts and stderr diagnostics are bounded and token-redacted through `src/server/diagnostics.ts`.
 
+Usage is modeled as reported categories plus a coverage flag (`none`/`partial`/`full`); aggregation in `src/domain/usage.ts` sums only reported values and never treats unknown as zero. Cache and reasoning token categories are captured when a provider reports them. Failed, timed-out, cancelled and retried attempts are retained and counted toward request and cost totals.
+
+Each match stores an `environment` block (adapter version, prompt/schema versions, provider CLI versions captured at creation) and each participant keeps requested and resolved model/reasoning separately. Competitor identity (`competitorId`) is derived from provider, resolved-or-requested model, and reasoning, so changing a CLI default does not retroactively relabel an old competitor.
+
+Resource budgets (`maxPlies`, `maxRequests`, `maxWallMinutes`, optional `maxReportedCostUsd`) live in match settings and are enforced between requests. Reaching a budget stops the match as a non-game outcome; it never produces a win or draw.
+
 New turn records store FEN checkpoints rather than repeating the full serialized game state for every ply. Older records may still contain `stateBefore`/`stateAfter`; those optional fields remain readable for compatibility. Accepted moves, rejections, errors and lifecycle changes are persisted at their state boundary.
 
 On restore, ChessGame verifies that saved PGN, FEN, move records and resignation metadata agree. The controller additionally verifies that a stored `finished` result matches the replayed game; a mismatch marks the record `error` rather than feeding the scoreboard.

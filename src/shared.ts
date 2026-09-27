@@ -7,12 +7,40 @@ export interface PlayerConfig {
   model: string;
   reasoning?: string;
   name: string;
+  /** Model actually resolved by the provider, when it reports one; otherwise unknown. */
+  resolvedModel?: string;
 }
 
 export interface PlayerSeat {
   id: string;
   label: string;
   agent: PlayerConfig;
+}
+
+export interface MatchBudgets {
+  maxPlies: number;
+  maxRequests: number;
+  maxWallMinutes: number;
+  maxReportedCostUsd: number | null;
+}
+
+export interface MatchEnvironment {
+  adapterVersion: string;
+  promptVersion: string;
+  toolSchemaVersion: string;
+  cliVersions: Partial<Record<Provider, string>>;
+}
+
+export function competitorId(config: PlayerConfig): string {
+  const model = config.resolvedModel?.trim() || config.model.trim() || "cli-default";
+  const reasoning = config.reasoning?.trim().toLowerCase() || "default";
+  return `${config.provider}::${model}::${reasoning}`;
+}
+
+export function competitorLabel(config: PlayerConfig): string {
+  const model = config.resolvedModel?.trim() || config.model.trim() || "CLI default";
+  const reasoning = config.reasoning?.trim();
+  return `${config.provider} · ${model}${reasoning ? ` · ${reasoning}` : ""}`;
 }
 
 export interface GameAction {
@@ -55,6 +83,10 @@ export interface AgentUsage {
   inputTokens: number | null;
   outputTokens: number | null;
   costUsd: number | null;
+  cachedInputTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  reasoningTokens?: number | null;
+  coverage: "none" | "partial" | "full";
 }
 
 export interface AgentAttempt {
@@ -92,6 +124,8 @@ export interface TurnTelemetry {
   agentId: string;
   model: string;
   provider: Provider;
+  reasoning?: string;
+  resolvedModel?: string;
   playerId: string;
   playerLabel: string;
   fenBefore?: string;
@@ -133,10 +167,12 @@ export interface MatchRecord {
     toolSchemaVersion: string;
     /** "engine-terminal" uses chess.js automatic draw/termination; arena adjudication adds forfeit/stop/error outcomes. */
     resultPolicy: "engine-terminal-with-arena-adjudication";
+    budgets: MatchBudgets;
   };
   gameState: unknown;
   history: TurnTelemetry[];
   events: MatchEvent[];
+  environment?: MatchEnvironment;
   currentPlayerId?: string;
   result?: MatchResult;
   error?: string;

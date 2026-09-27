@@ -22,7 +22,7 @@ function sampleRecord(overrides: Partial<MatchRecord> = {}): MatchRecord {
       { id: "white", label: "White", agent: { provider: "codex", model: "", name: "Codex · CLI default" } },
       { id: "black", label: "Black", agent: { provider: "claude", model: "", name: "Claude Code · CLI default" } },
     ],
-    settings: { turnTimeoutSeconds: 120, maxRetries: 1, retryPolicy: "retry-invalid-once-then-forfeit", promptVersion: "observation-contract-v2", toolSchemaVersion: "game-action-v1", resultPolicy: "engine-terminal-with-arena-adjudication" },
+    settings: { turnTimeoutSeconds: 120, maxRetries: 1, retryPolicy: "retry-invalid-once-then-forfeit", promptVersion: "observation-contract-v2", toolSchemaVersion: "game-action-v1", resultPolicy: "engine-terminal-with-arena-adjudication", budgets: { maxPlies: 150, maxRequests: 200, maxWallMinutes: 30, maxReportedCostUsd: null } },
     gameState: { fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", pgn: "", moves: [] },
     history: [],
     events: [],
