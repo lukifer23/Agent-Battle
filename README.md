@@ -22,6 +22,19 @@ npm start
 
 Open [http://127.0.0.1:4173](http://127.0.0.1:4173). Both servers bind to loopback (`127.0.0.1`). Keep them local; this app is not configured for remote access.
 
+Run commands from the project root. The built UI is resolved relative to the server file, but the data directory defaults to `./data` under the current working directory unless you set the options below.
+
+## Configuration
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `PORT` | API server port | `4173` |
+| `AGENT_BATTLE_API_PORT` | API port the Vite dev proxy targets | `PORT` or `4173` |
+| `AGENT_BATTLE_DATA_DIR` | Directory holding `matches.json` | `./data` |
+| `AGENT_BATTLE_METRICS` | Set to `1` to log snapshot/checkpoint sizes and timings | off |
+
+The development UI runs on `127.0.0.1:5173` and proxies `/api` to the API port. Production serves the built UI and API from the same origin and port.
+
 ## What works today
 
 - Standard chess rules, legal UCI move validation, resignation, checkmate, stalemate, repetition, fifty-move and insufficient-material draws. Rules come from [chess.js](https://github.com/jhlywa/chess.js) rather than a home-grown chess engine.
@@ -57,9 +70,10 @@ npm test
 npm run lint
 npm run typecheck
 npm run build
+npm run benchmark
 ```
 
-The adapter/controller tests use fake local CLI executables and do not make paid model requests. See [the handoff](docs/HANDOFF.md) for the current acceptance boundary and the next recommended work.
+The adapter/controller tests use fake local CLI executables and do not make paid model requests. CI runs these checks on Node 20 and 22 on every push to `main` and every pull request, using the committed lockfile and local fixtures only. See [the handoff](docs/HANDOFF.md) for the current acceptance boundary and the next recommended work.
 
 ## Project guide
 

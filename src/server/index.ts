@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { PROVIDERS, type MatchRecord, type PlayerConfig, type Provider } from "../shared.js";
 import { AgentRegistry } from "../domain/agent.js";
@@ -265,7 +266,7 @@ app.use("/api", (_request, response) => {
   response.status(404).json({ error: "Unknown API route.", code: "not_found" });
 });
 
-const webRoot = join(process.cwd(), "dist", "web");
+const webRoot = fileURLToPath(new URL("../../dist/web", import.meta.url));
 if (existsSync(webRoot)) {
   app.use(express.static(webRoot));
   app.get("*splat", (_request, response) => response.sendFile(join(webRoot, "index.html")));

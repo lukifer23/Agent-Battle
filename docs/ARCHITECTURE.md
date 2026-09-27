@@ -115,9 +115,11 @@ The event stream sends one full `snapshot` on connection and again for match cre
 
 1. Implement `GameDefinition<State>` with a canonical state and a per-player observation. Keep hidden/private state inside the game; project only player-allowed facts into `observe()`.
 2. Define a generic action envelope and game-specific action schema. Validate the current player and all payload fields before applying.
-3. Implement terminal/result handling and a versioned serializer/deserializer.
+3. Implement terminal/result handling and a versioned serializer/deserializer, plus `plyCount(state)`.
 4. Register the game in `src/server/index.ts` and add a UI view for its serialized snapshot.
 5. Add domain tests for legal/illegal actions, wrong player, player-specific observations, terminal states and persistence reload.
+
+Current chess assumptions to update for a new game: the `POST /api/matches` body nests `white`/`black` player configs, the client board/projection in `src/client/matchEvents.ts` and `src/App.tsx` reads the chess snapshot shape (`fen`, `pgn`, `moves`), and the replay/notation components assume half-move `moves`. The controller and store do not require these assumptions.
 
 ### Current boundaries / limits
 

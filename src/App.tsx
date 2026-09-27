@@ -614,7 +614,7 @@ function App() {
           <div className="footnote"><BoardMark className="footnote-mark" /> THE AGENTS PLAY. THE ENGINE KEEPS SCORE.</div>
         </aside>
       </section>
-      <footer className="page-footer"><span>AGENT BATTLE <b>·</b> v0.1</span><span>LOCAL FIRST · STANDARD CHESS</span></footer>
+      <footer className="page-footer"><span>AGENT BATTLE <b>·</b> v{__APP_VERSION__}</span><span>LOCAL FIRST · STANDARD CHESS</span></footer>
     </main>
   );
 }
