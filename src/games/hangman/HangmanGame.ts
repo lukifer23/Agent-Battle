@@ -180,6 +180,6 @@ export class HangmanGame implements GameDefinition<HangmanState> {
     if (action.type === "guess_letter" && typeof action.payload.letter === "string" && /^[a-z]$/.test(action.payload.letter)) return { type: "guess_letter", payload: { letter: action.payload.letter } };
     return { type: action.type === "solve" ? "solve" : "redacted", payload: {} };
   }
-  actionLabel(action: GameAction): string { return action.type === "guess_letter" ? `Guess ${this.publicAction(action).payload.letter ?? "letter"}` : "Solution submitted"; }
+  actionLabel(action: GameAction): string { return action.type === "guess_letter" ? `Guess ${this.publicAction(action).payload.letter ?? "letter"}` : action.type === "solve" ? "Solution submitted" : "Invalid action"; }
   eventProjection(state: HangmanState): Record<string, unknown> { return { publicState: this.publicState(state) }; }
 }

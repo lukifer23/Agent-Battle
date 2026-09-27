@@ -61,7 +61,7 @@ export function projectRecord(record: MatchRecord, eventLimit = 40, registry = d
   const turn = (value: TurnTelemetry): TurnTelemetry => {
     const safe = projectTurn(value);
     if (!hidden) return safe;
-    safe.action = safe.action ? game.publicAction!(safe.action) : undefined;
+    safe.action = safe.valid && safe.action ? game.publicAction!(safe.action) : undefined;
     safe.actionLabel = safe.action ? game.actionLabel(safe.action) : undefined;
     safe.attempts = safe.attempts.map((attempt) => ({ ...attempt, action: attempt.action ? game.publicAction!(attempt.action) : undefined, error: attempt.error ? "Action rejected or request failed; private diagnostics retained locally." : undefined }));
     return safe;

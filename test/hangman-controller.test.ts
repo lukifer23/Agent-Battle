@@ -68,6 +68,7 @@ test("exhausted correction forfeits only one lane and remaining lane completes",
   assert.equal(done.status, "finished"); assert.equal(done.result?.winnerId, "player2");
   assert.deepEqual(h.observations.map((o) => o.playerId), ["player1", "player1", "player2"]);
   assert.equal((done.gameState as HangmanState).lanes.player1.status, "forfeit");
+  assert.equal(projectRecord(done).history[0].actionLabel, undefined);
 });
 test("one-request budget blocks a correction invocation and does not award a result or reveal", async () => {
   const h = harness(() => ({ type: "invalid", payload: {} }), 1);
