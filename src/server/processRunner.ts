@@ -63,7 +63,7 @@ export async function terminateProcessGroup(child: ChildProcess): Promise<void> 
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); });
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
 
 /**
@@ -121,7 +121,6 @@ export function runProcess(options: ProcessRunOptions): Promise<ProcessRunResult
       else options.signal.addEventListener("abort", onAbort, { once: true });
     }
     const timer = setTimeout(() => { timedOut = true; void terminate(); }, options.timeoutMs);
-    timer.unref?.();
     child.stdout?.on("data", (data: Buffer) => onData("stdout", data));
     child.stderr?.on("data", (data: Buffer) => onData("stderr", data));
 
