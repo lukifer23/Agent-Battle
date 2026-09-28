@@ -5,6 +5,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import os from "node:os";
 import { join } from "node:path";
+import { ChessGame } from "../src/games/chess/ChessGame.js";
+import type { MatchRecord } from "../src/shared.js";
 
 const projectRoot = process.cwd();
 const tsxBin = join(projectRoot, "node_modules", ".bin", "tsx");
@@ -97,6 +99,39 @@ test("the API exposes a unified snapshot and rejects untrusted hosts and origins
     await stopServer(child);
     rmSync(folder, { recursive: true, force: true });
   }
+});
+
+test("event pagination reaches events beyond the match-detail projection window", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-event-page-"));
+  const game = new ChessGame();
+  const now = "2026-01-01T00:00:00.000Z";
+  const record: MatchRecord = {
+    id: "long-events", gameId: "chess", gameVersion: game.version, protocolVersion: "game-action-v1", createdAt: now, updatedAt: now,
+    status: "ready", revision: 650,
+    players: [
+      { id: "white", label: "White", agent: { provider: "codex", model: "", name: "Codex" } },
+      { id: "black", label: "Black", agent: { provider: "claude", model: "", name: "Claude" } },
+    ],
+    settings: { turnTimeoutSeconds: 120, maxRetries: 1, retryPolicy: "retry-invalid-once-then-forfeit", promptVersion: "observation-contract-v2", toolSchemaVersion: "game-action-v1", resultPolicy: "engine-terminal-with-arena-adjudication",
+      budgets: { maxPlies: 250, maxRequests: 500, maxWallMinutes: 30, maxReportedCostUsd: null } },
+    gameState: game.serialize(game.createState()), history: [],
+    events: Array.from({ length: 650 }, (_, index) => ({ at: now, type: "fixture.event", text: `Event ${index + 1}`, sequence: index + 1 })),
+  };
+  writeFileSync(join(folder, "matches.json"), JSON.stringify({ version: 6, matches: [record], series: [] }));
+  const port = 4900 + Math.floor(Math.random() * 400);
+  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], {
+    cwd: projectRoot, env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  try {
+    await waitForListening(child, port);
+    const page = await probe(port, { path: "/api/matches/long-events/events?offset=575&limit=25" });
+    assert.equal(page.status, 200);
+    const parsed = JSON.parse(page.body) as { total: number; events: Array<{ sequence: number }> };
+    assert.equal(parsed.total, 650);
+    assert.equal(parsed.events.length, 25);
+    assert.equal(parsed.events[0].sequence, 576);
+    assert.equal(parsed.events.at(-1)?.sequence, 600);
+  } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
 });
 
 test("the event stream opens with a canonical snapshot event", async () => {

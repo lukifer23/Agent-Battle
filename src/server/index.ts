@@ -7,7 +7,7 @@ import { PROVIDERS, distinctExplicitModels, type MatchRecord, type PlayerConfig,
 import { AgentRegistry } from "../domain/agent.js";
 import { MatchController } from "../domain/MatchController.js";
 import { defaultGames } from "../domain/defaultGames.js";
-import { summaryOf, projectRecord } from "../domain/projection.js";
+import { summaryOf, projectRecord, projectEvent } from "../domain/projection.js";
 import { agentRegistryDefaults, detectProviders } from "./adapters.js";
 import { acquireStoreOwnership, loadMatches, releaseStoreOwnership, saveMatches, STORE_VERSION } from "./store.js";
 import { shouldPersistChange, shouldPublishSnapshot } from "./eventPolicy.js";
@@ -225,7 +225,7 @@ app.get("/api/matches/:id/events", (request, response) => {
   const match = controller.get(matchIdOf(request));
   if (!match) { response.status(404).json({ error: "Match not found.", code: "not_found" }); return; }
   const { limit, offset } = pageParams(request);
-  response.json({ total: match.events.length, offset, limit, events: projectRecord(match, 500).events.slice(offset, offset + limit) });
+  response.json({ total: match.events.length, offset, limit, events: match.events.slice(offset, offset + limit).map((event) => projectEvent(match, event)) });
 });
 
 app.get("/api/matches/:id/attempts", (request, response) => {
@@ -256,7 +256,7 @@ app.post("/api/series", asyncRoute(async (request, response) => {
   const detected = await providerCache.value;
   for (const agent of parsed) if (!detected.some((provider) => provider.provider === agent.provider && provider.installed)) throw new Error(`${agent.provider} CLI is unavailable.`);
   const raw = body.budgets && typeof body.budgets === "object" ? body.budgets as Record<string, unknown> : {};
-  const budgets = { maxPlies: Number(raw.maxPlies ?? 150), maxRequests: Number(raw.maxRequests ?? 200), maxWallMinutes: Number(raw.maxWallMinutes ?? 30),
+  const budgets = { maxPlies: Number(raw.maxPlies ?? 250), maxRequests: Number(raw.maxRequests ?? 500), maxWallMinutes: Number(raw.maxWallMinutes ?? 30),
     maxReportedCostUsd: raw.maxReportedCostUsd === undefined || raw.maxReportedCostUsd === null || raw.maxReportedCostUsd === "" ? null : Number(raw.maxReportedCostUsd) };
   const plan = body.plan as import("../shared.js").SeriesPlan | undefined;
   const seed = typeof body.masterSeed === "string" ? body.masterSeed : undefined;
@@ -306,8 +306,8 @@ app.post("/api/matches", asyncRoute(async (request, response) => {
     players,
     turnTimeoutSeconds: Number(body.turnTimeoutSeconds ?? 120),
     budgets: {
-      maxPlies: Number(rawBudgets.maxPlies ?? 150),
-      maxRequests: Number(rawBudgets.maxRequests ?? 200),
+      maxPlies: Number(rawBudgets.maxPlies ?? 250),
+      maxRequests: Number(rawBudgets.maxRequests ?? 500),
       maxWallMinutes: Number(rawBudgets.maxWallMinutes ?? 30),
       maxReportedCostUsd: costLimit === undefined || costLimit === null || costLimit === "" ? null : Number(costLimit),
     },

@@ -61,6 +61,22 @@ test("shots alternate; hit, miss, sunk and terminal result derive from placement
   assert.throws(() => game.deserialize(forged));
 });
 
+test("a legal Battleship contest can take 201 accepted actions", () => {
+  const state = game.createState();
+  game.applyAction(state, "player1", place());
+  game.applyAction(state, "player2", place());
+  const occupied = new Set(ships.flatMap((ship) => Array.from({ length: ({ carrier: 5, battleship: 4, cruiser: 3, submarine: 3, destroyer: 2 } as Record<string, number>)[ship.ship] },
+    (_, index) => `${String.fromCharCode(ship.start.charCodeAt(0) + index)}${ship.start.slice(1)}`)));
+  const shots = [..."abcdefghij"].flatMap((file) => Array.from({ length: 10 }, (_, rank) => `${file}${rank + 1}`));
+  shots.sort((a, b) => Number(occupied.has(a)) - Number(occupied.has(b)));
+  for (const [index, coordinate] of shots.entries()) {
+    game.applyAction(state, "player1", fire(coordinate));
+    if (index < shots.length - 1) game.applyAction(state, "player2", fire(coordinate));
+  }
+  assert.equal(state.phase, "terminal");
+  assert.equal(state.entries.length, 201);
+});
+
 test("each observation contains own fleet but no untouched opponent placement", () => {
   const state = game.createState();
   game.applyAction(state, "player1", place());

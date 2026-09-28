@@ -136,8 +136,8 @@ function App() {
   const [gameId, setGameId] = useState(() => loadView() === "series" ? "chess" : loadView());
   const [viewMode, setViewMode] = useState<string>(loadView);
   const [games, setGames] = useState<Array<{ id: string; label: string; version: string; playerIds: string[]; playerLabels: string[]; series?: { supportsSeededChallenges: boolean; recommendedRepetitions: number; seatSensitive: boolean } }>>([]);
-  const [maxPlies, setMaxPlies] = useState(150);
-  const [maxRequests, setMaxRequests] = useState(200);
+  const [maxPlies, setMaxPlies] = useState(250);
+  const [maxRequests, setMaxRequests] = useState(500);
   const [timePreset, setTimePreset] = useState<number | "custom">(30);
   const [customMinutes, setCustomMinutes] = useState(45);
   const maxWallMinutes = timePreset === "custom" ? customMinutes : timePreset;
