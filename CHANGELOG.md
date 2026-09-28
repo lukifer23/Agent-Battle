@@ -5,6 +5,10 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+- Fixed event pagination after event 500; the endpoint now projects the requested historical slice directly.
+- Included every retried series attempt in request, latency, usage, cost, and unscored totals while keeping the final scored result attached to its slot.
+- Raised fresh-match action and request defaults to 250 and 500: a legal Battleship contest can require 201 accepted actions before its terminal result.
+
 - Added `battleship-standard-1`: atomic fleet placement, alternating shots, deterministic terminal result, private player observations, masked public replay, terminal fleet reveal, and replay-validated persistence.
 - Added `battle-series-2` plans for registered two-player games, configurable repetitions, seat-aware strict mode, deterministic challenge schedules, normalized per-family/overall performance, completed reproducibility manifests, and UI rerun.
 - Kept `battle-series-1` records and exports readable without destructive conversion; store version 6 migrates with a backup.
