@@ -5,6 +5,7 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+- Stopped treating a terminal game with no authoritative derived result as a draw; the controller now records an unscored error.
 - Fixed event pagination after event 500; the endpoint now projects the requested historical slice directly.
 - Included every retried series attempt in request, latency, usage, cost, and unscored totals while keeping the final scored result attached to its slot.
 - Raised fresh-match action and request defaults to 250 and 500: a legal Battleship contest can require 201 accepted actions before its terminal result.

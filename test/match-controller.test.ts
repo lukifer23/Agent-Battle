@@ -10,6 +10,7 @@ import { parseActionEnvelope } from "../src/domain/actions.js";
 import { ChessGame } from "../src/games/chess/ChessGame.js";
 import type { GameAction, GameObservation, MatchRecord, PlayerConfig, ProviderInfo } from "../src/shared.js";
 import { MatchStore } from "../src/server/store.js";
+import { matchRequests } from "../src/domain/usage.js";
 
 const providers: ProviderInfo[] = [{ provider: "codex", installed: true, executable: "/fake/codex", version: "test", defaultModel: "test" }];
 
@@ -322,6 +323,22 @@ class ToyGame implements GameDefinition<ToyState> {
   actionLabel(): string { return "inc"; }
   eventProjection(): Record<string, unknown> { return {}; }
 }
+
+test("a terminal game without a derived result fails unscored instead of becoming a draw", async () => {
+  class MissingResultGame extends ToyGame {
+    override result(): undefined { return undefined; }
+  }
+  const registry = new AgentRegistry().register("codex", (agentConfig) => new ScriptedAgent(agentConfig, async () => ({ type: "inc", payload: {} })));
+  const controller = new MatchController(new GameRegistry().register(new MissingResultGame()), registry, [], async () => providers, () => undefined);
+  const match = await controller.create({ gameId: "toy", players: { a: config("a"), b: config("b") }, turnTimeoutSeconds: 30 });
+  await controller.start(match.id);
+  const failed = await waitFor(controller, match.id, ["error"]);
+  assert.equal(failed.result, undefined);
+  assert.match(failed.error ?? "", /terminal state without an authoritative result/);
+  assert.equal(matchRequests(failed), 2);
+  assert.equal(failed.pendingTurn?.attempts[0].status, "valid");
+  await controller.shutdown();
+});
 
 test("stop during an active request cancels without applying a move", async () => {
   let release: () => void = () => undefined;
