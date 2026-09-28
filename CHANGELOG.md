@@ -5,6 +5,7 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+- Rolled back in-memory battle-series start, pause, stop, retry, and skip changes when their checkpoint fails; a failed retry no longer leaves a hidden retry marker.
 - Stopped treating a terminal game with no authoritative derived result as a draw; the controller now records an unscored error.
 - Fixed event pagination after event 500; the endpoint now projects the requested historical slice directly.
 - Included every retried series attempt in request, latency, usage, cost, and unscored totals while keeping the final scored result attached to its slot.
