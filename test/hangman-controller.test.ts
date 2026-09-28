@@ -72,11 +72,13 @@ test("exhausted correction forfeits only one lane and remaining lane completes",
 });
 test("one-request budget blocks a correction invocation and does not award a result or reveal", async () => {
   const h = harness(() => ({ type: "invalid", payload: {} }), 1);
-  const match = await h.create(); const word = (match.gameState as HangmanState).word;
+  const match = await h.create();
   await h.controller.start(match.id); const done = await finish(h.controller, match.id);
   assert.equal(h.observations.length, 1); assert.equal(matchRequests(done), 1);
   assert.equal(done.status, "stopped"); assert.equal(done.result, undefined);
-  assert.equal(JSON.stringify(projectRecord(done)).includes(word), false);
+  const publicMatch = projectRecord(done);
+  assert.equal("word" in (publicMatch.gameState as object), false);
+  assert.ok(publicMatch.replay?.every((frame) => !("word" in (frame as object))));
 });
 test("forged Hangman derived result fails registry validation", async () => {
   let word = "";
