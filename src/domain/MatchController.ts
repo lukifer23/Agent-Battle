@@ -772,6 +772,12 @@ export class MatchController {
 
   private budgetStop(match: MatchRecord, reason: string): void {
     endMatchTime(match);
+    // Timer callbacks may fire one millisecond before Date.now reaches their
+    // nominal deadline. A cutoff attributed to active match time has consumed
+    // that full budget even when the wall-clock sample rounds down.
+    if (match.timeAccounting && reason.startsWith("maximum active time")) {
+      match.timeAccounting.elapsedMs = Math.max(match.timeAccounting.elapsedMs, match.settings.budgets.maxWallMinutes * 60_000);
+    }
     match.status = "stopped";
     match.currentPlayerId = undefined;
     match.error = `Budget reached: ${reason}. Further requests are blocked.`;
