@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { competitorLabel } from "../shared.js";
 import type { PublicMatchDetail } from "../shared.js";
 interface Lane { pattern: string | null; guessedLetters: string[]; misses: number; missesRemaining: number; actionsTaken: number; status: string; sealed: boolean; correctLetters: number }
 interface View { wordLength: number; terminal: boolean; word?: string; lanes: Record<string, Lane> }
@@ -17,7 +18,7 @@ export function HangmanArena({ match }: { match: PublicMatchDetail }) {
       const pendingAttempts = step === null && match.pendingTurn?.playerId === player.id ? match.pendingTurn.attempts : [];
       const turns = match.history.filter((turn) => turn.playerId === player.id).slice(0, step === null ? undefined : lane.actionsTaken + (lane.status === "forfeit" ? 1 : 0));
       return <section className={`hangman-lane ${match.currentPlayerId === player.id ? "lane-active" : ""}`} key={player.id}>
-        <header><h3>{player.label}</h3><span>{lane.status.toUpperCase()}</span></header>
+        <header><div><h3>{player.label}</h3><small>{competitorLabel(player.agent)}</small></div><span>{step === null && match.status === "running" && lane.status === "active" ? match.currentPlayerId === player.id ? "THINKING" : "WAITING" : lane.status.toUpperCase()}</span></header>
         <svg viewBox="0 0 160 150" role="img" aria-label={`${lane.misses} misses out of seven`}>
           <path d="M15 140 H145 M40 140 V10 H105 V25" />
           {lane.misses >= 1 && <circle cx="105" cy="40" r="15" />}

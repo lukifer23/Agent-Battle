@@ -105,6 +105,22 @@ function formatClock(seconds: number): string {
   return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
+function eventLabel(match: PublicMatchDetail, event: MatchEvent): string {
+  if (match.gameId !== "hangman") return event.text;
+  const player = match.players.find((seat) => seat.id === event.playerId)?.label;
+  const prefix = player ? `${player} · ` : "";
+  if (event.type === "move.applied") {
+    const action = event.payload?.action as { type?: string; payload?: { letter?: string } } | undefined;
+    if (action?.type === "guess_letter" && /^[a-z]$/.test(action.payload?.letter ?? "")) return `${prefix}guessed ${action.payload!.letter}`;
+    return `${prefix}${action?.type === "solve" ? "submitted a solution" : "action accepted"}`;
+  }
+  if (event.type === "turn.completed") return `${prefix}turn completed`;
+  if (event.type === "turn.started") return `${prefix}turn started`;
+  if (event.type === "move.rejected") return `${prefix}invalid action`;
+  if (event.type === "agent.started") return `${prefix}request started`;
+  return event.text;
+}
+
 function App() {
   const preferences = useMemo(() => loadPreferences(loadView() === "hangman" ? "hangman" : "chess"), []);
   const [state, setState] = useState<AppState | null>(null);
@@ -276,6 +292,7 @@ function App() {
   }, [selectedId, state, detailById]);
 
   const selectedSnapshot = selectedMatch?.gameId === "chess" ? selectedMatch.gameState as ChessSnapshot : undefined;
+  const hangmanLanes = selectedMatch?.gameId === "hangman" ? (selectedMatch.gameState as { lanes: Record<string, { status: string; misses: number; actionsTaken: number; correctLetters: number }> }).lanes : null;
   const totalPlies = selectedSnapshot?.moves?.length ?? 0;
   const viewingPly = replayPly ?? totalPlies;
   const displayedMove = viewingPly > 0 ? selectedSnapshot?.moves[viewingPly - 1] : undefined;
@@ -613,7 +630,7 @@ function App() {
                 <span className="state-dot" />{selectedMatch ? selectedMatch.status.toUpperCase() : "WAITING"}
               </div>
             </div>
-            {selectedMatch && <div className="player-strip">
+            {selectedMatch?.gameId === "chess" && <div className="player-strip">
               {selectedMatch.players.map((player) => {
                 const playerTurns = selectedMatch.history.filter((turn) => turn.playerId === player.id);
                 const attempts = [...playerTurns.flatMap((turn) => turn.attempts), ...(selectedMatch.pendingTurn?.playerId === player.id ? selectedMatch.pendingTurn.attempts : [])];
@@ -694,7 +711,13 @@ function App() {
 
         {viewMode !== "series" && <aside className="side-column">
           <section className="scoreboard panel">
-            <div className="section-heading"><div><span className="eyebrow">HALL OF FAME</span><h2>{selectedMatch?.gameId ?? gameId} scoreboard</h2></div><Trophy className="trophy" /></div>
+            <div className="section-heading"><div><span className="eyebrow">{hangmanLanes ? "CURRENT MATCH" : "HALL OF FAME"}</span><h2>{hangmanLanes ? "Live comparison" : `${selectedMatch?.gameId ?? gameId} scoreboard`}</h2></div><Trophy className="trophy" /></div>
+            {hangmanLanes && selectedMatch && <div className="live-comparison">
+              <div className="live-comparison-head"><span>LANE</span><span>STATUS</span><span>MISSES</span><span>ACTIONS</span></div>
+              {selectedMatch.players.map((player) => { const lane = hangmanLanes[player.id]; return <div className="live-comparison-row" key={player.id}><strong>{player.label}</strong><span>{lane.status}</span><span>{lane.misses}/7</span><span>{lane.actionsTaken}</span></div>; })}
+              <p>{selectedMatch.result ? `${selectedMatch.result.kind === "draw" ? "Draw" : `${selectedMatch.players.find((player) => player.id === selectedMatch.result?.winnerId)?.label} wins`} · ${selectedMatch.result.reason}` : "Final result is decided after both lanes finish."}</p>
+            </div>}
+            {hangmanLanes && <h3 className="score-subhead">Recent Hangman results</h3>}
             {standings.length === 0 ? <div className="score-empty">The leaderboard starts after game one.</div> : <table className="score-table">
               <caption className="sr-only">Scoreboard by competitor and time control across recent matches</caption>
               <thead><tr><th scope="col">AGENT</th><th scope="col">W</th><th scope="col">D</th><th scope="col">L</th><th scope="col">PTS</th></tr></thead>
@@ -738,7 +761,7 @@ function App() {
                 const kind = event.type.includes("error") || event.type.includes("timeout") || event.type.includes("rejected") ? "error" : event.type.includes("move") ? "move" : event.type.includes("thinking") ? "thinking" : "system";
                 return <div className="event-row" key={`${event.at}-${index}`}>
                 <span className={`event-mark event-${kind}`}>{kind === "move" ? <ArrowUpRight className="event-icon" /> : kind === "error" ? "!" : kind === "thinking" ? "…" : "·"}</span>
-                <span className="event-text">{event.text}<time>{new Date(event.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time></span>
+                <span className="event-text">{selectedMatch ? eventLabel(selectedMatch, event) : event.text}<time>{new Date(event.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time></span>
               </div>;
               })}
             </div>
