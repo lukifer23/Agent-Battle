@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { researchMatchBudgets } from "./researchPlan.js";
 import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -5,7 +7,7 @@ import type { MatchRecord, SeriesRecord } from "../shared.js";
 import { defaultGames } from "../domain/defaultGames.js";
 import { validateMatchRecord, validateSeriesRecord, validateStoreEnvelope } from "./schema.js";
 
-export const STORE_VERSION = 6;
+export const STORE_VERSION = 7;
 
 export interface LoadResult {
   matches: MatchRecord[];
@@ -124,6 +126,7 @@ export class MatchStore {
         for (const slot of record.slots) for (const [attempt, matchId] of slot.matchIds.entries()) {
           const match = matches.find((candidate) => candidate.id === matchId);
           if (!match || match.series?.id !== record.id || match.series.slotId !== slot.id || match.series.attempt !== attempt + 1 || match.gameId !== slot.gameId) throw new Error("Series slot linkage differs from match record.");
+          if (record.version === "battle-series-3" && (match.gameVersion !== slot.gameVersion || match.series.conditionId !== slot.conditionId || match.series.blockId !== slot.blockId || match.series.planHash !== record.planHash || match.settings.turnTimeoutSeconds !== record.settings.turnTimeoutSeconds || !isDeepStrictEqual(match.settings.budgets, researchMatchBudgets(record.settings.budgets)))) throw new Error("Research assignment differs from registered condition.");
           if (slot.gameId === "hangman" && (match.gameState as { provenance?: { seed?: string } }).provenance?.seed !== slot.challengeSeed) throw new Error("Match challenge differs from series seed.");
           for (const [role, agentIndex] of Object.entries(slot.roles)) {
             const actual = match.players.find((player) => player.id === role)?.agent;

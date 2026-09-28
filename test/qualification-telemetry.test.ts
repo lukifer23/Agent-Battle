@@ -63,7 +63,7 @@ test("comparison requires per-request identity, isolated policies, both particip
   const missing = structuredClone(match); missing.history.pop();
   assert.equal(comparisonEligibility(missing).eligible, false);
   const shared = structuredClone(match); shared.history[1].attempts[0].sessionId = "session-a";
-  assert.match(comparisonEligibility(shared).reasons.join(" "), /shared provider session/);
+  assert.match(comparisonEligibility(shared).reasons.join(" "), /session identity was reused/);
   const old = structuredClone(match); delete old.environment;
   assert.equal(comparisonEligibility(old).eligible, false);
   const unknown = structuredClone(match); unknown.history[0].attempts[0].toolCalls = null;

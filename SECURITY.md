@@ -10,13 +10,15 @@ Agent Battle is a single-user, loopback-only local application. It binds to
 - Agent CLIs run as the current local user. Their temporary working directories
   isolate per-turn files; they are not operating-system user isolation.
 - Provider configuration changes are scoped to each arena invocation. Agent
-  Battle does not read, store, or transmit CLI credentials.
+  Battle does not persist credentials or send them as CLI arguments. An allowlist
+  forwards supported credential environment variables to the child CLI, which
+  also retains access to its normal authentication locations.
 - Match history and bounded provider diagnostics are stored locally under
   `data/`, which is excluded from version control.
 
 ## Hidden state and provider execution
 
-Shared-board Hangman intentionally exposes opponent letter outcomes and scores, but keeps the word and seed private until terminal. Legacy Hangman lanes retain their separate observation boundary. Battleship hides untouched opponent fleet cells until terminal. Historical replay frames preserve their original masks, and public action labels redact full solutions and placements.
+Shared-board Hangman intentionally exposes opponent letter outcomes and scores, but keeps the word and seed private until terminal. Independent Hangman lanes, including new research controls, retain their separate observation boundary. Battleship hides untouched opponent fleet cells until terminal. Historical replay frames preserve their original masks, and public action labels redact full solutions and placements.
 
 Claude Code safe mode, explicit tool/hook/settings restrictions and no session persistence retain the user's existing CLI authentication. Codex uses ephemeral requests, ignores user configuration/rules and runs read-only, but remains unqualified for no-tools scored series. CLI policy and fresh temporary directories do not provide OS-user isolation. Unknown model identity is not silently treated as verified.
 
@@ -39,3 +41,9 @@ local, single-maintainer project.
 - Because the app is loopback-only, some local-network browser protections may
   not apply; treat any host or origin that can reach the loopback port as
   untrusted and report gaps in control-endpoint validation.
+
+## Research declarations and exports
+
+Research v3 stores private challenge roots locally and publishes commitments plus projected execution metadata. Completed exports reveal reproducibility roots. The built-in pilot uses a public root: hiding it from an active UI is not protection from contamination. Declaration/profile hashes detect inconsistency but do not authenticate a provider, resist a local user rewriting records, or constitute independent preregistration.
+
+Research qualification fails closed on unknown/incomplete streams, conflicting model/session evidence, missing external-tool inventory, and session reuse across recorded requests. Requested reasoning remains distinct from effective reasoning. Public metadata does not contain private observation hashes or assistant reasoning. Avoid exposing raw stores, diagnostics, credentials or unfinished private suites when sharing results.

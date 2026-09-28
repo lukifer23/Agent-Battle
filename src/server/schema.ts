@@ -1,3 +1,4 @@
+import { makeResearchSeries } from "./researchPlan.js";
 import { createHash, createHmac } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { makeSeriesV2 } from "./series.js";
@@ -63,12 +64,26 @@ function validateAttempt(raw: unknown): ValidationResult<AgentAttempt> {
   if (!isIsoDate(raw.startedAt)) return { error: "attempt start time is invalid" };
   if (raw.invocationId !== undefined && (!isString(raw.invocationId) || !/^[0-9a-f-]{36}$/.test(raw.invocationId))) return { error: "invocation identity is invalid" };
   if (raw.deadlineAt !== undefined && !isIsoDate(raw.deadlineAt)) return { error: "invocation deadline is invalid" };
+  if (raw.execution !== undefined) {
+    const e = raw.execution;
+    if (!isPlainObject(e) || e.version !== "execution-evidence-1" || !isString(e.profileId) || e.profileId.length > 100
+      || !isString(e.profileHash) || !/^[0-9a-f]{64}$/.test(e.profileHash) || !isString(e.requestedReasoning) || e.requestedReasoning.length > 40
+      || e.effectiveReasoning !== null || typeof e.streamComplete !== "boolean" || typeof e.unknownEvents !== "boolean"
+      || !Array.isArray(e.modelIds) || e.modelIds.length > 100 || !e.modelIds.every((id) => isString(id) && id.length <= 200)
+      || !(e.toolInventory === null || Array.isArray(e.toolInventory) && e.toolInventory.length <= 200 && e.toolInventory.every((tool) => isString(tool) && tool.length <= 200))) return { error: "Invalid execution evidence." };
+  }
   const status = raw.status;
   if (!["started", "interrupted", "valid", "invalid", "timeout", "error", "cancelled"].includes(status as string)) return { error: "attempt status is unsupported" };
   if (raw.phase !== undefined && !["initialization", "provider", "protocol", "controller", "storage", "qualification"].includes(String(raw.phase))) return { error: "attempt phase is unsupported" };
   return {
     value: {
       attempt: raw.attempt as number,
+      ...(isPlainObject(raw.execution) ? { execution: {
+        version: "execution-evidence-1" as const, profileId: raw.execution.profileId as string, profileHash: raw.execution.profileHash as string,
+        requestedReasoning: raw.execution.requestedReasoning as string, effectiveReasoning: null,
+        streamComplete: raw.execution.streamComplete as boolean, unknownEvents: raw.execution.unknownEvents as boolean,
+        modelIds: [...raw.execution.modelIds as string[]], toolInventory: raw.execution.toolInventory === null ? null : [...raw.execution.toolInventory as string[]],
+      } } : {}),
       ...(isString(raw.invocationId) ? { invocationId: raw.invocationId } : {}),
       ...(isIsoDate(raw.deadlineAt) ? { deadlineAt: raw.deadlineAt } : {}),
       startedAt: raw.startedAt,
@@ -208,6 +223,8 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
   if (raw.gameState === undefined || raw.gameState === null) return { error: "game state is missing" };
   if (raw.series !== undefined && (!isPlainObject(raw.series) || !isString(raw.series.id) || !isString(raw.series.slotId)
     || !Number.isSafeInteger(raw.series.attempt) || (raw.series.attempt as number) < 1)) return { error: "series linkage is invalid" };
+  if (isPlainObject(raw.series) && ["conditionId", "blockId", "planHash"].some((key) => raw.series && (raw.series as Record<string, unknown>)[key] !== undefined)
+    && (!isString(raw.series.conditionId) || !isString(raw.series.blockId) || !isString(raw.series.planHash) || !/^[0-9a-f]{64}$/.test(raw.series.planHash))) return { error: "research linkage is invalid" };
   if (!Array.isArray(raw.history)) return { error: "history is missing" };
   const history: TurnTelemetry[] = [];
   for (const [index, turn] of raw.history.entries()) {
@@ -295,13 +312,13 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
       ...(isFiniteNumber(raw.runGeneration) ? { runGeneration: raw.runGeneration } : {}),
       ...(pendingTurn ? { pendingTurn } : {}),
       ...(isPlainObject(raw.series) && isString(raw.series.id) && isString(raw.series.slotId) && Number.isSafeInteger(raw.series.attempt) && (raw.series.attempt as number) >= 1
-        ? { series: { id: raw.series.id, slotId: raw.series.slotId, attempt: raw.series.attempt as number } } : {}),
+        ? { series: { id: raw.series.id, slotId: raw.series.slotId, attempt: raw.series.attempt as number, ...(isString(raw.series.conditionId) && isString(raw.series.blockId) && isString(raw.series.planHash) && /^[0-9a-f]{64}$/.test(raw.series.planHash) ? { conditionId: raw.series.conditionId, blockId: raw.series.blockId, planHash: raw.series.planHash } : {}) } } : {}),
     },
   };
 }
 
 export function validateSeriesRecord(raw: unknown): SeriesRecord {
-  if (isPlainObject(raw) && raw.version === "battle-series-2") return validateSeriesV2(raw);
+  if (isPlainObject(raw) && ["battle-series-2", "battle-series-3"].includes(String(raw.version))) return validateSeriesV2(raw);
   if (!isPlainObject(raw) || raw.version !== "battle-series-1" || !isString(raw.id) || !isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)
     || !["ready", "running", "paused", "completed", "stopped"].includes(String(raw.status))
     || !/^[0-9a-f]{64}$/.test(String(raw.masterSeed)) || !Array.isArray(raw.agents) || raw.agents.length !== 2
@@ -338,10 +355,11 @@ export function validateSeriesRecord(raw: unknown): SeriesRecord {
 }
 
 function validateSeriesV2(raw: Record<string, unknown>): SeriesRecord {
+  const research = raw.version === "battle-series-3";
   if (!isString(raw.id) || !isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)
     || !["ready", "running", "paused", "completed", "stopped"].includes(String(raw.status))
     || !/^[0-9a-f]{64}$/.test(String(raw.masterSeed)) || !Array.isArray(raw.agents) || raw.agents.length !== 2
-    || !isPlainObject(raw.settings) || !isPlainObject(raw.plan) || !Array.isArray(raw.plan.games)
+    || !isPlainObject(raw.settings) || (research ? !isPlainObject(raw.researchPlan) || raw.plan !== undefined : !isPlainObject(raw.plan) || !Array.isArray(raw.plan.games))
     || !Array.isArray(raw.slots)) throw new Error("Invalid battle-series-2 record.");
   const agents = raw.agents.map((agent) => validatePlayer({ id: "seat", label: "Seat", agent }));
   if (agents.some((agent) => !agent.value || agent.error || !agent.value.agent.model.trim())) throw new Error("Invalid series agent identity.");
@@ -354,18 +372,20 @@ function validateSeriesV2(raw: Record<string, unknown>): SeriesRecord {
   const validatedAgents = agents.map((agent) => agent.value!.agent) as SeriesRecord["agents"];
   const validatedBudgets = { maxPlies: budgets.maxPlies as number, maxRequests: budgets.maxRequests as number, maxWallMinutes: budgets.maxWallMinutes as number, maxReportedCostUsd: budgets.maxReportedCostUsd as number | null };
   // Rebuild the entire deterministic schedule; only generated IDs and mutable links may differ.
-  const expected = makeSeriesV2(validatedAgents, settings.turnTimeoutSeconds as number, validatedBudgets, plan, raw.masterSeed as string);
+  const expected = research ? makeResearchSeries(validatedAgents, settings.turnTimeoutSeconds as number, validatedBudgets, raw.researchPlan, raw.masterSeed as string) : makeSeriesV2(validatedAgents, settings.turnTimeoutSeconds as number, validatedBudgets, plan, raw.masterSeed as string);
+  if (research && (raw.planHash !== expected.planHash || raw.seedCommitment !== expected.seedCommitment)) throw new Error("Research declaration commitment differs from plan.");
   if (expected.slots.length !== raw.slots.length) throw new Error("Series slot count differs from plan.");
   const slots = raw.slots.map((slot, ordinal) => {
     const reference = expected.slots[ordinal];
     if (!isPlainObject(slot) || !isString(slot.id) || slot.ordinal !== ordinal || slot.gameId !== reference.gameId
       || slot.challengeId !== reference.challengeId || slot.challengeSeed !== reference.challengeSeed
+      || research && (slot.gameVersion !== reference.gameVersion || slot.conditionId !== reference.conditionId || slot.blockId !== reference.blockId || slot.replicate !== reference.replicate)
       || !isDeepStrictEqual(slot.roles, reference.roles) || !Array.isArray(slot.matchIds) || !slot.matchIds.every(isString)
       || typeof slot.skipped !== "boolean") throw new Error("Series slot differs from deterministic plan.");
-    return slot as unknown as SeriesRecord["slots"][number];
+    return { ...reference, id: slot.id, matchIds: slot.matchIds as string[], skipped: slot.skipped };
   });
   if (new Set(slots.map((slot) => slot.id)).size !== slots.length || new Set(slots.flatMap((slot) => slot.matchIds)).size !== slots.flatMap((slot) => slot.matchIds).length) throw new Error("Duplicate series identity.");
-  return { id: raw.id as string, version: "battle-series-2", plan, createdAt: raw.createdAt as string, updatedAt: raw.updatedAt as string, status: raw.status as SeriesRecord["status"], agents: validatedAgents,
+  return { id: raw.id as string, version: expected.version, ...(research ? { researchPlan: expected.researchPlan, planHash: expected.planHash, seedCommitment: expected.seedCommitment } : { plan }), createdAt: raw.createdAt as string, updatedAt: raw.updatedAt as string, status: raw.status as SeriesRecord["status"], agents: validatedAgents,
     settings: { turnTimeoutSeconds: settings.turnTimeoutSeconds as number, budgets: validatedBudgets }, masterSeed: raw.masterSeed as string, slots, ...(isString(raw.error) ? { error: raw.error } : {}) };
 }
 
@@ -373,7 +393,7 @@ export function validateStoreEnvelope(root: unknown): { version: number; records
   if (Array.isArray(root)) return { version: 1, records: root, series: [] };
   if (isPlainObject(root) && Array.isArray(root.matches)) {
     const version = root.version;
-    if (!Number.isSafeInteger(version) || (version as number) < 2 || (version as number) > 6) throw new Error(`Unsupported store version ${String(version)}.`);
+    if (!Number.isSafeInteger(version) || (version as number) < 2 || (version as number) > 7) throw new Error(`Unsupported store version ${String(version)}.`);
     if ((version as number) >= 5 && !Array.isArray(root.series)) throw new Error("Series array is missing.");
     return { version: version as number, records: root.matches, series: (version as number) >= 5 ? root.series as unknown[] : [] };
   }

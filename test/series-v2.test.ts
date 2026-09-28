@@ -107,7 +107,7 @@ test("store version 5 backs up and loads historical battle-series-1 without rewr
     assert.equal(loaded.migrated, true);
     assert.ok(loaded.backupPath && existsSync(loaded.backupPath));
     assert.deepEqual(loaded.series[0], original);
-    assert.equal((JSON.parse(readFileSync(path, "utf8")) as { version: number }).version, 6);
+    assert.equal((JSON.parse(readFileSync(path, "utf8")) as { version: number }).version, 7);
     assert.equal(seriesExport(loaded.series[0], []).schemaVersion, "battle-series-export-1");
   } finally { rmSync(folder, { recursive: true, force: true }); }
 });
@@ -154,7 +154,7 @@ test("v2 fixture series completes Chess, Hangman and Battleship with private fle
     const reloaded = store.load();
     assert.equal(reloaded.series[0].version, "battle-series-2");
     assert.ok(reloaded.matches.every((match) => projectRecord(match).comparison?.eligible));
-    assert.equal(projectRecord(reloaded.matches[0]).environment?.adapterVersion, "agent-battle/adapter-v5");
+    assert.equal(projectRecord(reloaded.matches[0]).environment?.adapterVersion, "agent-battle/adapter-v6");
     const summary = publicSeries(series, matches);
     assert.ok(summary.aggregate["battleship:0"].scored === 1);
     assert.ok(summary.aggregate["overall:0"].normalizedPerformance !== null);

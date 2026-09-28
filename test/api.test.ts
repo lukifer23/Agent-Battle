@@ -268,7 +268,7 @@ test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess c
     }
     const raw = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
     assert.equal(raw.matches[0].gameState.word, word);
-    assert.equal(raw.version, 6);
+    assert.equal(raw.version, 7);
     for (const event of raw.matches[0].events) {
       if (JSON.stringify(event).includes(word)) assert.equal(event.payload?.publicState?.terminal, true);
     }
@@ -399,4 +399,38 @@ test("new Hangman uses distinct CLI subprocesses and shares opponent effects thr
     assert.equal(JSON.stringify(done).includes("responseExcerpt"),false);
     assert.deepEqual(done.history.map((t: {provider:string})=>t.provider),["codex","claude"]);
   } finally { await stopServer(child); rmSync(folder,{recursive:true,force:true}); }
+});
+
+test("research API registers a frozen pilot without invoking providers and keeps its root private", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-research-api-"));
+  const { mkdirSync, chmodSync } = await import("node:fs");
+  const bin = join(folder, "bin"); mkdirSync(bin);
+  const fixture = join(bin, "claude");
+  writeFileSync(fixture, `#!${process.execPath}\nif (process.argv.includes('--version')) { console.log('claude fixture'); process.exit(0); } process.exit(99);`); chmodSync(fixture, 0o700);
+  const port = 5800 + Math.floor(Math.random() * 150);
+  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], { cwd: projectRoot,
+    env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    await waitForListening(child, port);
+    const preset = await probe(port, { path: "/api/research/presets" });
+    assert.equal(preset.status, 200);
+    const created = await probe(port, { path: "/api/series", method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ researchPreset: "hangman-pilot", agents: [{ provider: "claude", model: "fixture-a" }, { provider: "claude", model: "fixture-a" }] }) });
+    assert.equal(created.status, 201, created.body);
+    const { series } = JSON.parse(created.body);
+    assert.equal(series.status, "ready");
+    assert.equal(series.slots.length, 144);
+    assert.equal(series.researchPlan.comparison.kind, "same-model-control");
+    const raw = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
+    assert.equal(raw.matches.length, 0);
+    assert.equal(created.body.includes(raw.series[0].masterSeed), false);
+    const analysis = await probe(port, { path: `/api/series/${series.id}/analysis` });
+    assert.equal(analysis.status, 200);
+    const parsed = JSON.parse(analysis.body);
+    assert.equal(parsed.primary.estimate, null);
+    assert.equal(parsed.primary.missingBlocks, 24);
+    const exported = await probe(port, { path: `/api/series/${series.id}/export` });
+    assert.equal(exported.body.includes(raw.series[0].masterSeed), false);
+    assert.equal(JSON.parse(exported.body).schemaVersion, "battle-series-export-3");
+  } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
 });

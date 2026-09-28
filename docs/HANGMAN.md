@@ -2,7 +2,7 @@
 
 ## Current rules: shared-board-2
 
-New matches are direct contests on **one shared board**. Players alternate after every accepted action. Both observe the same pattern, guessed letters, shared miss count, both scores, and action outcomes with player identity. A letter guessed by either player is unavailable to both thereafter.
+By default, new matches are direct contests on **one shared board**. The setup also offers independent lanes; research studies can compare both versions. Players alternate after every accepted action. Both observe the same pattern, guessed letters, shared miss count, both scores, and action outcomes with player identity. A letter guessed by either player is unavailable to both thereafter.
 
 - Correct letter: +1 point for each newly revealed position (all repeated occurrences count).
 - Incorrect letter: −1 point and one shared miss.
@@ -17,9 +17,9 @@ The corpus and deterministic selection below are reused. CLI requests still pass
 
 This game is seat-sensitive: strict series require even repetitions, swap roles, and use the same seeded word for each role-swapped pair. Casual one-word results are not broad model rankings.
 
-## Saved legacy matches
+## Independent lanes and saved compatibility
 
-Records with `independent-lanes-1` retain the following original rules, renderer, validation, replay and resume behavior. They are never reinterpreted as shared-board games. Standings do not combine the two versions. New casual matches default to `shared-board-2`.
+`independent-lanes-1` is available for new matches and as the lexical-inference control in research v3. Saved records retain the following original rules, renderer, validation, replay and resume behavior. They are never reinterpreted as shared-board games. Standings do not combine the two versions. New casual matches default to `shared-board-2`.
 
 Hangman is a two-agent competition with independent lanes. Both agents receive the same word. Player 1 acts first; the controller alternates unfinished lanes and skips a completed lane. The match completes only when both lanes have finished.
 
@@ -54,7 +54,7 @@ A private 32-byte random seed drives `hmac-sha256-counter-v1`. HMAC-SHA256 block
 
 Canonical persistence contains the word, seed, selected index, package/filter/generator versions, corpus hash, version-specific state, and action/adjudication history. Shared-board state contains one pattern, misses and guessed-letter set plus both player scores; legacy state contains two lanes. Load validates provenance and replays accepted actions and forfeits with the saved ruleset. Derived metrics and results must agree with replay. The corpus is a server dependency and is not bundled into the browser.
 
-## Legacy reveal boundary: independent-lanes-1
+## Independent-lane reveal boundary
 
 - Agent observations contain only their own masked pattern, guessed letters, misses, accepted action count, own history, legal letter actions, solution schema, and request timeout.
 - Player counters are lane-local. Opponent progress, guesses, masks, and miss counts are omitted.
@@ -70,12 +70,12 @@ This is a payload boundary. It does not establish operating-system isolation aga
 
 1. Select **Hangman**, then **New match** when reviewing a completed contest.
 2. Choose a CLI and model for each player. Dropdowns use IDs from saved matches; **Custom model ID** accepts an exact supported ID. Two different explicit IDs are required. CLI installation does not prove authentication or model availability.
-3. Set thinking effort if desired. **Game default** uses the casual defaults described above. Expand **Time and resource limits** to change the budgets.
+3. Choose **Shared board** or **Independent lanes** under Hangman rules. Set thinking effort if desired. **Game default** uses the casual defaults described above. Expand **Time and resource limits** to change the budgets.
 4. Use **Start Hangman match** below the choices. Each turn launches a fresh subprocess in a separate temporary directory, without resuming a shared agent conversation.
-5. Follow the shared board, active player and points. Pause, resume and stop are above the board. A completed game shows the winner, score and word once; request details and match logs remain expandable.
+5. Follow the shared board and points, or the two independent lanes, for the selected ruleset. Pause, resume and stop are above the board. A completed game shows the winner, score and word once; request details and match logs remain expandable.
 6. **Review actions** opens replay navigation. Earlier frames keep the word masked. **New match** preserves the competitors for review before starting a fresh word; **Back to match** returns to the current position.
 
-The light theme is scoped to Hangman. Legacy records retain their lane renderer. Model names are readable display labels; canonical requested and reported IDs remain in match details and exports. Missing or mismatched reported identities leave gameplay recorded but unranked. In the tested Codex CLI 0.157.1 JSONL stream, the exact resolved model was not reported, so it is never inferred from the requested model flag.
+The light theme is scoped to Hangman. Independent-lane matches use the lane renderer, including saved historical records. Model names are readable display labels; canonical requested and reported IDs remain in match details and exports. Missing or mismatched reported identities leave gameplay recorded but unranked. In the tested Codex CLI 0.157.1 JSONL stream, the exact resolved model was not reported, so it is never inferred from the requested model flag.
 
 ### Verification boundary
 
@@ -84,3 +84,7 @@ On 2026-09-28, a real Claude Code / Codex game completed through the redesigned 
 ## Word-list license
 
 The corpus package is MIT licensed. Its license and notices are supplied in the dependency distribution. See [the upstream project](https://github.com/nkzw-tech/safe-word-list). Do not remove third-party copyright notices when redistributing dependencies.
+
+## Research interpretation
+
+Independent lanes probe lexical inference without opponent discoveries. Shared-board play adds information externalities and a different reward structure. The registered 144-match pilot pairs 24 distinct words across these conditions and balances seats, using first attempts and block-level uncertainty. It does not isolate strategic ability from scoring or establish generalization beyond a familiar public corpus. Same-model controls are allowed only in explicitly labeled research series. See [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md) for the design and zero-provider baseline.

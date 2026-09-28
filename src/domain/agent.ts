@@ -1,6 +1,7 @@
 import type { AgentAttempt, GameAction, GameObservation, PlayerConfig } from "../shared.js";
 
 export interface AgentReply {
+  execution?: AgentAttempt["execution"];
   action: GameAction;
   latencyMs: number;
   responseExcerpt: string;
@@ -54,6 +55,7 @@ export class AgentProtocolError extends Error {
     readonly usage: AgentAttempt["usage"] = { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" },
     readonly resolvedModel?: string,
     readonly sessionId?: string,
+    readonly execution?: AgentAttempt["execution"],
   ) {
     super(message);
     this.name = "AgentProtocolError";
@@ -67,7 +69,7 @@ export class AgentExecutionError extends Error {
     readonly responseExcerpt = "",
     readonly stderrExcerpt = "",
     readonly latencyMs?: number,
-    readonly evidence?: Pick<AgentReply, "usage" | "toolCalls" | "resolvedModel" | "sessionId">,
+    readonly evidence?: Pick<AgentReply, "usage" | "toolCalls" | "resolvedModel" | "sessionId" | "execution">,
   ) {
     super(message);
     this.name = "AgentExecutionError";

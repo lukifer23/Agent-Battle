@@ -5,6 +5,18 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+### Registered research foundation (2026-09-28)
+
+- Add `battle-series-3` frozen condition declarations, deterministic matched challenge blocks, seat balancing, plan/root commitments and labeled same-model controls.
+- Make both Hangman rulesets selectable and add the 24-word, 144-match construct-sensitivity pilot. Registration saves a study for review before provider execution.
+- Add first-attempt paired analysis, block-bootstrap intervals and all-planned-slot missing-outcome bounds. Retain infrastructure reruns separately; do not pool research conditions into an intelligence score.
+- Add adapter v6 execution metadata, an environment allowlist, conservative stream/model/tool checks, and fresh-session validation across requests and matches. Historical evidence remains unchanged.
+- Add store 7 research assignment validation and migration compatibility, research API/UI/export support, and offline preparation/letter-policy control commands without new runtime dependencies.
+- Verify 154 tests, lint, typecheck, build, and the standard harness benchmark locally. Complete 144 offline control games with zero provider calls. No live model pilot, adaptation or multi-party implementation is claimed.
+- Synchronize public documentation around implemented research behavior, historical acceptance and future research gates.
+
+### Earlier changes
+
 - Clear connection warnings automatically after reconnecting; keep new-match launch disabled while disconnected and preserve genuine command errors.
 
 - Keep new-match setup above the board in every game and preserve the user's model choices when reopening it; show model-named Chess and Battleship winners.

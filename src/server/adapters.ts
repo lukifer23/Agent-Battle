@@ -1,3 +1,4 @@
+import { inspectExecutionStream } from "./executionEvidence.js";
 import { actionOutputSchema } from "./actionOutputSchema.js";
 import type { ChildProcess } from "node:child_process";
 import { accessSync, constants, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -81,8 +82,11 @@ export async function detectProviders(): Promise<ProviderInfo[]> {
 }
 
 function safeEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" };
-  delete env.NODE_OPTIONS;
+  const allowed = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
+    "BATTLE_CODEX_ARGS", "BATTLE_TEST_CONFIG", "BATTLE_TEST_ARGS"]);
+  const env: NodeJS.ProcessEnv = { NO_COLOR: "1", FORCE_COLOR: "0" };
+  for (const key of allowed) if (process.env[key] !== undefined) env[key] = process.env[key];
   return env;
 }
 
@@ -286,10 +290,14 @@ abstract class CliAgentAdapter implements AgentAdapter {
       });
       const responseText = invocation.readResponse(response.stdout);
       const interpreted = invocation.interpret({ stdout: response.stdout, responseText });
+      const execution = inspectExecutionStream(this.config, response.stdout, this.restrictions ?? "unknown");
+      // Never let the last identity observation hide a provider model switch.
+      if (execution.modelIds.length > 1) interpreted.resolvedModel = undefined;
+      if (!execution.streamComplete || execution.unknownEvents) interpreted.toolCalls = interpreted.toolCalls && interpreted.toolCalls > 0 ? interpreted.toolCalls : null;
       if (interpreted.providerError || response.exitCode !== undefined && response.exitCode !== 0) {
         const message = interpreted.providerError ?? `CLI exited with ${response.exitCode}. ${excerpt(response.stderr, 500)}`.trim();
         throw new AgentExecutionError(message, false, excerpt(message), excerpt(response.stderr), response.latencyMs, {
-          usage: interpreted.usage, toolCalls: interpreted.toolCalls, resolvedModel: interpreted.resolvedModel, sessionId: interpreted.sessionId,
+          usage: interpreted.usage, toolCalls: interpreted.toolCalls, resolvedModel: interpreted.resolvedModel, sessionId: interpreted.sessionId, execution,
         });
       }
       if (!interpreted.action) {
@@ -302,10 +310,12 @@ abstract class CliAgentAdapter implements AgentAdapter {
           interpreted.usage,
           interpreted.resolvedModel,
           interpreted.sessionId,
+          execution,
         );
       }
       return {
         action: interpreted.action,
+        execution,
         latencyMs: response.latencyMs,
         responseExcerpt: excerpt(JSON.stringify(interpreted.action)),
         stderrExcerpt: excerpt(response.stderr),

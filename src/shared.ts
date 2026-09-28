@@ -114,7 +114,21 @@ export interface AgentUsage {
   coverage: "none" | "partial" | "full";
 }
 
+export interface ExecutionEvidence {
+  version: "execution-evidence-1";
+  profileId: string;
+  profileHash: string;
+  requestedReasoning: string;
+  /** CLI acceptance does not prove the backend used the requested setting. */
+  effectiveReasoning: null;
+  streamComplete: boolean;
+  unknownEvents: boolean;
+  modelIds: string[];
+  toolInventory: string[] | null;
+}
+
 export interface AgentAttempt {
+  execution?: ExecutionEvidence;
   invocationId?: string;
   deadlineAt?: string;
   attempt: number;
@@ -214,7 +228,7 @@ export interface MatchRecord {
   runGeneration?: number;
   /** Durable in-flight turn so a resume keeps rejection feedback and retry budget. */
   pendingTurn?: PendingTurn;
-  series?: { id: string; slotId: string; attempt: number };
+  series?: { id: string; slotId: string; attempt: number; conditionId?: string; blockId?: string; planHash?: string };
 }
 
 export interface SeriesSlot {
@@ -227,6 +241,10 @@ export interface SeriesSlot {
   roles: Record<string, 0 | 1>;
   matchIds: string[];
   skipped: boolean;
+  gameVersion?: string;
+  conditionId?: string;
+  blockId?: string;
+  replicate?: number;
 }
 
 export interface SeriesPlanEntry {
@@ -240,10 +258,42 @@ export interface SeriesPlanEntry {
 
 export interface SeriesPlan { mode: "exploratory" | "strict"; games: SeriesPlanEntry[] }
 
+/** Research conditions do not change the historical v1/v2 tournament contract. */
+export interface ResearchCondition {
+  id: string;
+  label: string;
+  gameId: string;
+  gameVersion: string;
+  /** Shared only by conditions whose generators accept the same challenge seed. */
+  challengeGroup: string;
+  rolePolicy: "paired" | "alternating";
+}
+
+export interface ResearchPlan {
+  version: "research-plan-1";
+  title: string;
+  question: string;
+  primaryEndpoint: string;
+  practicalEffect: number;
+  analysisVersion: "paired-block-bootstrap-1";
+  conditions: ResearchCondition[];
+  blocks: number;
+  replicates: number;
+  schedule: "seeded-block-interleaved";
+  comparison: { kind: "system-comparison" | "same-model-control"; conditions: [string, string] };
+  /** Infrastructure reruns are bounded and every original attempt remains observable. */
+  maxSlotRetries: number;
+  exclusionPolicy: "report-all-planned-slots";
+  stoppingRule: "fixed-sample";
+}
+
 export interface SeriesRecord {
   id: string;
-  version: "battle-series-1" | "battle-series-2";
+  version: "battle-series-1" | "battle-series-2" | "battle-series-3";
   plan?: SeriesPlan;
+  researchPlan?: ResearchPlan;
+  planHash?: string;
+  seedCommitment?: string;
   createdAt: string;
   updatedAt: string;
   status: "ready" | "running" | "paused" | "completed" | "stopped";

@@ -1,10 +1,11 @@
-import { distinctExplicitModels, type MatchRecord } from "../shared.js";
+import { researchExecutionReasons } from "./executionEvidence.js";
+import { explicitModelId, distinctExplicitModels, type MatchRecord } from "../shared.js";
 
 /** Recomputed from durable evidence, never from a displayed winner or a requested model name. */
 export function comparisonEligibility(match: MatchRecord): { eligible: boolean; reasons: string[] } {
   const reasons: string[] = [];
   if (!match.result || !["finished", "forfeit"].includes(match.status)) reasons.push("No completed game result.");
-  if (!match.players || !distinctExplicitModels(match.players[0].agent, match.players[1].agent)) reasons.push("Two distinct explicit models are required.");
+  if (!match.players || !(match.series?.conditionId && match.series.planHash ? match.players.every((p) => explicitModelId(p.agent.model)) : distinctExplicitModels(match.players[0].agent, match.players[1].agent))) reasons.push("Two distinct explicit models are required.");
   const sessions = new Map<string, string>();
   for (const player of match.players ?? []) {
     const attempts = (match.history ?? []).filter((turn) => turn.playerId === player.id).flatMap((turn) => turn.attempts).filter((attempt) => attempt.phase !== "initialization");
@@ -12,9 +13,13 @@ export function comparisonEligibility(match: MatchRecord): { eligible: boolean; 
     if (!attempts.length) reasons.push(`${player.label}: no model response was recorded.`);
     if (attempts.some((attempt) => attempt.resolvedModel !== player.agent.model)) reasons.push(`${player.label}: model identity is missing or mismatched on a request.`);
     if (attempts.some((attempt) => attempt.toolCalls !== 0)) reasons.push(`${player.label}: external tool activity is unknown or nonzero.`);
+    for (const attempt of attempts) {
+      if (match.series?.conditionId && !attempt.sessionId) reasons.push(`${player.label}: no provider session identity.`);
+      if (match.series?.conditionId) reasons.push(...researchExecutionReasons(attempt.execution, player.agent.model).map((reason) => `${player.label}: ${reason}`));
+    }
     for (const attempt of attempts) if (attempt.sessionId) {
       const owner = sessions.get(attempt.sessionId);
-      if (owner && owner !== player.id) reasons.push("The two players reported a shared provider session.");
+      if (owner && (owner !== player.id || match.series?.conditionId)) reasons.push("Provider session identity was reused across isolated requests.");
       sessions.set(attempt.sessionId, player.id);
     }
   }

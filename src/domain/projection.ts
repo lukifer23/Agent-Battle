@@ -5,6 +5,7 @@ import type { AgentAttempt, MatchRecord, PendingTurn, TurnTelemetry, PublicMatch
 function projectAttempt(attempt: AgentAttempt): AgentAttempt {
   return {
     attempt: attempt.attempt,
+    ...(attempt.execution ? { execution: structuredClone(attempt.execution) } : {}),
     ...(attempt.invocationId ? { invocationId: attempt.invocationId } : {}),
     ...(attempt.deadlineAt ? { deadlineAt: attempt.deadlineAt } : {}),
     startedAt: attempt.startedAt,

@@ -1,3 +1,5 @@
+import { makeResearchSeries, researchMatchBudgets } from "./researchPlan.js";
+import { analyzeResearchSeries } from "./researchAnalysis.js";
 import { comparisonEligibility } from "../domain/comparison.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import type { MatchController } from "../domain/MatchController.js";
@@ -69,7 +71,7 @@ export function publicSeries(series: SeriesRecord, matches: MatchRecord[], inclu
     const match = linked.at(-1);
     const status: PublicSeriesSlot["status"] = slot.skipped ? "skipped" : !match ? "pending" : comparisonEligibility(match).eligible ? "scored" : terminal.has(match.status) ? "unscored" : "running";
     if (match) for (const [agentIndex] of series.agents.entries()) {
-      const key = `${slot.gameId}:${agentIndex}`;
+      const key = `${slot.conditionId ?? slot.gameId}:${agentIndex}`;
       const row = aggregate[key] ?? { wins: 0, draws: 0, losses: 0, unscored: 0, scored: 0, points: 0, possiblePoints: 0, normalizedPerformance: null, roleCounts: {}, requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, latencyMs: 0,
         coverage: { inputTokens: { reported: 0, total: 0 }, outputTokens: { reported: 0, total: 0 }, costUsd: { reported: 0, total: 0 }, latencyMs: { reported: 0, total: 0 } } };
       const role = Object.entries(slot.roles).find(([, index]) => index === agentIndex)?.[0];
@@ -101,7 +103,7 @@ export function publicSeries(series: SeriesRecord, matches: MatchRecord[], inclu
       row.unscored += linked.filter((trial) => terminal.has(trial.status) && !comparisonEligibility(trial).eligible).length;
       aggregate[key] = row;
     }
-    return { id: slot.id, ordinal: slot.ordinal, gameId: slot.gameId, challengeId: slot.challengeId, roles: structuredClone(slot.roles), matchIds: [...slot.matchIds], skipped: slot.skipped,
+    return { id: slot.id, ordinal: slot.ordinal, gameId: slot.gameId, ...(slot.gameVersion ? { gameVersion: slot.gameVersion } : {}), ...(slot.conditionId ? { conditionId: slot.conditionId, blockId: slot.blockId, replicate: slot.replicate } : {}), challengeId: slot.challengeId, roles: structuredClone(slot.roles), matchIds: [...slot.matchIds], skipped: slot.skipped,
       ...(includeProvenance && series.status === "completed" && slot.challengeSeed ? { challengeSeed: slot.challengeSeed } : {}), status,
       ...(status === "unscored" && match ? { unscoredReasons: comparisonEligibility(match).reasons } : {}),
       ...(status === "scored" && match?.result ? { result: match.result } : {}) };
@@ -117,7 +119,7 @@ export function publicSeries(series: SeriesRecord, matches: MatchRecord[], inclu
       wins: rows.reduce((sum, row) => sum + row.wins, 0), draws: rows.reduce((sum, row) => sum + row.draws, 0),
       losses: rows.reduce((sum, row) => sum + row.losses, 0), unscored: rows.reduce((sum, row) => sum + row.unscored, 0),
       scored: rows.reduce((sum, row) => sum + row.scored, 0), points: rows.reduce((sum, row) => sum + row.points, 0), possiblePoints: rows.reduce((sum, row) => sum + row.possiblePoints, 0),
-      normalizedPerformance: scoredRows.length && slots.every((slot) => slot.status === "scored") ? scoredRows.reduce((sum, [key, row]) => sum + row.normalizedPerformance! * weightOf(key), 0) / scoredRows.reduce((sum, [key]) => sum + weightOf(key), 0) : null,
+      normalizedPerformance: series.version !== "battle-series-3" && scoredRows.length && slots.every((slot) => slot.status === "scored") ? scoredRows.reduce((sum, [key, row]) => sum + row.normalizedPerformance! * weightOf(key), 0) / scoredRows.reduce((sum, [key]) => sum + weightOf(key), 0) : null,
       roleCounts: Object.fromEntries([...new Set(rows.flatMap((row) => Object.keys(row.roleCounts)))].map((role) => [role, rows.reduce((sum, row) => sum + (row.roleCounts[role] ?? 0), 0)])),
       requests: rows.reduce((sum, row) => sum + row.requests, 0), inputTokens: rows.reduce((sum, row) => sum + row.inputTokens, 0),
       outputTokens: rows.reduce((sum, row) => sum + row.outputTokens, 0), costUsd: rows.reduce((sum, row) => sum + row.costUsd, 0),
@@ -127,14 +129,15 @@ export function publicSeries(series: SeriesRecord, matches: MatchRecord[], inclu
       }])) as PublicSeries["aggregate"][string]["coverage"],
     };
   }
-  return { id: series.id, version: series.version, ...(series.plan ? { plan: series.plan } : {}), createdAt: series.createdAt, updatedAt: series.updatedAt, status: series.status, agents: series.agents, settings: series.settings, slots, aggregate,
+  return { id: series.id, version: series.version, ...(series.plan ? { plan: series.plan } : {}), ...(series.researchPlan ? { researchPlan: structuredClone(series.researchPlan), planHash: series.planHash, seedCommitment: series.seedCommitment } : {}), createdAt: series.createdAt, updatedAt: series.updatedAt, status: series.status, agents: series.agents, settings: series.settings, slots, aggregate,
     ...(series.error ? { error: series.error } : {}) };
 }
 
 export function seriesExport(series: SeriesRecord, matches: MatchRecord[]) {
   const includeProvenance = series.status === "completed";
-  return { schemaVersion: series.version === "battle-series-2" ? "battle-series-export-2" : "battle-series-export-1", series: publicSeries(series, matches, includeProvenance),
-    ...(includeProvenance && series.version === "battle-series-2" ? { reproducibility: { version: series.version, masterSeed: series.masterSeed, plan: series.plan, agents: series.agents, settings: series.settings } } : {}),
+  return { schemaVersion: series.version === "battle-series-3" ? "battle-series-export-3" : series.version === "battle-series-2" ? "battle-series-export-2" : "battle-series-export-1", series: publicSeries(series, matches, includeProvenance),
+    ...(series.researchPlan ? { analysis: analyzeResearchSeries(series, matches) } : {}),
+    ...(includeProvenance && series.version !== "battle-series-1" ? { reproducibility: { version: series.version, masterSeed: series.masterSeed, ...(series.plan ? { plan: series.plan } : {}), ...(series.researchPlan ? { researchPlan: series.researchPlan, planHash: series.planHash, seedCommitment: series.seedCommitment } : {}), agents: series.agents, settings: series.settings } } : {}),
     matches: series.slots.flatMap((slot) => slot.matchIds.map((id) => matches.find((match) => match.id === id)).filter((match): match is MatchRecord => Boolean(match)).map((match) => {
       const detail = projectRecord(match, match.events.length);
       const usage = Object.fromEntries(match.players.map((seat) => [seat.id, aggregateUsage([...match.history.filter((turn) => turn.playerId === seat.id).flatMap((turn) => turn.attempts), ...(match.pendingTurn?.playerId === seat.id ? match.pendingTurn.attempts : [])])]));
@@ -166,10 +169,11 @@ export class SeriesManager {
     update();
     try { this.save(); } catch (error) { Object.assign(record, previous); throw error; }
   }
-  create(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeconds: number, budgets: MatchBudgets, plan?: SeriesPlan, seed?: string): SeriesRecord {
+  create(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeconds: number, budgets: MatchBudgets, plan?: SeriesPlan, seed?: string, researchPlan?: unknown): SeriesRecord {
+    if (plan !== undefined && researchPlan !== undefined) throw new Error("Choose a tournament plan or a research plan, not both.");
     if (this.series.some((record) => ["ready", "running", "paused"].includes(record.status))) throw new Error("Finish or stop the current series first.");
     if (this.controller.active()) throw new Error("Stop or finish the current match before creating a series.");
-    const record = makeSeriesV2(agents, turnTimeoutSeconds, budgets, plan, seed);
+    const record = researchPlan !== undefined ? makeResearchSeries(agents, turnTimeoutSeconds, budgets, researchPlan, seed) : makeSeriesV2(agents, turnTimeoutSeconds, budgets, plan, seed);
     this.series.unshift(record);
     try { this.save(); } catch (error) { this.series.shift(); throw error; }
     return record;
@@ -199,6 +203,13 @@ export class SeriesManager {
     if (record.status !== "paused") throw new Error("Pause the series before retrying.");
     const slot = record.slots.find((candidate) => !candidate.skipped && !hasScoredResult(linkedMatch(candidate, this.controller.list())));
     if (!slot || !linkedMatch(slot, this.controller.list()) || !terminal.has(linkedMatch(slot, this.controller.list())!.status)) throw new Error("Current slot has no failed match to retry.");
+    if (record.researchPlan) {
+      const failed = linkedMatch(slot, this.controller.list())!;
+      const attempts = [...failed.history.flatMap((turn) => turn.attempts), ...(failed.pendingTurn?.attempts ?? [])];
+      if (slot.matchIds.length > record.researchPlan.maxSlotRetries) throw new Error("Registered retry limit reached; retain or skip the unscored slot.");
+      if (failed.status !== "error" || !attempts.some((attempt) => attempt.phase === "provider" && attempt.status === "error")
+        || attempts.some((attempt) => attempt.phase === "qualification")) throw new Error("Research retries require a recorded provider infrastructure error; qualification failures require a new study.");
+    }
     this.checkpoint(record, () => { record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString(); });
     this.retrySlots.add(slot.id);
     void this.pump(record);
@@ -237,8 +248,8 @@ export class SeriesManager {
         }
         const players = Object.fromEntries(Object.entries(slot.roles).map(([role, agentIndex]) => [role, record.agents[agentIndex]]));
         const requested = record.settings.budgets;
-        match = await this.controller.create({ gameId: slot.gameId, gameVersion: record.version === "battle-series-1" && slot.gameId === "hangman" ? "independent-lanes-1" : record.plan?.games.find((entry) => entry.gameId === slot.gameId)?.gameVersion, players, turnTimeoutSeconds: record.settings.turnTimeoutSeconds, challengeSeed: slot.challengeSeed,
-          series: { id: record.id, slotId: slot.id, attempt: slot.matchIds.length + 1 }, budgets: {
+        match = await this.controller.create({ gameId: slot.gameId, gameVersion: slot.gameVersion ?? (record.version === "battle-series-1" && slot.gameId === "hangman" ? "independent-lanes-1" : record.plan?.games.find((entry) => entry.gameId === slot.gameId)?.gameVersion), players, turnTimeoutSeconds: record.settings.turnTimeoutSeconds, challengeSeed: slot.challengeSeed,
+          series: { id: record.id, slotId: slot.id, attempt: slot.matchIds.length + 1, ...(slot.conditionId ? { conditionId: slot.conditionId, blockId: slot.blockId, planHash: record.planHash } : {}) }, budgets: record.researchPlan ? researchMatchBudgets(requested) : {
             maxPlies: requested.maxPlies, maxRequests: requested.maxRequests * 2 + 2, maxWallMinutes: requested.maxWallMinutes * 2 + 5,
             maxReportedCostUsd: requested.maxReportedCostUsd, maxRequestsPerPlayer: requested.maxRequests, maxActiveMinutesPerPlayer: requested.maxWallMinutes,
           } });

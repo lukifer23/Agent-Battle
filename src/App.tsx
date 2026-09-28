@@ -1,3 +1,4 @@
+import { ResearchSummary } from "./components/ResearchSummary.js";
 import { ExecutionEvidence } from "./components/ExecutionEvidence.js";
 import { modelChoices, modelDisplayName } from "./client/modelPresentation.js";
 import "./hangman.css";
@@ -10,7 +11,7 @@ import { aggregateUsage } from "./domain/usage.js";
 import { remainingMatchMs } from "./domain/matchTime.js";
 import { ArrowUpRight, BoardMark, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, FlipVertical, RefreshCw, Trophy } from "./components/icons.js";
 import { competitorId, competitorLabel, distinctExplicitModels, explicitModelId } from "./shared.js";
-import type { AppState, ChessSnapshot, MatchEvent, PublicMatchDetail, PublicSeries, Provider, SeriesPlan } from "./shared.js";
+import type { AppState, ChessSnapshot, MatchEvent, PublicMatchDetail, PublicSeries, Provider, SeriesPlan, ResearchPlan } from "./shared.js";
 
 const initialFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const pretty: Record<Provider, string> = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode" };
@@ -140,6 +141,7 @@ function App() {
   const [gameId, setGameId] = useState(() => loadView() === "series" ? "chess" : loadView());
   const [viewMode, setViewMode] = useState<string>(loadView);
   const [games, setGames] = useState<Array<{ id: string; label: string; version: string; playerIds: string[]; playerLabels: string[]; series?: { supportsSeededChallenges: boolean; recommendedRepetitions: number; seatSensitive: boolean } }>>([]);
+  const [hangmanVersion, setHangmanVersion] = useState("shared-board-2");
   const [maxPlies, setMaxPlies] = useState(250);
   const [maxRequests, setMaxRequests] = useState(500);
   const [timePreset, setTimePreset] = useState<number | "custom">(30);
@@ -158,7 +160,7 @@ function App() {
   const [pendingCommand, setPendingCommand] = useState<null | "create" | "start" | "pause" | "stop">(null);
   const [detailById, setDetailById] = useState<Map<string, PublicMatchDetail>>(() => new Map());
   const [seriesList, setSeriesList] = useState<PublicSeries[]>([]);
-  const [seriesPreset, setSeriesPreset] = useState<"quick" | "standard" | "custom">("quick");
+  const [seriesPreset, setSeriesPreset] = useState<"quick" | "standard" | "custom" | "research">("quick");
   const [seriesCounts, setSeriesCounts] = useState<Record<string, number>>({ chess: 2, hangman: 2, battleship: 2 });
   const [seriesMode, setSeriesMode] = useState<"exploratory" | "strict">("exploratory");
   const lastSnapshot = useRef<SnapshotCursor>({ version: -1, retired: new Set() });
@@ -332,7 +334,7 @@ function App() {
     for (const match of state?.recentMatches ?? []) {
       if (match.seriesId) continue;
       if (match.gameId !== (selectedMatch?.gameId ?? gameId)) continue;
-      if (match.gameId === "hangman" && match.gameVersion !== (selectedMatch?.gameVersion ?? chosenGame?.version)) continue;
+      if (match.gameId === "hangman" && match.gameVersion !== (selectedMatch?.gameVersion ?? hangmanVersion)) continue;
       if (!match.comparison?.eligible) continue;
       if (!match.result || !["finished", "forfeit"].includes(match.status)) continue;
       for (const player of match.players) {
@@ -350,7 +352,7 @@ function App() {
       }
     }
     return [...rows.values()].sort((a, b) => b.points - a.points || b.wins - a.wins);
-  }, [state, selectedMatch?.gameId, selectedMatch?.gameVersion, chosenGame?.version, gameId]);
+  }, [state, selectedMatch?.gameId, selectedMatch?.gameVersion, hangmanVersion, gameId]);
 
   const providers = state?.providers ?? [];
   const storageBlocked = state?.storage?.status === "write_failed";
@@ -363,15 +365,16 @@ function App() {
   const canStart = Boolean(!storageBlocked && selectedMatch && ["ready", "paused", "interrupted"].includes(selectedMatch.status) && state?.activeMatch?.id === selectedMatch.id);
   const canCreate = !storageBlocked && (!state?.activeMatch || !["ready", "running", "paused", "interrupted"].includes(state.activeMatch.status));
   const activeSeries = seriesList.find((series) => ["ready", "running", "paused"].includes(series.status));
+  const researchSetup = viewMode === "series" && seriesPreset === "research";
   const distinctModels = distinctExplicitModels({ model: whiteModel }, { model: blackModel });
   const startBlocker = connection !== "live" ? "Waiting for the game server to reconnect." : storageBlocked ? "Saved history is unavailable. Restore storage before starting."
     : !providersChecked || !chosenGame ? "Checking games and local agent CLIs…"
     : !installed(whiteProvider) || !installed(blackProvider) ? "Install the selected agent CLI and sign in to use it."
     : !canCreate && state?.activeMatch ? `A ${state.activeMatch.gameId} match is ${state.activeMatch.status}. Finish or stop it before starting another match.`
     : activeSeries ? `A battle series is ${activeSeries.status}. Finish or stop it before starting another match.`
-    : !distinctModels ? "Enter two explicit, different model IDs. Two CLI defaults or the same model in both seats cannot establish distinct competitors."
+    : !(researchSetup ? explicitModelId(whiteModel) && explicitModelId(blackModel) : distinctModels) ? "Enter two explicit, different model IDs. Two CLI defaults or the same model in both seats cannot establish distinct competitors."
     : null;
-  const seriesBlocker = startBlocker ?? (!distinctModels ? "Enter two different explicit model IDs." : whiteProvider === "codex" || blackProvider === "codex" ? "Codex tool isolation is not qualified for scored series trials. Choose a qualified no-tools CLI." : null);
+  const seriesBlocker = startBlocker ?? (researchSetup && (whiteProvider !== "claude" || blackProvider !== "claude") ? "This pilot requires Claude’s reported no-tools inventory. Other CLI profiles remain unqualified." : !researchSetup && !distinctModels ? "Enter two different explicit model IDs." : whiteProvider === "codex" || blackProvider === "codex" ? "Codex tool isolation is not qualified for scored series trials. Choose a qualified no-tools CLI." : null);
 
   useEffect(() => {
     if (!currentIsRunning) return;
@@ -391,6 +394,7 @@ function App() {
         method: "POST",
         body: JSON.stringify({
           gameId,
+          ...(gameId === "hangman" ? { gameVersion: hangmanVersion } : {}),
           players: {
             [chosenRoles[0]]: { provider: whiteProvider, model: whiteModel, reasoning: whiteReasoning },
             [chosenRoles[1]]: { provider: blackProvider, model: blackModel, reasoning: blackReasoning },
@@ -416,7 +420,7 @@ function App() {
     } finally { setPendingCommand(null); }
   };
 
-  const createSeries = async (rerun?: { masterSeed: string; plan: SeriesPlan; agents: PublicSeries["agents"]; settings: PublicSeries["settings"] }) => {
+  const createSeries = async (rerun?: { masterSeed: string; plan?: SeriesPlan; researchPlan?: ResearchPlan; agents: PublicSeries["agents"]; settings: PublicSeries["settings"] }) => {
     setPendingCommand("create"); setError("");
     try {
       const counts = seriesPreset === "quick" ? { chess: 2, hangman: 2, battleship: 2 } : seriesPreset === "standard" ? { chess: 6, hangman: 6, battleship: 6 } : seriesCounts;
@@ -426,17 +430,18 @@ function App() {
         agents: rerun?.agents ?? [{ provider: whiteProvider, model: whiteModel, reasoning: whiteReasoning }, { provider: blackProvider, model: blackModel, reasoning: blackReasoning }],
         turnTimeoutSeconds: rerun?.settings.turnTimeoutSeconds ?? timeoutSeconds,
         budgets: rerun?.settings.budgets ?? { maxPlies, maxRequests, maxWallMinutes, maxReportedCostUsd: maxCost.trim() ? Number(maxCost) : null },
-        plan, ...(rerun ? { masterSeed: rerun.masterSeed } : {}),
+        ...(rerun?.researchPlan ? { researchPlan: rerun.researchPlan } : researchSetup && !rerun ? { researchPreset: "hangman-pilot" } : { plan }), ...(rerun ? { masterSeed: rerun.masterSeed } : {}),
       }) });
-      await api(`/api/series/${created.series.id}/start`, { method: "POST", body: "{}" });
+      if (!created.series.researchPlan) await api(`/api/series/${created.series.id}/start`, { method: "POST", body: "{}" });
+      else setNotice("Study registered. Review the schedule and resource limits, then start it from the study card.");
       await refreshSeries(); await refresh();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not create the series."); }
     finally { setPendingCommand(null); }
   };
   const rerunSeries = async (id: string) => {
     try {
-      const exportData = await api<{ reproducibility?: { masterSeed: string; plan: SeriesPlan; agents: PublicSeries["agents"]; settings: PublicSeries["settings"] } }>(`/api/series/${id}/export`);
-      if (!exportData.reproducibility) throw new Error("This series has no completed v2 reproducibility manifest.");
+      const exportData = await api<{ reproducibility?: { masterSeed: string; plan?: SeriesPlan; researchPlan?: ResearchPlan; agents: PublicSeries["agents"]; settings: PublicSeries["settings"] } }>(`/api/series/${id}/export`);
+      if (!exportData.reproducibility) throw new Error("This series has no completed reproducibility manifest.");
       await createSeries(exportData.reproducibility);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not rerun the series."); }
   };
@@ -585,7 +590,7 @@ function App() {
         <div className={`arena-main ${selectedMatch && viewMode !== "series" ? "has-match" : ""}`}>
           <section className={`match-setup panel ${condenseSetup ? "is-condensed" : ""}`}>
             <div className="section-heading">
-              <div><span className="eyebrow">{viewMode === "series" ? "BENCHMARK SETUP" : "MATCH SETUP"}</span><h2>{viewMode === "series" ? "Choose series agents" : condenseSetup ? "Your matchup" : "Choose your competitors"}</h2></div>
+              <div><span className="eyebrow">{viewMode === "series" ? "EXPERIMENT SETUP" : "MATCH SETUP"}</span><h2>{viewMode === "series" ? "Choose series agents" : condenseSetup ? "Your matchup" : "Choose your competitors"}</h2></div>
               <span className="setup-tag">{viewMode === "series" ? "CONFIGURABLE TRIALS" : condenseSetup ? selectedMatch?.status.toUpperCase() : gameId.toUpperCase()}</span>
             </div>
             {newMatchOpen && selectedMatch && viewMode === "hangman" && <button className="link-button return-to-match" onClick={() => { setNewMatchOpen(false); setReplayPly(null); setReplayOpen(false); }}>Back to match</button>}
@@ -596,10 +601,11 @@ function App() {
               {terminalMatchSelected && !selectedMatch?.series && <button className="active-setup-new primary-button" onClick={() => { setGameId(selectedMatch!.gameId); setNewMatchOpen(true); }}>New match <ArrowUpRight className="inline-icon" /></button>}
             </div> : <>
               {viewMode === "series" && <div className="series-plan-setup"><div className="time-presets" role="group" aria-label="Series preset">
-                {(["quick", "standard", "custom"] as const).map((preset) => <button key={preset} type="button" aria-pressed={seriesPreset === preset} onClick={() => setSeriesPreset(preset)}>{preset.toUpperCase()}</button>)}
-              </div><p>{seriesPreset === "quick" ? "Exploratory · 2 Chess, 2 Hangman, 2 Battleship" : seriesPreset === "standard" ? "Strict · 6 Chess, 6 Hangman contests, 6 Battleship" : "Choose repetitions for each game. Strict mode requires even counts for seat-sensitive games."}</p>
+                {(["quick", "standard", "custom", "research"] as const).map((preset) => <button key={preset} type="button" aria-pressed={seriesPreset === preset} onClick={() => { setSeriesPreset(preset); if (preset === "research") { setMaxPlies(64); setMaxRequests(128); setTimePreset("custom"); setCustomMinutes(60); setTimeoutSeconds(120); setWhiteReasoning("medium"); setBlackReasoning("medium"); } }}>{preset.toUpperCase()}</button>)}
+              </div><p>{seriesPreset === "research" ? "Registered Hangman pilot · 24 matched words × 2 replicates · 144 matches across both rulesets. Estimated 1,500–5,000 requests. Register first; start after reviewing the saved declaration. Same-model controls are allowed. Cost limits use reported usage and cannot guarantee a billing ceiling." : seriesPreset === "quick" ? "Exploratory · 2 Chess, 2 Hangman, 2 Battleship" : seriesPreset === "standard" ? "Balanced schedule · 6 Chess, 6 Hangman contests, 6 Battleship. This sample does not establish a benchmark ranking." : "Choose repetitions for each game. Strict mode requires even counts for seat-sensitive games."}</p>
               {seriesPreset === "custom" && <><label className="timeout-setting">MODE <select value={seriesMode} onChange={(event) => setSeriesMode(event.target.value as "strict" | "exploratory")}><option value="exploratory">Exploratory</option><option value="strict">Strict</option></select></label><div className="series-counts">{games.filter((game) => game.series).map((game) => <label className="timeout-setting" key={game.id}>{game.label.toUpperCase()} <input type="number" min={0} max={100} value={seriesCounts[game.id] ?? 0} onChange={(event) => setSeriesCounts((current) => ({ ...current, [game.id]: Math.max(0, Math.min(100, Number(event.target.value) || 0)) }))} /></label>)}</div></>}
               </div>}
+              {viewMode === "hangman" && <label className="timeout-setting">Hangman rules <select value={hangmanVersion} onChange={(event) => setHangmanVersion(event.target.value)}><option value="shared-board-2">Shared board · strategic scoring</option><option value="independent-lanes-1">Independent lanes · lexical inference</option></select></label>}
               <div className="players-grid">
                 <PlayerPicker key={`white-${whiteProvider}`} title={(viewMode === "series" ? "AGENT A" : chosenGame?.playerLabels[0] ?? "White").toUpperCase()} color="white" provider={whiteProvider} model={whiteModel} reasoning={whiteReasoning} providers={providers} recentModels={[...new Set((state?.recentMatches ?? []).flatMap((match) => match.players).filter((player) => player.agent.provider === whiteProvider).map((player) => player.agent.model).filter(explicitModelId))]} loading={!providersChecked} requiredModel
                   onProvider={chooseWhiteProvider} onModel={setWhiteModel} onReasoning={setWhiteReasoning} />
@@ -636,7 +642,7 @@ function App() {
               </details>
               <div className="launch-strip">
                 <div><strong>{viewMode === "series" ? "Run a recorded battle series" : startBlocker ? "Complete setup to play" : "Ready when you are"}</strong><p>{viewMode === "series" ? "Choose the games and trial counts below. Each result, role, request, and model identity is recorded." : viewMode === "hangman" ? "A fresh word. Two separate agent sessions. Saved automatically." : viewMode === "battleship" ? "Each agent places a private fleet, then they alternate shots. Fleets reveal after the battle." : "The agents play from the standard starting position. Moves and results are saved automatically."}</p></div>
-                {viewMode === "series" ? <button className="primary-button launch-button" onClick={() => void createSeries()} disabled={pendingCommand !== null || seriesBlocker !== null}>{pendingCommand === "create" ? "STARTING…" : "START BATTLE SERIES"} <ArrowUpRight className="inline-icon" /></button>
+                {viewMode === "series" ? <button className="primary-button launch-button" onClick={() => void createSeries()} disabled={pendingCommand !== null || seriesBlocker !== null}>{pendingCommand === "create" ? (researchSetup ? "REGISTERING…" : "STARTING…") : (researchSetup ? "REGISTER PILOT" : "START BATTLE SERIES")} <ArrowUpRight className="inline-icon" /></button>
                   : <button className="primary-button launch-button" onClick={() => void startMatch()} disabled={busy || pendingCommand !== null || startBlocker !== null}>{pendingCommand === "start" ? "STARTING…" : `Start ${chosenGame?.label ?? viewMode} match`} <ArrowUpRight className="inline-icon" /></button>}
               </div>
               {(viewMode === "series" ? seriesBlocker : startBlocker) && <div className="launch-blocker" role="status"><strong>Cannot start yet.</strong> {viewMode === "series" ? seriesBlocker : startBlocker}{state?.activeMatch && !canCreate ? <button className="link-button" onClick={() => chooseView(state.activeMatch!.gameId as "chess" | "hangman", state.activeMatch!.id)}>Open active match</button> : activeSeries && viewMode !== "series" ? <button className="link-button" onClick={() => chooseView("series")}>Open battle series</button> : null}</div>}
@@ -654,16 +660,17 @@ function App() {
               {series.error && <p role="alert">{series.error}</p>}
               {(() => { const slot = series.slots.find((item) => item.status === "running" || item.status === "unscored") ?? series.slots.find((item) => item.status === "pending"); return slot ? <div className="series-current"><span>Slot {slot.ordinal + 1} · {slot.gameId} · {slot.status}</span>{slot.unscoredReasons?.map((reason) => <p key={reason}>{reason}</p>)}{slot.matchIds.length > 0 && <button className="quiet-button" onClick={() => chooseView(slot.gameId as "chess" | "hangman", slot.matchIds.at(-1))}>VIEW MATCH</button>}</div> : null; })()}
               <div className="series-actions">
-                {series.status === "paused" && !series.slots.some((slot) => slot.status === "unscored") && <button className="quiet-button" onClick={() => void seriesCommand(series.id, "start")}>RESUME</button>}
+                {["ready", "paused"].includes(series.status) && !series.slots.some((slot) => slot.status === "unscored") && <button className="quiet-button" onClick={() => void seriesCommand(series.id, "start")}>{series.status === "ready" ? "START REGISTERED STUDY" : "RESUME"}</button>}
                 {series.status === "paused" && series.slots.some((slot) => slot.status === "unscored") && <button className="quiet-button" onClick={() => void seriesCommand(series.id, "retry")}>RETRY SLOT</button>}
                 {series.status === "paused" && series.slots.some((slot) => slot.status === "unscored" || slot.status === "pending") && <button className="quiet-button" onClick={() => void seriesCommand(series.id, "skip")}>SKIP SLOT</button>}
                 {series.status === "running" && <button className="quiet-button" onClick={() => void seriesCommand(series.id, "pause")}>PAUSE SERIES</button>}
                 {["ready", "running", "paused"].includes(series.status) && <button className="stop-button" onClick={() => void seriesCommand(series.id, "stop")}>STOP SERIES</button>}
                 <button className="quiet-button" onClick={() => void downloadSeries(series.id)}><Download className="button-icon" /> JSON</button>
-                {series.status === "completed" && series.version === "battle-series-2" && <button className="quiet-button" onClick={() => void rerunSeries(series.id)} disabled={pendingCommand !== null}>RERUN EXACT CONFIGURATION</button>}
+                {series.status === "completed" && series.version !== "battle-series-1" && <button className="quiet-button" onClick={() => void rerunSeries(series.id)} disabled={pendingCommand !== null}>RERUN EXACT CONFIGURATION</button>}
               </div>
-              <details className="series-detail"><summary>Trial schedule</summary><div className="series-slots">{series.slots.map((slot) => <div key={slot.id}><span>{slot.ordinal + 1}. {slot.gameId} · {slot.challengeId.slice(0, 12)}</span><span>{slot.status}{slot.result ? ` · ${slot.result.notation}` : ""}{slot.matchIds.length > 0 && <button className="link-button" onClick={() => chooseView(slot.gameId as "chess" | "hangman", slot.matchIds.at(-1))}>Open</button>}</span></div>)}</div></details>
-              <details className="series-detail"><summary>Scores and usage</summary><div className="series-results"><p>Win = 1, draw = ½, loss = 0. Each game's performance is points / scored trials; overall is shown only when every planned trial is qualified and scored. Unscored trials remain visible.</p>{Object.entries(series.aggregate).map(([key, row]) => <p key={key}><b>{key.split(":")[0]} · {series.agents[Number(key.split(":")[1])]?.model}</b> {row.wins}W {row.draws}D {row.losses}L · {row.scored} scored{row.unscored ? ` · ${row.unscored} unscored` : ""} · {row.points}/{row.possiblePoints} points ({row.normalizedPerformance === null ? "n/a" : `${(row.normalizedPerformance * 100).toFixed(1)}%`}) · roles {Object.entries(row.roleCounts).map(([role, count]) => `${role}:${count}`).join(", ")} · {row.requests} requests · {row.inputTokens + row.outputTokens} reported tokens ({row.coverage.inputTokens.reported}/{row.coverage.inputTokens.total} input, {row.coverage.outputTokens.reported}/{row.coverage.outputTokens.total} output) · ${row.costUsd.toFixed(4)} reported ({row.coverage.costUsd.reported}/{row.coverage.costUsd.total} cost) · {(row.latencyMs / 1000).toFixed(1)}s ({row.coverage.latencyMs.reported}/{row.coverage.latencyMs.total} latency)</p>)}</div></details>
+              {series.researchPlan && <ResearchSummary series={series} />}
+              <details className="series-detail"><summary>Trial schedule</summary><div className="series-slots">{series.slots.map((slot) => <div key={slot.id}><span>{slot.ordinal + 1}. {slot.conditionId ?? slot.gameId} {slot.blockId ?? ""} · {slot.challengeId.slice(0, 12)}</span><span>{slot.status}{slot.result ? ` · ${slot.result.notation}` : ""}{slot.matchIds.length > 0 && <button className="link-button" onClick={() => chooseView(slot.gameId as "chess" | "hangman", slot.matchIds.at(-1))}>Open</button>}</span></div>)}</div></details>
+              <details className="series-detail"><summary>Scores and usage</summary><div className="series-results"><p>{series.researchPlan ? "Research conditions stay separate; there is no overall intelligence score. Operational totals below include reruns. Primary analysis above uses first attempts. " : ""}Win = 1, draw = ½, loss = 0. Each game's performance is points / scored trials; overall is shown only when every planned trial is qualified and scored. Unscored trials remain visible.</p>{Object.entries(series.aggregate).map(([key, row]) => <p key={key}><b>{key.split(":")[0]} · {series.agents[Number(key.split(":")[1])]?.model}</b> {row.wins}W {row.draws}D {row.losses}L · {row.scored} scored{row.unscored ? ` · ${row.unscored} unscored` : ""} · {row.points}/{row.possiblePoints} points ({row.normalizedPerformance === null ? "n/a" : `${(row.normalizedPerformance * 100).toFixed(1)}%`}) · roles {Object.entries(row.roleCounts).map(([role, count]) => `${role}:${count}`).join(", ")} · {row.requests} requests · {row.inputTokens + row.outputTokens} reported tokens ({row.coverage.inputTokens.reported}/{row.coverage.inputTokens.total} input, {row.coverage.outputTokens.reported}/{row.coverage.outputTokens.total} output) · ${row.costUsd.toFixed(4)} reported ({row.coverage.costUsd.reported}/{row.coverage.costUsd.total} cost) · {(row.latencyMs / 1000).toFixed(1)}s ({row.coverage.latencyMs.reported}/{row.coverage.latencyMs.total} latency)</p>)}</div></details>
             </div>)}
           </section>}
 

@@ -72,7 +72,7 @@ test("fixture agents complete ten durable slots with event-time Hangman masking 
     const exported = seriesExport(series, matches);
     assert.equal(exported.matches.length, 10);
     assert.equal(exported.series.slots[5].challengeSeed, series.slots[5].challengeSeed);
-    assert.equal((JSON.parse(readFileSync(join(folder, "matches.json"), "utf8")) as { version: number }).version, 6);
+    assert.equal((JSON.parse(readFileSync(join(folder, "matches.json"), "utf8")) as { version: number }).version, 7);
   } finally { await controller.shutdown(); rmSync(folder, { recursive: true, force: true }); }
 });
 

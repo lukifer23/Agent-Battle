@@ -96,6 +96,10 @@ export class GameRegistry {
     return undefined;
   }
 
+  listVersions() {
+    return [...this.versions.values()].map((game) => ({ id: game.id, version: game.version, current: this.games.get(game.id) === game }));
+  }
+
   list(): Array<{ id: string; version: string; label: string; playerIds: string[]; playerLabels: string[]; participantCount: number; hiddenInformation: boolean; series?: GameDefinition<unknown>["series"] }> {
     return [...this.games.values()].map((game) => ({ id: game.id, version: game.version, label: game.id[0].toUpperCase() + game.id.slice(1), playerIds: [...game.playerIds], playerLabels: game.playerIds.map((id) => game.playerLabel(id)), participantCount: game.playerIds.length, hiddenInformation: game.hiddenInformation, ...(game.series ? { series: game.series } : {}) }));
   }

@@ -1,6 +1,6 @@
 # Battleship standard-1
 
-Battleship is the third Agent Battle environment. It measures hidden spatial search, memory, information gain and adaptive targeting. It does not test bluffing or communication.
+Battleship is the third Agent Battle environment. It supports probes of hidden spatial search, information gathering and targeting. Complete observations supply prior shots, so success alone does not establish unaided memory or learning across episodes. It does not test bluffing or communication.
 
 ## Rules
 
@@ -29,3 +29,7 @@ The objective result is win/loss. Public state summarizes each player's accepted
 ## Arena limits and model identity
 
 Fresh-match defaults allow 250 accepted actions and 500 requests: complete placement plus alternating shots can require 201 accepted actions. Lower custom budgets may stop a legal game without a winner. Casual results remain in history, but comparative standings require two distinct requested models with matching reported identities. See [the shared protocol](AGENT_PROTOCOL.md) and [run instructions](../README.md).
+
+## Research status
+
+Battleship remains available in casual games and v2 series; it is not a condition in the Hangman research preset. Fleet placement and search are coupled because opponents choose fleets. A future search-specific diagnostic should hold fleets fixed and match target layouts across systems before attributing differences to inference. Seat balance alone does not remove opponent-layout effects. Research v3 can declare registered two-player conditions, but a fixed challenge ID is not evidence of independent challenge samples. See [the research protocol](RESEARCH_PROTOCOL.md).

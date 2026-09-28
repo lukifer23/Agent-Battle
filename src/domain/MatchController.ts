@@ -1,3 +1,4 @@
+import { researchExecutionReasons } from "./executionEvidence.js";
 import { randomUUID } from "node:crypto";
 import { competitorId } from "../shared.js";
 import type { AgentAdapter, AgentRegistry } from "./agent.js";
@@ -44,13 +45,13 @@ export interface CreateMatchRequest {
   turnTimeoutSeconds: number;
   budgets?: Partial<MatchBudgets>;
   challengeSeed?: string;
-  series?: { id: string; slotId: string; attempt: number };
+  series?: MatchRecord["series"];
 }
 
 // Battleship can require 201 accepted actions (two placements plus 199 shots).
 // Leave room for one correction per action in the default request budget.
 const DEFAULT_BUDGETS: MatchBudgets = { maxPlies: 250, maxRequests: 500, maxWallMinutes: 30, maxReportedCostUsd: null };
-const ADAPTER_VERSION = "agent-battle/adapter-v5";
+const ADAPTER_VERSION = "agent-battle/adapter-v6";
 
 function clampBudget(value: unknown, fallback: number, maximum: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
@@ -536,16 +537,22 @@ export class MatchController {
           }
 
           const evidence = reply ?? (failure instanceof AgentProtocolError ? failure : failure instanceof AgentExecutionError && failure.evidence ? { ...failure, ...failure.evidence } : undefined);
-          const qualificationFailed = Boolean(match.series && (evidence || failure instanceof AgentExecutionError && failure.timedOut) && (!evidence?.resolvedModel || evidence.resolvedModel !== seat.agent.model || evidence.toolCalls !== 0));
+          const researchReasons = match.series?.conditionId ? researchExecutionReasons(evidence?.execution, seat.agent.model) : [];
+          if (match.series?.conditionId) {
+            if (!evidence?.sessionId) researchReasons.push("Missing provider session identity.");
+            else if (this.records.some((record) => [...record.history.flatMap((turn) => turn.attempts), ...(record.pendingTurn?.attempts ?? [])]
+              .some((attempt) => attempt.sessionId === evidence.sessionId))) researchReasons.push("Provider session identity was reused across requests.");
+          }
+          const qualificationFailed = Boolean(match.series && (evidence || failure instanceof AgentExecutionError && failure.timedOut) && (!evidence?.resolvedModel || evidence.resolvedModel !== seat.agent.model || evidence.toolCalls !== 0 || researchReasons.length > 0));
           if (qualificationFailed) {
-            failure = new AgentExecutionError(`Series model or tool qualification failed for ${seat.label}: requested ${seat.agent.model}, reported ${evidence?.resolvedModel ?? "unknown"}, tool calls ${evidence?.toolCalls ?? "unknown"}.`);
+            failure = new AgentExecutionError(`Series model or tool qualification failed for ${seat.label}: requested ${seat.agent.model}, reported ${evidence?.resolvedModel ?? "unknown"}, tool calls ${evidence?.toolCalls ?? "unknown"}. ${researchReasons.join(" ")}`.trim());
           } else if (evidence?.resolvedModel) seat.agent.resolvedModel = evidence.resolvedModel;
 
           if (running.control !== "continue") {
             finishAttempt(this.attempt(attemptNumber, startedAt, "cancelled", {
               phase: "controller",
               ...(failure instanceof AgentExecutionError ? { error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs } : {}),
-              ...(reply ? { latencyMs: reply.latencyMs, responseExcerpt: reply.responseExcerpt, stderrExcerpt: reply.stderrExcerpt, toolCalls: reply.toolCalls, usage: reply.usage, resolvedModel: reply.resolvedModel, sessionId: reply.sessionId } : {}),
+              ...(reply ? { latencyMs: reply.latencyMs, responseExcerpt: reply.responseExcerpt, stderrExcerpt: reply.stderrExcerpt, toolCalls: reply.toolCalls, usage: reply.usage, resolvedModel: reply.resolvedModel, sessionId: reply.sessionId, execution: reply.execution } : {}),
             }));
             break;
           }
@@ -559,7 +566,7 @@ export class MatchController {
           if (failure instanceof AgentExecutionError && !failure.timedOut) {
             finishAttempt(this.attempt(attemptNumber, startedAt, "error", { phase: qualificationFailed ? "qualification" : "provider", error: failure.message,
               responseExcerpt: evidence?.responseExcerpt ?? failure.responseExcerpt, stderrExcerpt: evidence?.stderrExcerpt ?? failure.stderrExcerpt,
-              latencyMs: evidence?.latencyMs ?? failure.latencyMs, ...(evidence ? { toolCalls: evidence.toolCalls, usage: evidence.usage, resolvedModel: evidence.resolvedModel, sessionId: evidence.sessionId } : {}) }));
+              latencyMs: evidence?.latencyMs ?? failure.latencyMs, ...(evidence ? { toolCalls: evidence.toolCalls, usage: evidence.usage, resolvedModel: evidence.resolvedModel, sessionId: evidence.sessionId, execution: evidence.execution } : {}) }));
             const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
             match.history.push(record);
             match.pendingTurn = undefined;
@@ -582,7 +589,7 @@ export class MatchController {
             finishAttempt(this.attempt(attemptNumber, startedAt, "invalid", {
               phase: "protocol", error: failure.message, responseExcerpt: failure.responseExcerpt,
               latencyMs: failure.latencyMs, stderrExcerpt: failure.stderrExcerpt,
-              toolCalls: failure.toolCalls, usage: failure.usage, resolvedModel: failure.resolvedModel, sessionId: failure.sessionId,
+              toolCalls: failure.toolCalls, usage: failure.usage, resolvedModel: failure.resolvedModel, sessionId: failure.sessionId, execution: failure.execution,
             }));
           } else if (failure instanceof AgentExecutionError && failure.timedOut) {
             validation = { valid: false, reason: failure.message };
@@ -607,7 +614,7 @@ export class MatchController {
               stderrExcerpt: reply.stderrExcerpt,
               toolCalls: reply.toolCalls,
               resolvedModel: reply.resolvedModel,
-              sessionId: reply.sessionId,
+              sessionId: reply.sessionId, execution: reply.execution,
               usage: reply.usage,
             }));
           } else {

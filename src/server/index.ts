@@ -1,3 +1,5 @@
+import { hangmanPilotPlan, hangmanPilotSeed } from "./researchPlan.js";
+import { analyzeResearchSeries } from "./researchAnalysis.js";
 import { createServer } from "node:http";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -237,7 +239,12 @@ app.get("/api/matches/:id/attempts", (request, response) => {
   response.json({ total: attempts.length, offset, limit, attempts: attempts.slice(offset, offset + limit) });
 });
 
-app.get("/api/games", (_request, response) => response.json({ games: games.list() }));
+app.get("/api/games", (_request, response) => response.json({ games: games.list(), versions: games.listVersions() }));
+app.get("/api/research/presets", (_request, response) => response.json({ presets: [{ id: "hangman-pilot", plan: hangmanPilotPlan, expectedMatches: 144, expectedRequests: [1500, 5000] }] }));
+app.get("/api/series/:id/analysis", (request, response) => {
+  try { response.json(analyzeResearchSeries(seriesManager!.get(matchIdOf(request)), storedMatches)); }
+  catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : "Analysis unavailable.", code: "analysis_unavailable" }); }
+});
 
 app.get("/api/series", (_request, response) => response.json({ series: seriesManager!.list().map((record) => publicSeries(record, storedMatches)) }));
 app.get("/api/series/:id", (request, response) => {
@@ -259,8 +266,11 @@ app.post("/api/series", asyncRoute(async (request, response) => {
   const budgets = { maxPlies: Number(raw.maxPlies ?? 250), maxRequests: Number(raw.maxRequests ?? 500), maxWallMinutes: Number(raw.maxWallMinutes ?? 30),
     maxReportedCostUsd: raw.maxReportedCostUsd === undefined || raw.maxReportedCostUsd === null || raw.maxReportedCostUsd === "" ? null : Number(raw.maxReportedCostUsd) };
   const plan = body.plan as import("../shared.js").SeriesPlan | undefined;
-  const seed = typeof body.masterSeed === "string" ? body.masterSeed : undefined;
-  const created = seriesManager!.create(parsed as [PlayerConfig, PlayerConfig], Number(body.turnTimeoutSeconds ?? 120), budgets, plan, seed);
+  if (body.researchPreset !== undefined && body.researchPreset !== "hangman-pilot") throw new Error("Unknown research preset.");
+  if (body.researchPreset && (body.plan || body.researchPlan || body.masterSeed)) throw new Error("A preset cannot be combined with another plan or root.");
+  const researchPlan = body.researchPreset ? { ...structuredClone(hangmanPilotPlan), comparison: { ...hangmanPilotPlan.comparison, kind: distinctExplicitModels(parsed[0], parsed[1]) ? "system-comparison" : "same-model-control" } } : body.researchPlan;
+  const seed = body.researchPreset ? hangmanPilotSeed() : typeof body.masterSeed === "string" ? body.masterSeed : undefined;
+  const created = seriesManager!.create(parsed as [PlayerConfig, PlayerConfig], Number(body.turnTimeoutSeconds ?? 120), budgets, plan, seed, researchPlan);
   response.status(201).json({ series: publicSeries(created, storedMatches) });
 }));
 for (const command of ["start", "pause", "stop", "retry", "skip"] as const) {

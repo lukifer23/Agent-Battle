@@ -30,7 +30,7 @@ The controller never reads the board from the UI. The React app cannot make a mo
 
 The game contract also exposes `eventProjection(state)`. Chess returns the latest move record, current FEN and PGN so the spectator can update the board and replay one ply at a time without receiving a full match snapshot after every event.
 
-The UI renders Chess, Hangman, and Battleship through `ArenaRouter`. Adding a game does not require changing the controller or adapter protocol, but it requires a safe view for that game's public snapshot. `GameRegistry.get(id, version)` resolves an exact registered ruleset; omitting version selects the current default. Creation can specify `gameVersion`; restoration, projection and series execution always use the recorded version. `GameRegistry.list()` publishes lightweight descriptors including participant count, hidden-information capability, and optional series policy.
+The UI renders Chess, Hangman, and Battleship through `ArenaRouter`. Adding a game does not require changing the controller or adapter protocol, but it requires a safe view for that game's public snapshot. `GameRegistry.get(id, version)` resolves an exact registered ruleset; omitting version selects the current default. Creation can specify `gameVersion`; restoration, projection and series execution always use the recorded version. `GameRegistry.list()` publishes lightweight descriptors including participant count, hidden-information capability, and optional series policy. `listVersions()` exposes all registered versions and which is current.
 
 ### `MatchController`
 
@@ -55,7 +55,7 @@ All agents receive a new complete observation every turn. No transcript is neede
 
 ## Persistence and telemetry
 
-`data/matches.json` (override the directory with `AGENT_BATTLE_DATA_DIR`) stores match and series records in a versioned envelope. The current store version is 6; bare JSON arrays and supported older envelopes are migrated on load with a pre-migration backup. The store is validated on load:
+`data/matches.json` (override the directory with `AGENT_BATTLE_DATA_DIR`) stores match and series records in a versioned envelope. The current store version is 7; bare JSON arrays and supported older envelopes are migrated on load with a pre-migration backup. The store is validated on load:
 
 - An unreadable, unsupported, or future-version root remains in place and prevents server startup.
 - Individual records that fail runtime validation are written to a quarantine file and excluded; valid records are retained.
@@ -96,14 +96,20 @@ The JSON file is local and created with owner-only permissions. Back it up befor
 
 `src/server/series.ts` preserves `battle-series-1` validation for historical ten-slot records. New `battle-series-2` records carry a plan with registered game IDs, exact ruleset versions, repetitions, alternating roles, fixed/seeded challenge policy, optional family weights, and exploratory/strict mode. The registry's game policy supplies seat sensitivity, seeded-challenge support, recommended repetitions and a fixed challenge ID. The scheduler operates on slots without ordinal-based game branches. Hangman seeds derive from a random or supplied 256-bit series root through a versioned HMAC; public challenge IDs are hashes. Chess and Battleship have fixed challenge IDs and no hidden random challenge. A slot's private seed stays local until series completion. Strict mode requires even repetitions for seat-sensitive games; exploratory odd schedules expose their role split. A series and linked matches share the store and lock. Restart pauses an active series and reconciles links to avoid duplicate matches. Unscored outcomes pause the series; retry keeps failed evidence and repeats the same challenge, while skip records an unscored slot.
 
-Series results retain per-game and role records and raw win/draw/loss counts. Win earns 1 point, draw ½, loss 0; each family reports points divided by scored possible points. Overall normalized performance is the mean of scored family values, weighted only by explicit positive plan weights. Unscored trials remain visible and are excluded from the scored denominator. Request, token, cost, and latency totals include separate coverage counts. Completed v2 exports include a reproducibility manifest with root seed, plan, agent configs and settings; earlier exports do not reveal private future seeds. Raw diagnostics remain local. This performance ratio is not an intelligence score.
+Series results retain per-game and role records and raw win/draw/loss counts. Win earns 1 point, draw ½, loss 0; each family reports points divided by scored possible points. For v2, overall normalized performance is the mean of family values, weighted only by explicit positive plan weights, and is withheld unless every planned slot is qualified and scored. Unscored trials remain visible and are excluded from the scored denominator. Request, token, cost, and latency totals include separate coverage counts. Completed v2 exports include a reproducibility manifest with root seed, plan, agent configs and settings; earlier exports do not reveal private future seeds. Raw diagnostics remain local. This performance ratio is not an intelligence score.
 
 The API binds to `127.0.0.1:4173`; Vite serves the UI on `127.0.0.1:5173` during development and proxies `/api` requests. All routes live under `/api`; an unknown `/api` route returns a JSON 404 and never falls through to the SPA. Request bodies are JSON-only, malformed JSON returns a JSON 400, and errors use a stable `{ error, code }` envelope with meaningful 404/409/500/503 distinctions.
 
 | Route | Purpose |
 | --- | --- |
 | `GET /api/state` | Canonical snapshot: providers, `activeMatchId`, active match and recent records |
-| `GET /api/games` | Registered game IDs and player IDs |
+| `GET /api/games` | Current game descriptors and all registered ruleset versions |
+| `GET /api/research/presets` | Research pilot declaration and workload estimate |
+| `GET /api/series` / `GET /api/series/:id` | Public schedules and operational results |
+| `GET /api/series/:id/analysis` | Research first-attempt rows, paired contrasts and missingness bounds |
+| `GET /api/series/:id/export` | Projected evidence and completed reproducibility manifest |
+| `POST /api/series` | Register a v2 plan or v3 research declaration/preset |
+| `POST /api/series/:id/{start,pause,stop,retry,skip}` | Durable series controls |
 | `GET /api/events` | Server-Sent Events for named domain events and state snapshots |
 | `POST /api/matches` | Create a match from two player configs |
 | `POST /api/matches/:id/start` | Start or resume a ready, paused or interrupted match |
@@ -141,7 +147,7 @@ Match creation accepts a role-keyed `players` map. Legacy `white`/`black` reques
 
 ## Multi-game projection boundary
 
-`GameRegistry` validates game compatibility and authoritative saved state. The store validates the envelope and common match fields, then delegates game validity through its validator. Game definitions distinguish private `serialize`/`deserialize` from `publicState` and player-specific `observe`. Hangman additionally supplies public action redaction and masked public replay. `HangmanDuelGame` owns shared scoring and contest forfeits; `HangmanGame` preserves legacy lane-local forfeits.
+`GameRegistry` validates game compatibility and authoritative saved state. The store validates the envelope and common match fields, then delegates game validity through its validator. Game definitions distinguish private `serialize`/`deserialize` from `publicState` and player-specific `observe`. Hangman additionally supplies public action redaction and masked public replay. `HangmanDuelGame` owns shared scoring and contest forfeits; `HangmanGame` owns independent-lane rules and lane-local forfeits for new and historical matches.
 
 `MatchSummary` is an explicit list DTO. `PublicMatchDetail` contains only projected state and telemetry. `AppState.recentMatches` uses summaries. HTTP creation/start/detail, JSON downloads, SSE, attempts, and events use the same projection boundary. Hangman and Battleship events are sanitized before durable storage as well as before transport. `ArenaRouter` selects the Chess, Hangman, or Battleship arena. Battleship placement coordinates stay private until the terminal public reveal, and earlier replay frames remain masked.
 
@@ -154,3 +160,13 @@ Each new request has a durable invocation UUID and deadline before process invoc
 Setup draws model choices from saved match IDs, supports custom IDs and replaces the selected model when the CLI changes. Match controls remain controller-backed HTTP actions. Renderers must tolerate partial presentation updates: a running match can temporarily have no current player, and the UI shows a preparing state. It must not dereference a missing player or infer a winner from that transition.
 
 Shared-board Hangman is seat-sensitive. Strict series require even repetitions and reuse the same derived word seed for each role-swapped pair. Versioned legacy series retain their original lane rules and seed schedule. Comparative standings exclude unverified model identities across all games and keep Hangman rulesets separate.
+
+## Research series v3
+
+`researchPlan.ts` validates exact declaration fields and registered two-player rulesets, constructs block-interleaved schedules with HMAC ordering, pairs challenge seeds across conditions, and hashes the canonical plan/agents/settings. `researchMatchBudgets` interprets declared limits as whole-match totals with equal participant allocations. `schema.ts` reconstructs the schedule on load and rejects altered commitments or assignments. `store.ts` checks match linkage, ruleset, participants, challenge, and resource settings. Store 7 preserves supported historical formats rather than rewriting them into research plans.
+
+The existing `SeriesManager` owns registration, checkpoints, scheduling, restart recovery and controls. V3 slots add condition, block, replicate and ruleset identifiers. Every research match links to its declaration hash. The research UI registers without starting, accepts labeled same-model controls, and exposes both Hangman modes. Generic plans support existing registered two-player games; multi-party phases are not implemented.
+
+`researchAnalysis.ts` evaluates the first match attached to each planned slot, rechecks assignment and execution evidence, and excludes reused provider sessions. Seats and replicates are averaged within challenge blocks. Completed/stopped studies expose the paired contrast, deterministic 5,000-sample block bootstrap and all-planned-block missing-outcome bounds. Inferential estimates are withheld while running. Operational totals include reruns; successful reruns do not replace primary observations. There is no overall research intelligence score.
+
+`executionEvidence.ts` in the server extracts bounded metadata from provider streams; its domain counterpart defines research eligibility reasons. The controller records evidence on success and failure and rejects unqualified responses before scoring. Hashes exclude private observations. Public exports omit future roots until completion; the built-in pilot root is public by construction and provides no contamination defense. The UI/analysis labels this an exploratory study. See [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md) for interpretation and remaining gates.

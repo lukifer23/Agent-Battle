@@ -7,3 +7,5 @@ Runtime dependencies, including chess.js and react-chessboard, retain their own 
 Hangman continues to use the MIT-licensed `@nkzw/safe-word-list@3.1.2` dependency; preserve its packaged license when distributing dependencies. The shared-board update copies no third-party game source, tests or artwork. The reviewed CLI Hangman candidate is reference only; see the source audit.
 
 The Hangman interface refresh adds no dependencies, copied UI components, or third-party artwork. It reuses the existing React interface and project icons. Google-hosted font imports remain in the existing stylesheet; font distributions retain their upstream licenses.
+
+The research-series foundation adds original scheduling, metadata validation, paired analysis, and fixed letter-order controls. It reuses the existing Hangman engines and pinned corpus, adds no runtime dependencies, and copies no third-party engine, test, or statistical-library source. Future mechanics ports still require revision-specific license review and preservation of applicable notices.

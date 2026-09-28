@@ -20,6 +20,8 @@ npm test
 npm run lint
 npm run typecheck
 npm run build
+npm run benchmark
+npm run --silent research -- baseline > /tmp/agent-battle-baseline.json
 ```
 
 The test suite uses deterministic local fixtures and fake CLI executables. It
@@ -51,3 +53,11 @@ must not invoke authenticated model providers.
 ## Commit style
 
 Write short, factual, imperative commit messages on `main`. Do not force-push.
+
+## Research changes
+
+Read [the research protocol](docs/RESEARCH_PROTOCOL.md) before adding environments or scores. Preserve exact ruleset lookup, frozen declarations, deterministic role/challenge assignments, first-attempt analysis, all planned rows and unknown usage. Tests must cover malformed commitments, assignment drift, missing evidence, session reuse, retry selection and private projections. Do not silently change an existing generator, analysis version, or scoring rule.
+
+Keep game outcomes, execution qualification and scientific interpretation separate. A fixture agent or offline control must be labeled as such and cannot populate a live-model ranking. Research v3 permits explicit same-model controls without weakening casual-match validation. Include reflection/learning only under a future versioned protocol with leakage and matched-control tests.
+
+Update README, rules/protocol/architecture docs, changelog and handoff together when contracts change. Keep historical acceptance evidence dated, and report only checks actually run for the new change. An offline baseline is not a paid-provider qualification test.

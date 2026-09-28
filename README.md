@@ -4,20 +4,22 @@
 
 Agent Battle supports authoritative Chess, shared-board competitive Hangman, and hidden-information Battleship. Battle series v2 schedules any registered supported two-player game from a versioned plan, with configurable repetitions, deterministic role rotation, reproducible challenges, raw results, model provenance, and usage coverage. Existing `battle-series-1` records retain their original ten-slot layout. A series pauses on unscored failures and requires an explicit retry or skip. Strict model/tool qualification is stronger than casual play; Codex CLI remains unqualified for scored series because its read-only tool access is not equivalent to a no-tools invocation.
 
+Research series v3 adds frozen multi-condition declarations, paired challenge blocks, both Hangman rulesets, labeled same-model controls, stricter execution evidence, and first-attempt analysis with missing-outcome bounds. Choose **RESEARCH** in Battle series to register the 144-match Hangman pilot before starting it. This is an exploratory study workflow, not a validated intelligence ranking. See [the research protocol and roadmap](docs/RESEARCH_PROTOCOL.md) for interpretation, offline controls, resource limits, and remaining research gates.
+
 Durable events carry a monotonically increasing match revision and are published only after the corresponding store commit. An accepted action commits its game state, turn history, and move/completion evidence together; a terminal action includes its result in that commit. Retry exhaustion commits the invalid turn and forfeit result together. Match creation, start/resume, pending-turn creation, retry state, pause, stop, and errors are also durable boundaries. Presentation events (`agent.ready`, `agent.thinking`, `agent.started`, `agent.response`, `move.proposed`, `turn.started`, and `agent.timeout`) stream live without a store write or durable revision. They are not replayed after reconnect; the canonical snapshot and durable events restore match state. Invocation reservations are committed before provider spawn; each retry is checked against the remaining budgets.
 
 Agent Battle is a local-first spectator and control app for AI-versus-AI games. The backend owns game state and validates every proposed action; agents receive a private, structured turn observation and return one action. The browser is only the match control and spectator surface.
 
 ## Run it
 
-Requirements: Node.js 20.19+ and npm. At least one supported CLI must be installed and authenticated. Codex, Claude Code, and OpenCode are supported; new matches default to Codex on both sides.
+Requirements: Node.js 20.19+ and npm. A supported CLI must be installed and authenticated for live model games; tests and offline controls need no provider credentials. Codex, Claude Code, and OpenCode are supported; new matches default to Codex on both sides.
 
 ```sh
 npm ci
 npm run dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Choose **Chess**, **Hangman**, **Battleship**, or **Battle series** in the top navigation. Choose an agent CLI and model for each player, then use the start button below the choices. Model dropdowns contain IDs from saved matches; **Custom model ID** accepts another ID supported by your signed-in CLI. Changing CLI selects a model previously used with that CLI, or its detected default, rather than carrying over the old CLI's model. Hangman comparisons and scored series require two different explicit model IDs. Time and resource limits are under the expandable settings row. Casual Chess and Battleship can use a CLI default model, but that does not establish verified model identity. If another match or series is active, the start area explains the blocker and links to that record. Agent Battle does not read or store CLI credentials. Model requests begin only after you start a match.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Choose **Chess**, **Hangman**, **Battleship**, or **Battle series** in the top navigation. Choose an agent CLI and model for each player, then use the start button below the choices. Model dropdowns contain IDs from saved matches; **Custom model ID** accepts another ID supported by your signed-in CLI. Changing CLI selects a model previously used with that CLI, or its detected default, rather than carrying over the old CLI's model. Single games and v2 series require two different explicit model IDs. Research series can register identical IDs as a labeled same-model control. Time and resource limits are under the expandable settings row. Blank models and CLI-default placeholders are rejected by the creation API. If another match or series is active, the start area explains the blocker and links to that record. Agent Battle does not read or store CLI credentials. Model requests begin only after you start a match.
 
 For a single production-style local server:
 
@@ -57,7 +59,7 @@ Chess, Hangman, Battleship, and battle series are supported. Human players, Stoc
 
 ## Comparing two agents
 
-All three games require two distinct explicit model IDs. Claude setup suggests Opus 5.5, Sonnet 5, and Haiku 4.5 alongside previously used models; custom IDs remain available. Suggestions are not a claim of account access. Choosing the same CLI is valid when it runs different models: every request starts a fresh process in a separate temporary directory. The execution-evidence panel shows requested/reported model IDs, invocation IDs, provider session IDs when available, and observed external tool calls.
+Single matches in all three games require two distinct explicit model IDs. Research series v3 additionally supports labeled same-model controls; those are kept out of casual standings. Claude setup suggests Opus 5.5, Sonnet 5, and Haiku 4.5 alongside previously used models; custom IDs remain available. Suggestions are not a claim of account access. Choosing the same CLI is valid when it runs different models: every request starts a fresh process in a separate temporary directory. The execution-evidence panel shows requested/reported model IDs, invocation IDs, provider session IDs when available, and observed external tool calls.
 
 A winner describes the game outcome. Comparative standings additionally require both players to have responded, exact model evidence on every request, recorded no-tools policies, zero observed external tool calls, and no shared session between players. Older records without this evidence remain playable as replays and retain their results, but are unranked. Codex games remain casual/unranked because its current CLI does not establish no-tools parity. Provider reasoning settings are requests, not proof of equal internal compute.
 
@@ -79,9 +81,26 @@ Match history is kept in full rather than silently pruned. `GET /api/matches` re
 
 Open **Battle series**, enter two different explicit model IDs, and choose Quick (2 each; exploratory), Standard (6 Chess, 6 Hangman, 6 Battleship), or Custom game counts. Strict mode requires even repetitions for seat-sensitive games; an odd exploratory run records its 3–2 or equivalent seat split. Roles alternate deterministically. Hangman uses one shared word per contest; role-swapped pairs reuse the same seeded word. Legacy lane-based series retain their original rules. The series runs one match at a time, pauses on provider, budget, storage, or qualification failure, and keeps every attempt. **Retry Slot** repeats the same challenge, **Skip Slot** leaves it unscored, and **Resume** continues a paused match.
 
-Per-game points are win 1, draw ½, loss 0. Normalized performance is points divided by scored possible points. Overall performance is the mean of scored game-family normalized values, using configured positive weights if present. Raw W/D/L, unscored counts, role distribution, requests, latency, token/cost reporting coverage, and component values remain visible. This is not an intelligence score. A completed v2 export includes the root seed, plan, agents and settings as a reproducibility manifest; **Rerun exact configuration** starts an identical schedule. The root seed and future Hangman challenge seeds stay out of public state and exports until the series completes. Model behavior may still vary between runs.
+Per-game points are win 1, draw ½, loss 0. Normalized performance is points divided by scored possible points. For v2, overall performance is the mean of game-family normalized values, using configured positive weights if present, and is withheld unless every planned slot is qualified and scored. Raw W/D/L, unscored counts, role distribution, requests, latency, token/cost reporting coverage, and component values remain visible. This is not an intelligence score. A completed v2 export includes the root seed, plan, agents and settings as a reproducibility manifest; **Rerun exact configuration** starts an identical schedule. The root seed and future Hangman challenge seeds stay out of public state and exports until the series completes. Model behavior may still vary between runs.
 
-The API offers `GET /api/series`, `GET /api/series/:id`, `GET /api/series/:id/export`, `POST /api/series`, and `POST /api/series/:id/{start,pause,stop,retry,skip}`. Creation accepts `plan` and optional 64-character hex `masterSeed`; a random seed is the default. Exact resolved identity and tool restrictions must be verified during a trial before its actions can score. Fixture tests exercise v1 and v2 lifecycles; they do not prove any live provider model or billing claim.
+The API offers `GET /api/series`, `GET /api/series/:id`, `GET /api/series/:id/export`, `POST /api/series`, and `POST /api/series/:id/{start,pause,stop,retry,skip}`. Creation accepts `plan` and optional 64-character hex `masterSeed`; a random seed is the default. Exact resolved identity and tool restrictions must be verified during a trial before its actions can score. Fixture tests exercise v1, v2, and research v3 lifecycles; they do not prove any live provider model or billing claim.
+
+## Registered research studies
+
+Choose **Battle series → RESEARCH** and two explicit Claude model IDs. **REGISTER PILOT** saves the declaration without making model requests; review the saved study and use **START REGISTERED STUDY** to begin. The pilot uses 24 matched words, two replicates, independent lanes and seat-swapped shared-board contests: 144 matches in 24 challenge blocks. The current UI requires Claude's reported no-tools inventory; installation alone does not qualify a trial.
+
+Research limits are totals per match, split equally between participants (rounded down). Defaults are 64 accepted actions, 128 requests, 60 active minutes, and 120 seconds per request. The reported-cost threshold is per match and cannot guarantee a total billing ceiling. At most one infrastructure rerun is allowed per slot; qualification failures require a new study. Primary analysis retains the first attempt even if a rerun succeeds.
+
+Completed or stopped studies show paired block estimates, bootstrap intervals and all-planned-block missing-outcome bounds. These are exploratory ruleset comparisons, not isolated measurements of strategy or intelligence. Completed exports include exact rerun manifests; research reruns register for review before starting. Adaptation, human references, and multi-party games remain future work.
+
+Offline commands make no provider calls and do not write to application history:
+
+```sh
+npm run --silent research -- baseline > baseline.json
+npm run --silent research -- prepare EXACT_MODEL_A EXACT_MODEL_B > registration.json
+```
+
+`prepare` prints a body for `POST /api/series`; it does not submit it. `baseline` compares two fixed letter-order policies across the full pilot schedule. The research API also provides `GET /api/research/presets` and `GET /api/series/:id/analysis`. See [the protocol](docs/RESEARCH_PROTOCOL.md) before interpreting or publishing results.
 
 ## Checks
 
@@ -101,7 +120,8 @@ The adapter/controller tests use fake local CLI executables and do not make paid
 - [Agent protocol](docs/AGENT_PROTOCOL.md): observation and action contract, retry behavior and CLI invocation details.
 - [Handoff](docs/HANDOFF.md): what has been implemented and how another agent should continue.
 - [Battleship rules](docs/BATTLESHIP.md): actions, privacy, replay, and metrics.
-- [Hangman rules](docs/HANGMAN.md): shared-board scoring, legacy compatibility, model selection and privacy.
+- [Hangman rules](docs/HANGMAN.md): shared-board and independent-lane scoring, model selection and privacy.
+- [Research protocol](docs/RESEARCH_PROTOCOL.md): registered pilot, evidence requirements, paired analysis, controls and research gates.
 - [Contributing](CONTRIBUTING.md): local checks and the main-branch workflow.
 - [Security](SECURITY.md): local trust boundary and vulnerability reporting.
 - [Changelog](CHANGELOG.md): implemented changes.
@@ -110,11 +130,11 @@ The adapter/controller tests use fake local CLI executables and do not make paid
 
 ## Hangman
 
-Select **Hangman**, choose two explicit models, and start. Agents alternate on one shared board. Correct guesses reveal letters to both agents and earn points; misses lose points. A solve or seven shared misses ends the contest; highest score wins. New casual matches default to disabled Claude extended thinking or low Codex reasoning unless you explicitly select a level. Each turn launches a fresh CLI invocation and temporary working directory without a resumed conversation. For a cross-provider contest, choose Codex on one side and Claude Code on the other. Saved `independent-lanes-1` records retain their old rules and replay; standings stay separate by ruleset. A game result can be recorded without verified model metadata, but comparative standings require resolved identities matching both requests. Codex CLI currently omits that metadata from its JSONL output. See [Hangman rules and privacy](docs/HANGMAN.md).
+Select **Hangman**, choose two explicit models and a ruleset, and start. The default shared-board mode alternates agents on one board. Correct guesses reveal letters to both agents and earn points; misses lose points. A solve or seven shared misses ends the contest; highest score wins. New casual matches default to disabled Claude extended thinking or low Codex reasoning unless you explicitly select a level. Each turn launches a fresh CLI invocation and temporary working directory without a resumed conversation. For a cross-provider contest, choose Codex on one side and Claude Code on the other. The selectable `independent-lanes-1` mode gives each player a private solving lane; saved records retain their original rules and replay; standings stay separate by ruleset. A game result can be recorded without verified model metadata, but comparative standings require resolved identities matching both requests. Codex CLI currently omits that metadata from its JSONL output. See [Hangman rules and privacy](docs/HANGMAN.md).
 
 Hangman uses a light interface with a focused setup screen, a prominent winner and score, and **New match** above the board. New match preserves competitors for review; **Start Hangman match** creates a fresh word. **Back to match** restores the current board. Pause, resume and stop controls appear above the board; replay, request details, identity qualification and comparative standings remain available below or in disclosures. Model display names are presentation labels, not identity verification.
 
-Store version 6 retains legacy Chess, Hangman and `battle-series-1` records while adding v2 plan records and Battleship. Migration backs up the original store before rewriting; unknown future versions refuse startup. Private seeds, canonical state, provider excerpts, and recovery candidates stay in local data files. Public match-list summaries contain no game state. Request identities are persisted before invocation, and budgets are rechecked before every request, including corrections.
+Store version 7 adds research v3 declarations, assignment validation and execution evidence while retaining supported Chess, Hangman, Battleship, and v1/v2 series records. Migration backs up the original store before rewriting; unknown future versions refuse startup. Private seeds, canonical state, provider excerpts, and recovery candidates stay in local data files. Public match-list summaries contain no game state. Request identities are persisted before invocation, and budgets are rechecked before every request, including corrections.
 
 ## Troubleshooting
 
