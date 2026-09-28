@@ -5,6 +5,13 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+- Added shared-board competitive Hangman with alternating guesses, per-position points, completion bonuses and shared misses; preserved independent-lane records under their original ruleset.
+- Made game lookup version-aware across creation, restore, projection and series; shared-board series balance seats with the same word for each role-swapped pair.
+- Rebuilt Hangman setup and results with a light theme, model dropdowns and custom IDs, explicit thinking effort, visible new-match controls, and expandable diagnostics. Changing CLI replaces the previous CLI's model.
+- Fixed the blank Hangman page caused by a live update arriving without a current player; added a rendering regression and verified a real browser-started cross-provider match through completion.
+- Preserved Claude Code OAuth authentication while disabling invocation customizations through safe mode; added a concise Hangman prompt and casual low/disabled-thinking defaults. Missing Codex resolved identity remains unverified.
+- Updated rules, architecture, protocol, contributor guidance, security boundaries, source audit and handoff documentation for the shared-board implementation and browser verification.
+
 - Rolled back in-memory battle-series start, pause, stop, retry, and skip changes when their checkpoint fails; a failed retry no longer leaves a hidden retry marker.
 - Stopped treating a terminal game with no authoritative derived result as a draw; the controller now records an unscored error.
 - Fixed event pagination after event 500; the endpoint now projects the requested historical slice directly.

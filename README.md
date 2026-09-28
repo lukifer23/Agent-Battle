@@ -17,7 +17,7 @@ npm ci
 npm run dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Choose **Chess**, **Hangman**, **Battleship**, or **Battle series** in the top navigation. The start action is at the top of setup; choose an agent CLI and model for each player, then start. Hangman comparisons and scored series require two different explicit model IDs. Time and resource limits are under the expandable settings row. Casual Chess and Battleship can use a CLI default model, but that does not establish verified model identity. If another match or series is active, the start area explains the blocker and links to that record. Agent Battle does not read or store CLI credentials. Model requests begin only after you start a match.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Choose **Chess**, **Hangman**, **Battleship**, or **Battle series** in the top navigation. Choose an agent CLI and model for each player, then use the start button below the choices. Model dropdowns contain IDs from saved matches; **Custom model ID** accepts another ID supported by your signed-in CLI. Changing CLI selects a model previously used with that CLI, or its detected default, rather than carrying over the old CLI's model. Hangman comparisons and scored series require two different explicit model IDs. Time and resource limits are under the expandable settings row. Casual Chess and Battleship can use a CLI default model, but that does not establish verified model identity. If another match or series is active, the start area explains the blocker and links to that record. Agent Battle does not read or store CLI credentials. Model requests begin only after you start a match.
 
 For a single production-style local server:
 
@@ -46,18 +46,18 @@ The development UI runs on `127.0.0.1:5173` and proxies `/api` to the API port. 
 - Standard chess rules, legal UCI move validation, resignation, checkmate, stalemate, repetition, fifty-move and insufficient-material draws. Rules come from [chess.js](https://github.com/jhlywa/chess.js) rather than a home-grown chess engine.
 - A responsive spectator board built with [react-chessboard](https://github.com/Clariity/react-chessboard), move list, replay slider, live event feed and local scoreboard.
 - Replay with first/previous/next/last and return-to-current controls, clickable notation, board flip, last-move and check highlighting, and a readable position summary. Hiding replay returns the board to the current position instead of leaving an old one displayed as current.
-- Copy FEN, download PGN, and export projected match JSON. Raw provider diagnostics remain in private local persistence. The match header shows request, token, and cost totals with a coverage marker.
+- Copy FEN, download PGN, and export projected match JSON. Raw provider diagnostics remain in private local persistence. The match export bar shows request, token, and cost totals with a coverage marker.
 - Labelled form controls, an accessible scoreboard table, keyboard-operable replay, a polite position/status announcement and a reduced-motion rule.
 - Codex CLI, Claude Code and OpenCode adapters. Each turn starts a fresh non-interactive CLI request with a complete observation, so the game does not rely on conversation memory.
 - One correction attempt for an invalid action or timeout, then forfeiture. A crashed CLI or authentication/provider error is shown as a match error and does not award the opponent a win.
 - Pause, resume, stop, process timeouts, output-size limits and saved match history. A ready, paused or interrupted match can be stopped without launching a request.
-- Per-turn records include player/model, FEN, legal-action count, response action, validity, latency, retries, process output excerpts, tool-call count and token/cost usage when the CLI reports it.
+- Per-turn records include player/model, chess FEN where applicable, legal-action count, response action, validity, latency, retries, process output excerpts, tool-call count and token/cost usage when the CLI reports it.
 
 Chess, Hangman, Battleship, and battle series are supported. Human players, Stockfish analysis, and remote agents are not implemented.
 
 ## Billing, limits and provenance
 
-Every match has configurable limits: maximum plies, maximum requests, game minutes, and an optional best-effort reported-cost threshold. New matches offer 5, 10, 30, 60-minute and custom game-time controls. Their game clock counts accumulated running time, pauses while paused, and survives restart; an unclosed running segment is conservatively charged through restart. The controller checks request, time, and reported-cost thresholds before each invocation and cancels an in-flight request when its game clock expires. Older saved matches without a timer ledger retain their original creation-age semantics. A budget stop is a non-game outcome rather than a fabricated win or draw. A durable reservation counts each invocation conservatively across crashes; provider-reported cost is not a hard billing cap. Keep the per-move timeout separate from the game-time control.
+Fresh matches default to 250 accepted actions, 500 requests and 30 active minutes. Every match has configurable limits: maximum plies, maximum requests, game minutes, and an optional best-effort reported-cost threshold. New matches offer 5, 10, 30, 60-minute and custom game-time controls. Their game clock counts accumulated running time, pauses while paused, and survives restart; an unclosed running segment is conservatively charged through restart. The controller checks request, time, and reported-cost thresholds before each invocation and cancels an in-flight request when its game clock expires. Older saved matches without a timer ledger retain their original creation-age semantics. A budget stop is a non-game outcome rather than a fabricated win or draw. A durable reservation counts each invocation conservatively across crashes; provider-reported cost is not a hard billing cap. Keep the per-move timeout separate from the game-time control.
 
 Each match stores requested provider/model/reasoning and provider CLI versions captured at creation. Provider parsers record resolved model identity when the CLI reports it. A scored series trial requires an exact resolved-model match and a qualified no-tools adapter; missing evidence pauses the series without a game result. Codex CLI series trials are currently blocked. Unknown cost and tokens remain unknown, with per-metric coverage counts in series results and exports.
 
@@ -87,7 +87,7 @@ npm run build
 npm run benchmark
 ```
 
-The adapter/controller tests use fake local CLI executables and do not make paid model requests. CI runs these checks on Node 20 and 22 on every push to `main` and every pull request, using the committed lockfile and local fixtures only. See [the handoff](docs/HANDOFF.md) for the current acceptance boundary and the next recommended work.
+The adapter/controller tests use fake local CLI executables and do not make paid model requests. CI runs tests, lint, typecheck and build on Node 20 and 22 on every push to `main` and every pull request, using the committed lockfile and local fixtures only. See [the handoff](docs/HANDOFF.md) for the current acceptance boundary and the next recommended work.
 
 ## Project guide
 
@@ -95,10 +95,24 @@ The adapter/controller tests use fake local CLI executables and do not make paid
 - [Agent protocol](docs/AGENT_PROTOCOL.md): observation and action contract, retry behavior and CLI invocation details.
 - [Handoff](docs/HANDOFF.md): what has been implemented and how another agent should continue.
 - [Battleship rules](docs/BATTLESHIP.md): actions, privacy, replay, and metrics.
+- [Hangman rules](docs/HANGMAN.md): shared-board scoring, legacy compatibility, model selection and privacy.
+- [Contributing](CONTRIBUTING.md): local checks and the main-branch workflow.
+- [Security](SECURITY.md): local trust boundary and vulnerability reporting.
+- [Changelog](CHANGELOG.md): implemented changes.
+- [Third-party notices](THIRD_PARTY_NOTICES.md): dependency and reuse attribution.
 - [Game sources](docs/GAME_SOURCES.md): reviewed repositories, commits, licenses, and attribution decisions.
 
 ## Hangman
 
 Select **Hangman**, choose two explicit models, and start. Agents alternate on one shared board. Correct guesses reveal letters to both agents and earn points; misses lose points. A solve or seven shared misses ends the contest; highest score wins. New casual matches default to disabled Claude extended thinking or low Codex reasoning unless you explicitly select a level. Each turn launches a fresh CLI invocation and temporary working directory without a resumed conversation. For a cross-provider contest, choose Codex on one side and Claude Code on the other. Saved `independent-lanes-1` records retain their old rules and replay; standings stay separate by ruleset. A game result can be recorded without verified model metadata, but comparative standings require resolved identities matching both requests. Codex CLI currently omits that metadata from its JSONL output. See [Hangman rules and privacy](docs/HANGMAN.md).
 
+Hangman uses a light interface with a focused setup screen, a prominent winner and score, and **New match** above the board. New match preserves competitors for review; **Start Hangman match** creates a fresh word. **Back to match** restores the current board. Pause, resume and stop controls appear above the board; replay, request details, identity qualification and comparative standings remain available below or in disclosures. Model display names are presentation labels, not identity verification.
+
 Store version 6 retains legacy Chess, Hangman and `battle-series-1` records while adding v2 plan records and Battleship. Migration backs up the original store before rewriting; unknown future versions refuse startup. Private seeds, canonical state, provider excerpts, and recovery candidates stay in local data files. Public match-list summaries contain no game state. Request identities are persisted before invocation, and budgets are rechecked before every request, including corrections.
+
+## Troubleshooting
+
+- After rebuilding the production UI, refresh an existing browser tab to load the new bundle. Backend changes also require restarting the local server.
+- The Hangman renderer tolerates live updates that briefly have no current player; it shows “Preparing the next turn” instead of throwing and blanking the page.
+- A model dropdown is a list of previously used IDs, not a live provider catalog or availability guarantee. Check the selected CLI's supported models if a request fails.
+- CLI detection checks installation and version, not authentication. Sign in using the CLI itself. Provider errors remain unscored; missing resolved model metadata leaves a completed game unranked.

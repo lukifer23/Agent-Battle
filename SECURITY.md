@@ -14,6 +14,12 @@ Agent Battle is a single-user, loopback-only local application. It binds to
 - Match history and bounded provider diagnostics are stored locally under
   `data/`, which is excluded from version control.
 
+## Hidden state and provider execution
+
+Shared-board Hangman intentionally exposes opponent letter outcomes and scores, but keeps the word and seed private until terminal. Legacy Hangman lanes retain their separate observation boundary. Battleship hides untouched opponent fleet cells until terminal. Historical replay frames preserve their original masks, and public action labels redact full solutions and placements.
+
+Claude Code safe mode, explicit tool/hook/settings restrictions and no session persistence retain the user's existing CLI authentication. Codex uses ephemeral requests, ignores user configuration/rules and runs read-only, but remains unqualified for no-tools scored series. CLI policy and fresh temporary directories do not provide OS-user isolation. Unknown model identity is not silently treated as verified.
+
 ## Reporting a vulnerability
 
 Report suspected vulnerabilities through the repository's private GitHub

@@ -42,9 +42,9 @@ The deterministic comparison is, in order:
 5. If both failed, more distinct correctly guessed letters wins. Repeated positions of one letter count once.
 6. Otherwise, draw.
 
-Standings award one point per win and half a point per draw. They group competitors by game and time control. Unscored matches are excluded. The displayed standings cover the recent history window, not a lifetime tournament.
+Standings award one point per win and half a point per draw. They group competitors by game, ruleset and time control. Unscored matches and matches without verified distinct model identities are excluded. The displayed standings cover the recent history window, not a lifetime tournament.
 
-## Private state and reproducibility
+## Corpus and reproducibility (both versions)
 
 The server uses the pinned MIT-licensed `@nkzw/safe-word-list` version 3.1.2. The default array is converted to lowercase, filtered to ASCII letters of length 5 through 12, deduplicated, and sorted in ASCII order. This produces 2,068 words. The SHA-256 of newline-joined words with a final newline is:
 
@@ -52,9 +52,9 @@ The server uses the pinned MIT-licensed `@nkzw/safe-word-list` version 3.1.2. Th
 
 A private 32-byte random seed drives `hmac-sha256-counter-v1`. HMAC-SHA256 blocks use the seed as key and `hangman-word-v1:<counter>` as message. Unsigned big-endian 32-bit values are accepted below the largest multiple of corpus size less than or equal to 2^32, then reduced modulo corpus size. This avoids selection bias. Word selection never uses `Math.random`.
 
-Canonical persistence contains the word, seed, selected index, package/filter/generator versions, corpus hash, both lanes, and the action/adjudication history. Load validates provenance and replays every accepted action and lane forfeit. Derived lane metrics and results must agree with replay. The corpus is a server dependency and is not bundled into the browser.
+Canonical persistence contains the word, seed, selected index, package/filter/generator versions, corpus hash, version-specific state, and action/adjudication history. Shared-board state contains one pattern, misses and guessed-letter set plus both player scores; legacy state contains two lanes. Load validates provenance and replays accepted actions and forfeits with the saved ruleset. Derived metrics and results must agree with replay. The corpus is a server dependency and is not bundled into the browser.
 
-## Reveal boundary
+## Legacy reveal boundary: independent-lanes-1
 
 - Agent observations contain only their own masked pattern, guessed letters, misses, accepted action count, own history, legal letter actions, solution schema, and request timeout.
 - Player counters are lane-local. Opponent progress, guesses, masks, and miss counts are omitted.
@@ -68,7 +68,18 @@ This is a payload boundary. It does not establish operating-system isolation aga
 
 ## UI and records
 
-Choose Hangman in setup and configure the two agents. Both lanes show masks, guesses, misses remaining, action counts, state, and expandable request records. Completed matches reveal the word and comparison outcome. The replay slider inspects historical public states. JSON downloads use the safe detail endpoint. Play Again preserves competitors and selects a fresh private word.
+1. Select **Hangman**, then **New match** when reviewing a completed contest.
+2. Choose a CLI and model for each player. Dropdowns use IDs from saved matches; **Custom model ID** accepts an exact supported ID. Two different explicit IDs are required. CLI installation does not prove authentication or model availability.
+3. Set thinking effort if desired. **Game default** uses the casual defaults described above. Expand **Time and resource limits** to change the budgets.
+4. Use **Start Hangman match** below the choices. Each turn launches a fresh subprocess in a separate temporary directory, without resuming a shared agent conversation.
+5. Follow the shared board, active player and points. Pause, resume and stop are above the board. A completed game shows the winner, score and word once; request details and match logs remain expandable.
+6. **Review actions** opens replay navigation. Earlier frames keep the word masked. **New match** preserves the competitors for review before starting a fresh word; **Back to match** returns to the current position.
+
+The light theme is scoped to Hangman. Legacy records retain their lane renderer. Model names are readable display labels; canonical requested and reported IDs remain in match details and exports. Missing or mismatched reported identities leave gameplay recorded but unranked. In the tested Codex CLI 0.157.1 JSONL stream, the exact resolved model was not reported, so it is never inferred from the requested model flag.
+
+### Verification boundary
+
+On 2026-09-28, a real Claude Code / Codex game completed through the redesigned browser flow, including five accepted actions and a terminal winner. Desktop and 390px mobile views, duplicate/empty-model blocking, custom model entry, replay masking, and returning to setup were checked. A regression covers a running update without a current player, which previously caused a blank page. These checks establish application behavior, not comparative model strength, billing accuracy, or Codex resolved identity.
 
 ## Word-list license
 

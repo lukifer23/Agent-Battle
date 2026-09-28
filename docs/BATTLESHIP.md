@@ -25,3 +25,7 @@ Before terminal, public HTTP, SSE, event, replay, and JSON projections show plac
 ## Experiment measures
 
 The objective result is win/loss. Public state summarizes each player's accepted shots fired, hits, misses, accuracy, first-hit shot number, sunk ships, and shot number when each ship sank; these are derived from the public shot record. Invalid placement/target requests, retries, latency, tokens, reported cost, and each metric's reporting coverage remain in match telemetry. No weighted intuition score is assigned. Series v2 alternates the two role assignments; strict plans require an even number of Battleship repetitions. Its fixed public challenge ID is `battleship-standard-1:10x10:5-4-3-3-2`. Models choose fleets, so repeating the same configuration does not force the same learned fleet layout.
+
+## Arena limits and model identity
+
+Fresh-match defaults allow 250 accepted actions and 500 requests: complete placement plus alternating shots can require 201 accepted actions. Lower custom budgets may stop a legal game without a winner. Casual results remain in history, but comparative standings require two distinct requested models with matching reported identities. See [the shared protocol](AGENT_PROTOCOL.md) and [run instructions](../README.md).

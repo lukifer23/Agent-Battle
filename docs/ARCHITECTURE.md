@@ -30,7 +30,7 @@ The controller never reads the board from the UI. The React app cannot make a mo
 
 The game contract also exposes `eventProjection(state)`. Chess returns the latest move record, current FEN and PGN so the spectator can update the board and replay one ply at a time without receiving a full match snapshot after every event.
 
-The UI renders Chess, Hangman, and Battleship through `ArenaRouter`. Adding a game does not require changing the controller or adapter protocol, but it requires a safe view for that game's public snapshot. `GameRegistry.list()` publishes lightweight descriptors including participant count, hidden-information capability, and optional series policy.
+The UI renders Chess, Hangman, and Battleship through `ArenaRouter`. Adding a game does not require changing the controller or adapter protocol, but it requires a safe view for that game's public snapshot. `GameRegistry.get(id, version)` resolves an exact registered ruleset; omitting version selects the current default. Creation can specify `gameVersion`; restoration, projection and series execution always use the recorded version. `GameRegistry.list()` publishes lightweight descriptors including participant count, hidden-information capability, and optional series policy.
 
 ### `MatchController`
 
@@ -127,6 +127,8 @@ The game registry supplies role IDs, labels, hidden-information behavior, runtim
 4. Add a safe public projection, game descriptor and UI view, then register the game in `src/domain/defaultGames.ts`.
 5. Add domain tests for legal/illegal actions, wrong player, player-specific observations, terminal states and persistence reload.
 
+Before implementing a new game or major subsystem, audit existing open-source mechanics and record pinned versions, licenses and integration decisions in [Game sources](GAME_SOURCES.md). Prefer a small reusable unit over another controller, persistence layer or provider stack.
+
 Match creation accepts a role-keyed `players` map. Legacy `white`/`black` request fields remain accepted for Chess only; mixed formats are rejected. `ArenaRouter` selects game views. Storage delegates game validity to the registry.
 
 ### Current boundaries / limits
@@ -139,8 +141,16 @@ Match creation accepts a role-keyed `players` map. Legacy `white`/`black` reques
 
 ## Multi-game projection boundary
 
-`GameRegistry` validates game compatibility and authoritative saved state. The store validates the envelope and common match fields, then delegates game validity through its validator. Game definitions distinguish private `serialize`/`deserialize` from `publicState` and player-specific `observe`. Hangman additionally supplies public action redaction, public replay, and lane-forfeit handling.
+`GameRegistry` validates game compatibility and authoritative saved state. The store validates the envelope and common match fields, then delegates game validity through its validator. Game definitions distinguish private `serialize`/`deserialize` from `publicState` and player-specific `observe`. Hangman additionally supplies public action redaction and masked public replay. `HangmanDuelGame` owns shared scoring and contest forfeits; `HangmanGame` preserves legacy lane-local forfeits.
 
 `MatchSummary` is an explicit list DTO. `PublicMatchDetail` contains only projected state and telemetry. `AppState.recentMatches` uses summaries. HTTP creation/start/detail, JSON downloads, SSE, attempts, and events use the same projection boundary. Hangman and Battleship events are sanitized before durable storage as well as before transport. `ArenaRouter` selects the Chess, Hangman, or Battleship arena. Battleship placement coordinates stay private until the terminal public reveal, and earlier replay frames remain masked.
 
 Each new request has a durable invocation UUID and deadline before process invocation. Completion updates that reservation. A restarted unfinished invocation becomes interrupted with unknown provider latency/usage; its reserved interval is conservatively charged as controller-accounted player time. Qualification failures retain actual provider latency, usage, tool count and resolved-model evidence. Historical attempts retain their original evidence without invented invocation identities. A failed write retains a private recovery candidate and stops requests; the server attempts to write that candidate to a separate private recovery file. If that write also fails, the candidate is memory-only until process exit. Snapshot epochs and state versions protect the browser against stale deliveries.
+
+## Hangman presentation and compatibility
+
+`HangmanDuelArena` renders `shared-board-2`; `HangmanArena` renders `independent-lanes-1`. Both consume public match/replay projections through `ArenaRouter`. `src/hangman.css` scopes the light theme to Hangman. `src/client/modelPresentation.ts` formats display names without changing canonical identity or scoring.
+
+Setup draws model choices from saved match IDs, supports custom IDs and replaces the selected model when the CLI changes. Match controls remain controller-backed HTTP actions. Renderers must tolerate partial presentation updates: a running match can temporarily have no current player, and the UI shows a preparing state. It must not dereference a missing player or infer a winner from that transition.
+
+Shared-board Hangman is seat-sensitive. Strict series require even repetitions and reuse the same derived word seed for each role-swapped pair. Versioned legacy series retain their original lane rules and seed schedule. Comparative standings exclude unverified model identities across all games and keep Hangman rulesets separate.

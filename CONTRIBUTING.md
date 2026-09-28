@@ -39,6 +39,15 @@ must not invoke authenticated model providers.
   commit messages.
 - Never commit credentials, the local `data/` directory, or private diagnostics.
 
+## Game and UI changes
+
+- Keep old rulesets registered by exact version. Test restored records and replay before changing a game's default.
+- Test player observations and public projections structurally; random words can coincidentally occur in unrelated labels or identifiers.
+- For Hangman, cover shared opponent effects, scoring, terminal and historical masks, provider routing, and live updates without a current player.
+- Browser-check setup, model changes, start, live play, completion and replay at desktop and mobile sizes. Real-provider checks require authenticated CLIs and can incur charges; keep them separate from automated tests.
+- Research reusable open-source mechanics before adding a major subsystem. Record exact versions and verified licenses in `docs/GAME_SOURCES.md`; preserve attribution in `THIRD_PARTY_NOTICES.md` when copying or distributing third-party work.
+- Keep screenshots, process evidence, private plans and real match exports in ignored local directories. Public handoffs should summarize evidence without publishing raw diagnostics.
+
 ## Commit style
 
 Write short, factual, imperative commit messages on `main`. Do not force-push.

@@ -12,7 +12,7 @@ Per family: win 1, draw ½, loss 0; performance = points / scored possible point
 
 ## Privacy and authority
 
-Battleship placements are canonical private state and private player observations only. Before terminal, public transport exposes shots, hit/miss/sunk outcomes, placement completion, and phase but no untouched fleet cells. Terminal reveals both fleets; historical replay frames remain masked. New Hangman contests expose the shared pattern, scores and opponent letter outcomes to both agents while hiding the secret until terminal. Legacy Hangman lanes retain their own observation boundary and seal an early solve. Saved Hangman matches with missing or mismatched resolved model identity are marked unverified and excluded from comparative standings; their raw game result is retained. Public labels redact full-word submissions and Battleship fleet coordinates. All saved hidden-game state is replay-validated; forged derived state or results are quarantined.
+Battleship placements are canonical private state and private player observations only. Before terminal, public transport exposes shots, hit/miss/sunk outcomes, placement completion, and phase but no untouched fleet cells. Terminal reveals both fleets; historical replay frames remain masked. New Hangman contests expose the shared pattern, scores and opponent letter outcomes to both agents while hiding the secret until terminal. Legacy Hangman lanes retain their own observation boundary and seal an early solve. Saved matches with missing or mismatched resolved model identity are marked unranked and excluded from comparative standings; their raw game result is retained. Public labels redact full-word submissions and Battleship fleet coordinates. All saved hidden-game state is replay-validated; forged derived state or results are quarantined.
 
 Request reservations persist before spawn. Interrupted reservations conservatively charge reserved player provider time through their deadline without fabricating provider-reported latency. A real reply that fails model/tool qualification still retains its actual usage, latency, tool metadata, and reported identity.
 
@@ -20,7 +20,17 @@ Request reservations persist before spawn. Interrupted reservations conservative
 
 Run `npm ci`, `npm test`, `npm run lint`, `npm run typecheck`, `npm run build`, and `npm run benchmark`. `npm run benchmark -- --large` measures 500/1000 synthetic records locally. On the 2026-09-27 review machine the mixed Chess/Battleship fixture measured 339.4 MB at 1000 records, 480 ms median / 614 ms maximum-of-five write, and 439 ms JSON parse. These are synthetic, machine-specific measurements, not a throughput guarantee. Tests use deterministic fixtures, including a three-game v2 series and HTTP/SSE privacy checks, and make no paid provider calls. A live provider qualification pass and paid usage verification remain separate acceptance gates. The recent scoreboard is bounded to the snapshot history window, not a lifetime tournament ledger. The JSON store still rewrites in full at each durable checkpoint. Provider isolation is CLI policy rather than OS-user isolation. Codex CLI lacks qualified no-tools parity for scored series; Claude Code and OpenCode have per-invocation no-tools policies but real-model qualification still requires observed resolved identity and zero tools.
 
+## Latest Hangman acceptance (2026-09-28)
+
+The UI now has provider-specific model choices from history, custom IDs, explicit thinking effort, a focused setup, a visible start/new-match flow, a primary winner/score view and a light Hangman theme. Diagnostics and qualification details are expandable. A missing-current-player live update renders a preparing state rather than blanking the page. Legacy records remain addressable by exact version.
+
+Real cross-provider Hangman matches completed with separate Claude Code and Codex subprocesses. The redesigned browser start-to-finish check completed five accepted actions and showed the winner. Desktop, 390px mobile, model validation and replay masking were checked. Codex CLI 0.157.1 did not report its exact resolved model; those games are unranked. This is gameplay acceptance, not a model-strength or cost benchmark. Private screenshots, process evidence and match exports remain under ignored local audit/data directories.
+
+The merged remote fixes preserve paginated historical events, all retry usage in series aggregates, 250-action/500-request defaults, fail-closed missing terminal results, and rollback of failed series control checkpoints. Re-run the checks after integration; historical test counts are not a substitute for the current result.
+
 ## Next packages
+
+These are future candidates, not instructions to begin new implementation before completing their source audits and acceptance criteria.
 
 **G4 — Deduction Manor:** design a hidden-evidence deduction game using [PyBro-JHU/Clue-Less](GAME_SOURCES.md) as a licensed conceptual reference. Focus on evidence, elimination, and accusation rather than dice or walking. Do not implement it in this package.
 
