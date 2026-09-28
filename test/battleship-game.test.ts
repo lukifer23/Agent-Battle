@@ -45,6 +45,12 @@ test("shots alternate; hit, miss, sunk and terminal result derive from placement
   }
   assert.equal(state.phase, "terminal");
   assert.equal(game.result(state)?.winnerId, "player1");
+  const metrics = (game.publicState(state).metrics as Record<string, { shotsFired: number; hits: number; shipsSunk: number; shotsToFirstHit: number; shotsToSink: Record<string, number> }>).player1;
+  assert.equal(metrics.shotsFired, 18);
+  assert.equal(metrics.hits, 17);
+  assert.equal(metrics.shipsSunk, 5);
+  assert.equal(metrics.shotsToFirstHit, 2);
+  assert.equal(metrics.shotsToSink.carrier, 6);
   const frames = game.publicReplay(state);
   assert.equal(JSON.stringify(frames[0]).includes("a1"), false);
   assert.equal(JSON.stringify(frames[2]).includes("a1"), false);

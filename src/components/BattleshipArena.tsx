@@ -2,7 +2,7 @@ import type { PublicMatchDetail } from "../shared.js";
 
 type Shot = { playerId: string; coordinate: string; hit: boolean; sunk?: string };
 type FleetStatus = { placed: boolean; sunk: string[]; placements?: Array<{ ship: string; start: string; orientation: string }> };
-type PublicState = { phase: string; next: string | null; terminal: boolean; shots: Shot[]; fleets: Record<string, FleetStatus> };
+type PublicState = { phase: string; next: string | null; terminal: boolean; shots: Shot[]; fleets: Record<string, FleetStatus>; metrics: Record<string, { shotsFired: number; hits: number; misses: number; accuracy: number | null; shipsSunk: number; shotsToFirstHit: number | null; shotsToSink: Record<string, number> }> };
 const files = "abcdefghij";
 const lengths: Record<string, number> = { carrier: 5, battleship: 4, cruiser: 3, submarine: 3, destroyer: 2 };
 function shipCells(status: FleetStatus): Set<string> {
@@ -23,6 +23,7 @@ export function BattleshipArena({ match, replayPly }: { match: PublicMatchDetail
       const status = state.fleets[seat.id];
       const shots = state.shots.filter((shot) => shot.playerId !== seat.id);
       const ownCells = shipCells(status);
+      const metrics = state.metrics[seat.id];
       return <section className="battleship-board-panel" key={seat.id} aria-label={`${seat.label} fleet and incoming shots`}>
         <div className="battleship-board-head"><h3>{seat.label}</h3><span>{status.placed ? `${status.sunk.length}/5 sunk` : "Placing fleet"}</span></div>
         <div className="battleship-grid" role="grid" aria-label={`${seat.label} board`}>
@@ -37,6 +38,7 @@ export function BattleshipArena({ match, replayPly }: { match: PublicMatchDetail
             })}</div>)}
         </div>
         <p>{shots.length} shots received · {shots.filter((shot) => shot.hit).length} hits · {status.sunk.length} ships sunk</p>
+        <p>{metrics.shotsFired} fired · {metrics.hits} hits · {metrics.accuracy === null ? "accuracy pending" : `${(metrics.accuracy * 100).toFixed(0)}% accuracy`} · first hit {metrics.shotsToFirstHit ?? "pending"}</p>
       </section>;
     })}</div>
     <div className="battleship-legend"><span>× Hit</span><span>· Miss</span>{state.terminal && <span>■ Ship</span>}</div>

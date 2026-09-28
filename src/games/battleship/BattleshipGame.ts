@@ -127,7 +127,14 @@ export class BattleshipGame implements GameDefinition<BattleshipState> {
   }
   publicState(state: BattleshipState): Record<string, unknown> {
     const terminal = this.isTerminal(state);
-    return { ruleset: this.version, phase: state.phase, next: terminal ? null : state.next, terminal, shots: structuredClone(state.shots),
+    const metrics = Object.fromEntries(roles.map((role) => {
+      const shots = state.shots.filter((shot) => shot.playerId === role);
+      const hits = shots.filter((shot) => shot.hit).length;
+      return [role, { shotsFired: shots.length, hits, misses: shots.length - hits, accuracy: shots.length ? hits / shots.length : null,
+        shipsSunk: shots.filter((shot) => shot.sunk).length, shotsToFirstHit: shots.findIndex((shot) => shot.hit) < 0 ? null : shots.findIndex((shot) => shot.hit) + 1,
+        shotsToSink: Object.fromEntries(shots.flatMap((shot, index) => shot.sunk ? [[shot.sunk, index + 1]] : [])) }];
+    }));
+    return { ruleset: this.version, phase: state.phase, next: terminal ? null : state.next, terminal, shots: structuredClone(state.shots), metrics,
       fleets: Object.fromEntries(roles.map((role) => [role, { placed: Boolean(state.fleets[role]), sunk: state.shots.filter((shot) => shot.playerId !== role && shot.sunk).map((shot) => shot.sunk),
         ...(terminal ? { placements: state.fleets[role] } : {}) }])), ...(terminal ? { result: this.result(state) } : {}) };
   }
@@ -140,7 +147,13 @@ export class BattleshipGame implements GameDefinition<BattleshipState> {
     const frames = this.publicReplay(state);
     let last = -1;
     for (const event of record.events) if (event.payload?.publicState) {
-      const found = frames.findIndex((frame, index) => index > last && isDeepStrictEqual(frame, event.payload!.publicState));
+      const found = frames.findIndex((frame, index) => {
+        if (index <= last) return false;
+        const historical = event.payload!.publicState as Record<string, unknown>;
+        // Earlier standard-1 records predate the additive public metrics field.
+        const candidate = "metrics" in historical ? frame : Object.fromEntries(Object.entries(frame as Record<string, unknown>).filter(([key]) => key !== "metrics"));
+        return isDeepStrictEqual(candidate, historical);
+      });
       if (found < 0 || last >= 0 && found !== last + 1) return "Battleship event-time state differs from replay.";
       last = found;
     }

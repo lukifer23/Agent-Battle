@@ -93,6 +93,9 @@ test("v2 fixture series completes Chess, Hangman and Battleship with private fle
     assert.deepEqual(matches.map((match) => match.gameId).sort(), ["battleship", "chess", "hangman"]);
     assert.ok(matches.every((match) => match.status === "finished" && defaultGames.validateRecord(match) === undefined));
     const battle = matches.find((match) => match.gameId === "battleship")!;
+    const olderProjection = structuredClone(battle);
+    for (const event of olderProjection.events) if (event.payload?.publicState && typeof event.payload.publicState === "object") delete (event.payload.publicState as Record<string, unknown>).metrics;
+    assert.equal(defaultGames.validateRecord(olderProjection), undefined);
     const detail = projectRecord(battle);
     const preterminal = detail.replay!.slice(0, -1);
     for (const frame of preterminal) assert.equal(JSON.stringify(frame).includes("placements"), false);
