@@ -5,6 +5,8 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+- Clear connection warnings automatically after reconnecting; keep new-match launch disabled while disconnected and preserve genuine command errors.
+
 - Keep new-match setup above the board in every game and preserve the user's model choices when reopening it; show model-named Chess and Battleship winners.
 - Include current Claude Opus, Sonnet, and Haiku suggestions even with empty match history; preserve custom IDs and reset custom-entry mode when switching CLIs.
 - Require distinct explicit models for every game; reject CLI-default display placeholders and expose per-request execution evidence in the arena.

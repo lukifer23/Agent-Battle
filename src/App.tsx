@@ -260,7 +260,7 @@ function App() {
     });
     source.onerror = () => {
       setConnection((value) => (value === "live" ? "reconnecting" : "offline"));
-      void refresh().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not connect to the game server."));
+      void refresh().catch(() => undefined); // Connection state owns this transient failure; do not leave a stale command error.
     };
     return () => source.close();
   }, [refresh, rememberSnapshot, matchForView]);
@@ -364,7 +364,7 @@ function App() {
   const canCreate = !storageBlocked && (!state?.activeMatch || !["ready", "running", "paused", "interrupted"].includes(state.activeMatch.status));
   const activeSeries = seriesList.find((series) => ["ready", "running", "paused"].includes(series.status));
   const distinctModels = distinctExplicitModels({ model: whiteModel }, { model: blackModel });
-  const startBlocker = storageBlocked ? "Saved history is unavailable. Restore storage before starting."
+  const startBlocker = connection !== "live" ? "Waiting for the game server to reconnect." : storageBlocked ? "Saved history is unavailable. Restore storage before starting."
     : !providersChecked || !chosenGame ? "Checking games and local agent CLIs…"
     : !installed(whiteProvider) || !installed(blackProvider) ? "Install the selected agent CLI and sign in to use it."
     : !canCreate && state?.activeMatch ? `A ${state.activeMatch.gameId} match is ${state.activeMatch.status}. Finish or stop it before starting another match.`
@@ -564,6 +564,8 @@ function App() {
         {games.map((game) => { const count = (state?.recentMatches ?? []).filter((match) => match.gameId === game.id).length; return <button key={game.id} type="button" aria-pressed={viewMode === game.id} onClick={() => chooseView(game.id)}>{game.label}<span>{count} {count === 1 ? "match" : "matches"}</span></button>; })}
         <button type="button" aria-pressed={viewMode === "series"} onClick={() => chooseView("series")}>Battle series<span>{seriesList.length} recorded</span></button>
       </nav>
+
+      {(connection === "offline" || connection === "reconnecting") && <div className="error-banner" role="status">Connection interrupted. Reconnecting to the game server…</div>}
 
       {state?.storage && state.storage.status !== "healthy" && <div className="error-banner" role="alert">
         <strong>{state.storage.status === "write_failed" ? "Storage unavailable — requests stopped" : "Saved history needs review"}</strong>
