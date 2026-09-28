@@ -1,14 +1,15 @@
 import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
-import type { MatchRecord } from "../shared.js";
+import type { MatchRecord, SeriesRecord } from "../shared.js";
 import { defaultGames } from "../domain/defaultGames.js";
-import { validateMatchRecord, validateStoreEnvelope } from "./schema.js";
+import { validateMatchRecord, validateSeriesRecord, validateStoreEnvelope } from "./schema.js";
 
-export const STORE_VERSION = 4;
+export const STORE_VERSION = 5;
 
 export interface LoadResult {
   matches: MatchRecord[];
+  series: SeriesRecord[];
   migrated: boolean;
   quarantined: number;
   backupPath?: string;
@@ -83,7 +84,7 @@ export class MatchStore {
   }
 
   load(): LoadResult {
-    if (!existsSync(this.storePath)) return { matches: [], migrated: false, quarantined: 0 };
+    if (!existsSync(this.storePath)) return { matches: [], series: [], migrated: false, quarantined: 0 };
     const text = readFileSync(this.storePath, "utf8");
     let root: unknown;
     try {
@@ -91,7 +92,7 @@ export class MatchStore {
     } catch {
       throw new Error(`Saved matches at ${this.storePath} are not valid JSON. The original was preserved in place; the server cannot start until it is repaired or restored.`);
     }
-    let envelope: { version: number; records: unknown[] };
+    let envelope: { version: number; records: unknown[]; series: unknown[] };
     try {
       envelope = validateStoreEnvelope(root);
     } catch (error) {
@@ -113,20 +114,41 @@ export class MatchStore {
       else invalid.push({ error: result.error, record });
     }
 
+    const series: SeriesRecord[] = [];
+    const seenSeries = new Set<string>();
+    for (const raw of envelope.series) {
+      try {
+        const record = validateSeriesRecord(raw);
+        if (seenSeries.has(record.id)) throw new Error("Duplicate series id.");
+        seenSeries.add(record.id);
+        for (const slot of record.slots) for (const [attempt, matchId] of slot.matchIds.entries()) {
+          const match = matches.find((candidate) => candidate.id === matchId);
+          if (!match || match.series?.id !== record.id || match.series.slotId !== slot.id || match.series.attempt !== attempt + 1 || match.gameId !== slot.gameId) throw new Error("Series slot linkage differs from match record.");
+          if (slot.gameId === "hangman" && (match.gameState as { provenance?: { seed?: string } }).provenance?.seed !== slot.challengeSeed) throw new Error("Match challenge differs from series seed.");
+          for (const [role, agentIndex] of Object.entries(slot.roles)) {
+            const actual = match.players.find((player) => player.id === role)?.agent;
+            const expected = record.agents[agentIndex];
+            if (!actual || !expected || actual.provider !== expected.provider || actual.model !== expected.model || (actual.reasoning ?? "") !== (expected.reasoning ?? "")) throw new Error("Series agent assignment differs from match.");
+          }
+        }
+        if (record.status === "completed" && record.slots.some((slot) => !slot.skipped && !["finished", "forfeit"].includes(matches.find((match) => match.id === slot.matchIds.at(-1))?.status ?? ""))) throw new Error("Completed series has unfinished slots.");
+        series.push(record);
+      } catch (error) { invalid.push({ error: error instanceof Error ? error.message : "Invalid series", record: raw }); }
+    }
     const needsMigration = envelope.version !== STORE_VERSION;
-    if (!needsMigration && invalid.length === 0) return { matches, migrated: false, quarantined: 0 };
+    if (!needsMigration && invalid.length === 0) return { matches, series, migrated: false, quarantined: 0 };
 
     const backupPath = this.backup(`pre-migration-${stamp()}`);
     if (invalid.length > 0) this.writeQuarantine(invalid);
-    this.save(matches);
-    return { matches, migrated: true, quarantined: invalid.length, backupPath,
+    this.save(matches, series);
+    return { matches, series, migrated: true, quarantined: invalid.length, backupPath,
       ...(invalid.length ? { recoveryWarning: `${invalid.length} saved match record(s) were quarantined. Review the backup and quarantine file.` } : {}) };
   }
 
-  save(matches: MatchRecord[]): void {
+  save(matches: MatchRecord[], series: SeriesRecord[] = []): void {
     mkdirSync(dirname(this.storePath), { recursive: true });
     const temporaryPath = `${this.storePath}.${process.pid}.${Date.now()}.tmp`;
-    const payload = JSON.stringify({ version: STORE_VERSION, matches }, null, 2);
+    const payload = JSON.stringify({ version: STORE_VERSION, matches, series }, null, 2);
     const fd = openSync(temporaryPath, "w", 0o600);
     try {
       writeFileSync(fd, payload);
@@ -165,4 +187,4 @@ const defaultStore = new MatchStore(join(dataDirectory, "matches.json"));
 export const acquireStoreOwnership = (): void => defaultStore.acquireOwnership();
 export const releaseStoreOwnership = (): void => defaultStore.releaseOwnership();
 export const loadMatches = (): LoadResult => defaultStore.load();
-export const saveMatches = (matches: MatchRecord[]): void => defaultStore.save(matches);
+export const saveMatches = (matches: MatchRecord[], series: SeriesRecord[] = []): void => defaultStore.save(matches, series);

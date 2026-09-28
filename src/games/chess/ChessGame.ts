@@ -51,6 +51,9 @@ export class ChessGame implements GameDefinition<ChessRuntimeState> {
   readonly observationVersion = "chess-observation-v2";
   readonly actionSchemaVersion = "game-action-v1";
   readonly playerIds = ["white", "black"] as const;
+  readonly hiddenInformation = false;
+  cloneState(state: ChessRuntimeState): ChessRuntimeState { return this.deserialize(this.serialize(state)); }
+  publicAction(action: GameAction): GameAction { return structuredClone(action); }
 
   playerLabel(playerId: string): string {
     if (playerId === "white" || playerId === "black") return playerId === "white" ? "White" : "Black";

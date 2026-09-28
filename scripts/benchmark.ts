@@ -1,5 +1,9 @@
 import { buildSnapshot } from "../src/domain/snapshot.js";
 import { projectRecord } from "../src/domain/projection.js";
+import { MatchStore } from "../src/server/store.js";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import os from "node:os";
+import { join } from "node:path";
 import type { AgentAttempt, MatchEvent, MatchRecord, TurnTelemetry } from "../src/shared.js";
 
 const turnTimeout = 120;
@@ -87,5 +91,23 @@ results.push({ longGameTurns: 150, detailBytes: bytes(projected), projectMs: Num
 
 const activeSnapshot = buildSnapshot([{ ...longGame, status: "running" }], []);
 results.push({ activeDetailBytes: bytes(activeSnapshot), activeBuildMs: 0 });
+
+const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-persistence-benchmark-"));
+try {
+  const store = new MatchStore(join(folder, "matches.json"));
+  for (const count of [10, 50, 100]) {
+    const records = Array.from({ length: count }, (_value, index) => synthetic(index, 80, 500));
+    const timings: number[] = [];
+    for (let repeat = 0; repeat < 3; repeat++) {
+      const start = performance.now();
+      store.save(records);
+      timings.push(performance.now() - start);
+    }
+    const readStart = performance.now();
+    JSON.parse(readFileSync(store.storePath, "utf8"));
+    results.push({ persistedMatches: count, bytes: statSync(store.storePath).size,
+      writeMedianMs: Number(timings.sort((a, b) => a - b)[1].toFixed(2)), parseMs: Number((performance.now() - readStart).toFixed(2)) });
+  }
+} finally { rmSync(folder, { recursive: true, force: true }); }
 
 console.log(JSON.stringify(results, null, 2));

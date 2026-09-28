@@ -7,6 +7,7 @@ export interface AgentReply {
   stderrExcerpt: string;
   toolCalls: number | null;
   usage: AgentAttempt["usage"];
+  resolvedModel?: string;
 }
 
 export interface AttemptControl {
@@ -18,6 +19,7 @@ export interface AgentAdapter {
   readonly config: PlayerConfig;
   /** Describes the effective per-invocation restrictions as applied, or undefined when unknown. */
   readonly restrictions?: string;
+  readonly isolationQualified?: boolean;
   initialize(): Promise<void>;
   act(observation: GameObservation, control: AttemptControl): Promise<AgentReply>;
   shutdown(): Promise<void>;

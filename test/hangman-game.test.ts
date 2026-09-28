@@ -20,7 +20,7 @@ test("lanes reveal all occurrences independently and observations contain only o
   const s = fresh(); const letter = s.word[0];
   act(s, guess(letter));
   const observation = game.observe(s, { matchId: "m", turnId: "t", player: { id: "player2", label: "Player 2", agent: { provider: "codex", model: "test", name: "test" } }, ply: 2, turnIndex: 2, turnTimeoutMs: 1000 });
-  assert.equal(observation.ply, 1); assert.equal(observation.turnIndex, 1);
+  assert.equal(observation.ply, 2); assert.equal(observation.turnIndex, 2);
   assert.deepEqual(observation.history, []); assert.deepEqual(observation.state.guessedLetters, []);
   assert.equal(JSON.stringify(observation).includes(s.word), false);
   assert.equal(JSON.stringify(observation).includes("player1"), false);

@@ -269,6 +269,9 @@ class ToyGame implements GameDefinition<ToyState> {
   readonly observationVersion = "toy-observation-1";
   readonly actionSchemaVersion = "toy-action-1";
   readonly playerIds = ["a", "b"] as const;
+  readonly hiddenInformation = false;
+  cloneState(state: ToyState): ToyState { return { ...state }; }
+  publicAction(action: { type: string; payload: Record<string, unknown> }) { return structuredClone(action); }
   playerLabel(playerId: string): string {
     if (playerId !== "a" && playerId !== "b") throw new Error(`Unknown toy player ${playerId}.`);
     return playerId.toUpperCase();

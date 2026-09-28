@@ -57,19 +57,19 @@ function projectPending(pending: PendingTurn): PendingTurn {
  */
 export function projectRecord(record: MatchRecord, eventLimit = 40, registry = defaultGames): PublicMatchDetail {
   const game = registry.get(record.gameId);
-  const hidden = Boolean(game.publicAction);
+  const hidden = game.hiddenInformation;
   const turn = (value: TurnTelemetry): TurnTelemetry => {
     const safe = projectTurn(value);
     if (!hidden) return safe;
-    safe.action = safe.valid && safe.action ? game.publicAction!(safe.action) : undefined;
+    safe.action = safe.valid && safe.action ? game.publicAction(safe.action) : undefined;
     safe.actionLabel = safe.action ? game.actionLabel(safe.action) : undefined;
-    safe.attempts = safe.attempts.map((attempt) => ({ ...attempt, action: attempt.action ? game.publicAction!(attempt.action) : undefined, error: attempt.error ? "Action rejected or request failed; private diagnostics retained locally." : undefined }));
+    safe.attempts = safe.attempts.map((attempt) => ({ ...attempt, action: attempt.action ? game.publicAction(attempt.action) : undefined, error: attempt.error ? "Action rejected or request failed; private diagnostics retained locally." : undefined }));
     return safe;
   };
   const pending = record.pendingTurn ? projectPending(record.pendingTurn) : undefined;
   if (pending && hidden) {
     pending.feedback = undefined;
-    pending.attempts = pending.attempts.map((attempt) => ({ ...attempt, action: attempt.action ? game.publicAction!(attempt.action) : undefined, error: attempt.error ? "Request failed" : undefined }));
+    pending.attempts = pending.attempts.map((attempt) => ({ ...attempt, action: attempt.action ? game.publicAction(attempt.action) : undefined, error: attempt.error ? "Request failed" : undefined }));
   }
   return {
     ...summaryOf(record),
@@ -82,12 +82,13 @@ export function projectRecord(record: MatchRecord, eventLimit = 40, registry = d
     ...(pending ? { pendingTurn: pending } : {}),
     ...(record.currentPlayerId ? { currentPlayerId: record.currentPlayerId } : {}),
     ...(record.error ? { error: hidden ? "Match interrupted. Review private local diagnostics for details." : record.error } : {}),
+    ...(record.series ? { series: { ...record.series } } : {}),
   };
 }
 
 export function projectEvent(record: MatchRecord, event: MatchEvent, registry = defaultGames): MatchEvent {
   const game = registry.get(record.gameId);
-  if (!game.publicAction) {
+  if (!game.hiddenInformation) {
     const payload: Record<string, unknown> = {};
     for (const key of ["turnId", "turnIndex", "ply", "attempt", "retry", "retryCount", "latencyMs", "legalActionCount", "fenBefore", "fen", "pgn", "move", "resignation", "action", "actionLabel", "nextPlayerId", "result", "kind", "winnerId", "reason", "status", "timeoutMs", "toolCalls", "inputTokens", "outputTokens", "usage"]) {
       if (event.payload?.[key] !== undefined) payload[key] = structuredClone(event.payload[key]);
@@ -103,7 +104,9 @@ export function projectEvent(record: MatchRecord, event: MatchEvent, registry = 
     if (typeof payload[key] === "number") safe[key] = payload[key];
   }
   if (typeof payload.turnId === "string") safe.turnId = payload.turnId;
-  if (payload.publicState) safe.publicState = game.publicState(game.deserialize(record.gameState));
+  // Durable hidden-game events already carry their event-time public projection.
+  // Rebuilding from the current record would reveal the terminal word in earlier events.
+  if (payload.publicState) safe.publicState = structuredClone(payload.publicState);
   if (payload.action && typeof payload.action === "object") safe.action = game.publicAction(payload.action as import("../shared.js").GameAction);
   return { at: event.at, type: event.type, text: event.type.replaceAll(".", " "), ...(event.sequence !== undefined ? { sequence: event.sequence } : {}), ...(event.playerId ? { playerId: event.playerId } : {}), payload: safe };
 }
@@ -115,5 +118,6 @@ export function summaryOf(record: MatchRecord): MatchSummary {
     timeControl: { maxMinutes: record.settings.budgets.maxWallMinutes, turnSeconds: record.settings.turnTimeoutSeconds, mode: record.timeAccounting ? "active" : "legacy" },
     revision: record.revision, actionCount: record.history.filter((t) => t.valid).length,
     ...(record.result ? { result: { kind: record.result.kind, notation: record.result.notation, reason: record.result.reason, ...(record.result.winnerId ? { winnerId: record.result.winnerId } : {}) } } : {}),
+    ...(record.series ? { seriesId: record.series.id } : {}),
   };
 }

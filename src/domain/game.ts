@@ -25,7 +25,10 @@ export interface GameDefinition<State> {
   readonly actionSchemaVersion: string;
   readonly playerIds: readonly string[];
   playerLabel(playerId: string): string;
-  createState(): State;
+  createState(challengeSeed?: string): State;
+  /** A detached runtime copy used to stage an atomic controller transition. */
+  cloneState(state: State): State;
+  readonly hiddenInformation: boolean;
   currentPlayer(state: State): string | null;
   /** Number of board plies already applied to the state. */
   plyCount(state: State): number;
@@ -40,7 +43,7 @@ export interface GameDefinition<State> {
   publicState(state: State): unknown;
   publicReplay?(state: State): unknown[];
   validateRecord?(record: MatchRecord, state: State): string | undefined;
-  publicAction?(action: GameAction): GameAction;
+  publicAction(action: GameAction): GameAction;
   forfeit?(state: State, playerId: string): State;
   actionLabel(action: GameAction): string;
   eventProjection(state: State): Record<string, unknown>;
@@ -89,7 +92,7 @@ export class GameRegistry {
     return undefined;
   }
 
-  list(): Array<{ id: string; version: string; playerIds: string[] }> {
-    return [...this.games.values()].map((game) => ({ id: game.id, version: game.version, playerIds: [...game.playerIds] }));
+  list(): Array<{ id: string; version: string; label: string; playerIds: string[]; playerLabels: string[] }> {
+    return [...this.games.values()].map((game) => ({ id: game.id, version: game.version, label: game.id[0].toUpperCase() + game.id.slice(1), playerIds: [...game.playerIds], playerLabels: game.playerIds.map((id) => game.playerLabel(id)) }));
   }
 }

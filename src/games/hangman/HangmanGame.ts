@@ -30,6 +30,8 @@ export class HangmanGame implements GameDefinition<HangmanState> {
   readonly observationVersion = "hangman-observation-v1";
   readonly actionSchemaVersion = "game-action-v1";
   readonly playerIds = roles;
+  readonly hiddenInformation = true;
+  cloneState(state: HangmanState): HangmanState { return structuredClone(state); }
   playerLabel(id: string): string {
     if (!roles.includes(id as HangmanRole)) throw new Error("Unknown Hangman role.");
     return id === "player1" ? "Player 1" : "Player 2";
@@ -54,7 +56,7 @@ export class HangmanGame implements GameDefinition<HangmanState> {
     return {
       schemaVersion: this.observationVersion, gameId: this.id, matchId: context.matchId, turnId: context.turnId,
       playerId: role, playerLabel: this.playerLabel(role), sideToMove: role,
-      ply: lane.actionsTaken + 1, turnIndex: lane.actionsTaken + 1,
+      ply: context.ply, turnIndex: context.turnIndex,
       state: { pattern: this.pattern(state, role), wordLength: state.word.length, guessedLetters: [...lane.guessedLetters], misses: lane.misses, missesAllowed: 7, actionsTaken: lane.actionsTaken,
         rules: { version: this.version, incorrectLetterMisses: 1, incorrectSolutionMisses: 2, repeatedLetter: "invalid; one correction allowed", failureAtMisses: 7,
           objective: "Solve the word. A solved lane wins over an ordinary failed lane. Among solved lanes minimize misses, then accepted actions. Among failed lanes maximize distinct correctly guessed letters. A forfeited lane loses to a non-forfeited lane." },
@@ -164,6 +166,14 @@ export class HangmanGame implements GameDefinition<HangmanState> {
       index++;
     }
     if (index !== state.entries.length) return "Hangman action history lacks telemetry";
+    const frames = this.publicReplay(state);
+    let lastFrame = -1;
+    for (const event of record.events) {
+      if (!event.payload?.publicState) continue;
+      const found = frames.findIndex((frame, frameIndex) => frameIndex > lastFrame && isDeepStrictEqual(frame, event.payload!.publicState));
+      if (found < 0 || lastFrame >= 0 && found !== lastFrame + 1) return "Hangman event-time public state differs from replay";
+      lastFrame = found;
+    }
     return undefined;
   }
   publicReplay(state: HangmanState): unknown[] {

@@ -1,0 +1,193 @@
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import type { MatchController } from "../domain/MatchController.js";
+import { aggregateUsage } from "../domain/usage.js";
+import { projectRecord } from "../domain/projection.js";
+import type { MatchBudgets, MatchRecord, PlayerConfig, PublicSeries, PublicSeriesSlot, SeriesRecord, SeriesSlot } from "../shared.js";
+
+const hexSeed = /^[0-9a-f]{64}$/;
+const terminal = new Set(["finished", "forfeit", "stopped", "error"]);
+
+export function makeSeries(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeconds: number, budgets: MatchBudgets, seed = randomBytes(32).toString("hex")): SeriesRecord {
+  if (!hexSeed.test(seed) || agents.some((agent) => !agent.model.trim()) || !Number.isInteger(turnTimeoutSeconds) || turnTimeoutSeconds < 30 || turnTimeoutSeconds > 600) throw new Error("Series requires a valid seed, explicit models, and a 30–600 second turn timeout.");
+  if (![budgets.maxPlies, budgets.maxRequests, budgets.maxWallMinutes].every((value) => Number.isSafeInteger(value) && value > 0)
+    || budgets.maxReportedCostUsd !== null && (!Number.isFinite(budgets.maxReportedCostUsd) || budgets.maxReportedCostUsd < 0)) throw new Error("Series budgets are invalid.");
+  const now = new Date().toISOString();
+  const slots: SeriesSlot[] = Array.from({ length: 10 }, (_value, ordinal) => {
+    const gameId = ordinal < 5 ? "chess" : "hangman";
+    const ids = gameId === "chess" ? ["white", "black"] : ["player1", "player2"];
+    const first = ordinal % 5 % 2 === 0 ? 0 : 1;
+    const challengeSeed = gameId === "hangman" ? createHmac("sha256", Buffer.from(seed, "hex")).update(`battle-series-1:hangman:${ordinal - 5}`).digest("hex") : undefined;
+    return { id: randomUUID(), ordinal, gameId, challengeId: gameId === "chess" ? "standard-start-v1" : createHash("sha256").update(`hangman:${challengeSeed}`).digest("hex"),
+      ...(challengeSeed ? { challengeSeed } : {}), roles: { [ids[0]]: first, [ids[1]]: (1 - first) as 0 | 1 }, matchIds: [], skipped: false };
+  });
+  return { id: randomUUID(), version: "battle-series-1", createdAt: now, updatedAt: now, status: "ready", agents, settings: { turnTimeoutSeconds, budgets }, masterSeed: seed, slots };
+}
+
+function linkedMatch(slot: SeriesSlot, matches: MatchRecord[]): MatchRecord | undefined {
+  return matches.find((match) => match.id === slot.matchIds.at(-1));
+}
+
+export function publicSeries(series: SeriesRecord, matches: MatchRecord[], includeProvenance = false): PublicSeries {
+  const aggregate: PublicSeries["aggregate"] = {};
+  const slots: PublicSeriesSlot[] = series.slots.map((slot) => {
+    const match = linkedMatch(slot, matches);
+    const status: PublicSeriesSlot["status"] = slot.skipped ? "skipped" : !match ? "pending" : match.status === "finished" || match.status === "forfeit" ? "scored" : terminal.has(match.status) ? "unscored" : "running";
+    if (match) for (const [agentIndex] of series.agents.entries()) {
+      const key = `${slot.gameId}:${agentIndex}`;
+      const row = aggregate[key] ?? { wins: 0, draws: 0, losses: 0, unscored: 0, requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, latencyMs: 0,
+        coverage: { inputTokens: { reported: 0, total: 0 }, outputTokens: { reported: 0, total: 0 }, costUsd: { reported: 0, total: 0 }, latencyMs: { reported: 0, total: 0 } } };
+      const role = Object.entries(slot.roles).find(([, index]) => index === agentIndex)?.[0];
+      const pending = match.pendingTurn;
+      const attempts = [...match.history.filter((turn) => turn.playerId === role).flatMap((turn) => turn.attempts), ...(pending && role && pending.playerId === role ? pending.attempts : [])];
+      const usage = aggregateUsage(attempts);
+      row.requests += usage.requests; row.inputTokens += usage.inputTokens; row.outputTokens += usage.outputTokens; row.costUsd += usage.costUsd;
+      const providerAttempts = attempts.filter((attempt) => attempt.phase !== "initialization");
+      row.latencyMs += providerAttempts.reduce((sum, attempt) => sum + (attempt.latencyMs ?? 0), 0);
+      for (const metric of ["inputTokens", "outputTokens", "costUsd"] as const) {
+        row.coverage[metric].reported += usage.coverageByMetric[metric].reported;
+        row.coverage[metric].total += usage.coverageByMetric[metric].total;
+      }
+      row.coverage.latencyMs.reported += providerAttempts.filter((attempt) => attempt.latencyMs !== undefined).length;
+      row.coverage.latencyMs.total += providerAttempts.length;
+      if (status === "scored") {
+        if (match.result?.kind === "draw") row.draws++;
+        else if (match.result?.winnerId === role) row.wins++;
+        else row.losses++;
+      } else if (status === "unscored") row.unscored++;
+      aggregate[key] = row;
+    }
+    return { ...slot, ...(includeProvenance && series.status === "completed" && slot.challengeSeed ? { challengeSeed: slot.challengeSeed } : {}), status,
+      ...(status === "scored" && match?.result ? { result: match.result } : {}) };
+  });
+  for (const slot of slots) if (!includeProvenance || series.status !== "completed") delete slot.challengeSeed;
+  for (const agentIndex of [0, 1]) {
+    const first = aggregate[`chess:${agentIndex}`];
+    const second = aggregate[`hangman:${agentIndex}`];
+    if (!first && !second) continue;
+    const rows = [first, second].filter((row): row is NonNullable<typeof row> => Boolean(row));
+    aggregate[`overall:${agentIndex}`] = {
+      wins: rows.reduce((sum, row) => sum + row.wins, 0), draws: rows.reduce((sum, row) => sum + row.draws, 0),
+      losses: rows.reduce((sum, row) => sum + row.losses, 0), unscored: rows.reduce((sum, row) => sum + row.unscored, 0),
+      requests: rows.reduce((sum, row) => sum + row.requests, 0), inputTokens: rows.reduce((sum, row) => sum + row.inputTokens, 0),
+      outputTokens: rows.reduce((sum, row) => sum + row.outputTokens, 0), costUsd: rows.reduce((sum, row) => sum + row.costUsd, 0),
+      latencyMs: rows.reduce((sum, row) => sum + row.latencyMs, 0),
+      coverage: Object.fromEntries((["inputTokens", "outputTokens", "costUsd", "latencyMs"] as const).map((metric) => [metric, {
+        reported: rows.reduce((sum, row) => sum + row.coverage[metric].reported, 0), total: rows.reduce((sum, row) => sum + row.coverage[metric].total, 0),
+      }])) as PublicSeries["aggregate"][string]["coverage"],
+    };
+  }
+  return { id: series.id, version: series.version, createdAt: series.createdAt, updatedAt: series.updatedAt, status: series.status, agents: series.agents, settings: series.settings, slots, aggregate,
+    ...(series.error ? { error: series.error } : {}) };
+}
+
+export function seriesExport(series: SeriesRecord, matches: MatchRecord[]) {
+  const includeProvenance = series.status === "completed";
+  return { schemaVersion: "battle-series-export-1", series: publicSeries(series, matches, includeProvenance),
+    matches: series.slots.flatMap((slot) => slot.matchIds.map((id) => matches.find((match) => match.id === id)).filter((match): match is MatchRecord => Boolean(match)).map((match) => {
+      const detail = projectRecord(match, 500);
+      const usage = Object.fromEntries(match.players.map((seat) => [seat.id, aggregateUsage([...match.history.filter((turn) => turn.playerId === seat.id).flatMap((turn) => turn.attempts), ...(match.pendingTurn?.playerId === seat.id ? match.pendingTurn.attempts : [])])]));
+      return { detail, usage };
+    })) };
+}
+
+export class SeriesManager {
+  private pumping = new Set<string>();
+  private retrySlots = new Set<string>();
+  constructor(private readonly series: SeriesRecord[], private readonly controller: MatchController, private readonly save: () => void) {
+    for (const record of series) {
+      for (const slot of record.slots) {
+        const linked = controller.list().filter((match) => match.series?.id === record.id && match.series.slotId === slot.id).sort((a, b) => (a.series?.attempt ?? 0) - (b.series?.attempt ?? 0));
+        slot.matchIds = linked.map((match) => match.id);
+      }
+      if (record.status === "running") { record.status = "paused"; record.error = "Server restarted. Resume the saved slot when ready."; this.save(); }
+    }
+  }
+
+  list(): SeriesRecord[] { return [...this.series]; }
+  get(id: string): SeriesRecord { const found = this.series.find((record) => record.id === id); if (!found) throw new Error("Series not found."); return found; }
+  create(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeconds: number, budgets: MatchBudgets): SeriesRecord {
+    if (this.series.some((record) => ["ready", "running", "paused"].includes(record.status))) throw new Error("Finish or stop the current series first.");
+    if (this.controller.active()) throw new Error("Stop or finish the current match before creating a series.");
+    const record = makeSeries(agents, turnTimeoutSeconds, budgets);
+    this.series.unshift(record);
+    try { this.save(); } catch (error) { this.series.shift(); throw error; }
+    return record;
+  }
+  async start(id: string): Promise<void> {
+    const record = this.get(id);
+    if (!["ready", "paused"].includes(record.status)) throw new Error("Only a ready or paused series can start.");
+    const previous = structuredClone(record);
+    record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString();
+    try { this.save(); } catch (error) { Object.assign(record, previous); throw error; }
+    void this.pump(record);
+  }
+  async pause(id: string): Promise<void> {
+    const record = this.get(id);
+    if (record.status !== "running") throw new Error("Series is not running.");
+    record.status = "paused"; record.updatedAt = new Date().toISOString(); this.save();
+    const match = this.controller.active();
+    if (match?.series?.id === id && match.status === "running") await this.controller.pause(match.id);
+  }
+  async stop(id: string): Promise<void> {
+    const record = this.get(id);
+    if (record.status === "completed") throw new Error("Completed series cannot be stopped.");
+    record.status = "stopped"; record.updatedAt = new Date().toISOString(); this.save();
+    const match = this.controller.active();
+    if (match?.series?.id === id) await this.controller.stop(match.id);
+  }
+  retry(id: string): void {
+    const record = this.get(id);
+    if (record.status !== "paused") throw new Error("Pause the series before retrying.");
+    const slot = record.slots.find((candidate) => !candidate.skipped && linkedMatch(candidate, this.controller.list())?.status !== "finished" && linkedMatch(candidate, this.controller.list())?.status !== "forfeit");
+    if (!slot || !linkedMatch(slot, this.controller.list()) || !terminal.has(linkedMatch(slot, this.controller.list())!.status)) throw new Error("Current slot has no failed match to retry.");
+    this.retrySlots.add(slot.id);
+    record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString(); this.save(); void this.pump(record);
+  }
+  skip(id: string): void {
+    const record = this.get(id);
+    if (record.status !== "paused") throw new Error("Pause the series before skipping.");
+    const slot = record.slots.find((candidate) => !candidate.skipped && linkedMatch(candidate, this.controller.list())?.status !== "finished" && linkedMatch(candidate, this.controller.list())?.status !== "forfeit");
+    if (!slot) throw new Error("No slot to skip.");
+    const match = linkedMatch(slot, this.controller.list());
+    if (match && !terminal.has(match.status)) throw new Error("Stop the active match before skipping.");
+    slot.skipped = true; record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString(); this.save(); void this.pump(record);
+  }
+  onMatchChange(match: MatchRecord): void {
+    if (!match.series || !terminal.has(match.status)) return;
+    const record = this.series.find((item) => item.id === match.series?.id);
+    if (record?.status === "running") setTimeout(() => void this.pump(record), 0);
+  }
+  private async pump(record: SeriesRecord): Promise<void> {
+    if (this.pumping.has(record.id)) return;
+    this.pumping.add(record.id);
+    try {
+      while (record.status === "running") {
+        const slot = record.slots.find((candidate) => !candidate.skipped && !["finished", "forfeit"].includes(linkedMatch(candidate, this.controller.list())?.status ?? ""));
+        if (!slot) { record.status = "completed"; record.updatedAt = new Date().toISOString(); this.save(); return; }
+        let match = linkedMatch(slot, this.controller.list());
+        if (match && ["running", "ready"].includes(match.status)) {
+          if (match.status === "ready") await this.controller.start(match.id);
+          return;
+        }
+        if (match && ["paused", "interrupted"].includes(match.status)) { await this.controller.start(match.id); return; }
+        if (match && terminal.has(match.status)) {
+          if (this.retrySlots.has(slot.id)) this.retrySlots.delete(slot.id);
+          else { record.status = "paused"; record.error = `Slot ${slot.ordinal + 1} ended without a scored result.`; this.save(); return; }
+        }
+        const players = Object.fromEntries(Object.entries(slot.roles).map(([role, agentIndex]) => [role, record.agents[agentIndex]]));
+        const requested = record.settings.budgets;
+        match = await this.controller.create({ gameId: slot.gameId, players, turnTimeoutSeconds: record.settings.turnTimeoutSeconds, challengeSeed: slot.challengeSeed,
+          series: { id: record.id, slotId: slot.id, attempt: slot.matchIds.length + 1 }, budgets: {
+            maxPlies: requested.maxPlies, maxRequests: requested.maxRequests * 2 + 2, maxWallMinutes: requested.maxWallMinutes * 2 + 5,
+            maxReportedCostUsd: requested.maxReportedCostUsd, maxRequestsPerPlayer: requested.maxRequests, maxActiveMinutesPerPlayer: requested.maxWallMinutes,
+          } });
+        slot.matchIds.push(match.id); record.updatedAt = new Date().toISOString(); this.save();
+        await this.controller.start(match.id);
+        return;
+      }
+    } catch (error) {
+      record.status = "paused"; record.error = error instanceof Error ? error.message : "Series execution failed."; record.updatedAt = new Date().toISOString();
+      try { this.save(); } catch { /* Store failure is already surfaced by the match controller. */ }
+    } finally { this.pumping.delete(record.id); }
+  }
+}

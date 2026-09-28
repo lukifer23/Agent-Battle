@@ -42,6 +42,8 @@ export interface CreateMatchRequest {
   players: Record<string, PlayerConfig>;
   turnTimeoutSeconds: number;
   budgets?: Partial<MatchBudgets>;
+  challengeSeed?: string;
+  series?: { id: string; slotId: string; attempt: number };
 }
 
 const DEFAULT_BUDGETS: MatchBudgets = { maxPlies: 150, maxRequests: 200, maxWallMinutes: 30, maxReportedCostUsd: null };
@@ -202,12 +204,14 @@ export class MatchController {
       };
     }) as [PlayerSeat, PlayerSeat];
     const now = new Date().toISOString();
-    const state = game.createState();
+    const state = game.createState(request.challengeSeed);
     const budgets: MatchBudgets = {
       maxPlies: clampBudget(request.budgets?.maxPlies, DEFAULT_BUDGETS.maxPlies, 10_000),
       maxRequests: clampBudget(request.budgets?.maxRequests, DEFAULT_BUDGETS.maxRequests, 100_000),
       maxWallMinutes: clampBudget(request.budgets?.maxWallMinutes, DEFAULT_BUDGETS.maxWallMinutes, 10_000),
       maxReportedCostUsd: typeof request.budgets?.maxReportedCostUsd === "number" && request.budgets.maxReportedCostUsd >= 0 ? request.budgets.maxReportedCostUsd : null,
+      ...(request.budgets?.maxRequestsPerPlayer ? { maxRequestsPerPlayer: clampBudget(request.budgets.maxRequestsPerPlayer, 200, 100_000) } : {}),
+      ...(request.budgets?.maxActiveMinutesPerPlayer ? { maxActiveMinutesPerPlayer: clampBudget(request.budgets.maxActiveMinutesPerPlayer, 30, 10_000) } : {}),
     };
     const cliVersions: MatchEnvironment["cliVersions"] = {};
     for (const provider of detected) if (provider.version) cliVersions[provider.provider] = provider.version;
@@ -239,6 +243,7 @@ export class MatchController {
       environment,
       timeAccounting: { mode: "active-runtime-v1", elapsedMs: 0 },
       gameState: game.serialize(state),
+      ...(request.series ? { series: request.series } : {}),
       history: [],
       events: [],
     };
@@ -431,6 +436,7 @@ export class MatchController {
         running.agents.set(seat.id, adapter);
         try {
           await adapter.initialize();
+          if (match.series && !adapter.isolationQualified) throw new AgentExecutionError(`${seat.agent.provider} tool isolation is not qualified for scored series trials.`);
         } catch (error) {
           const message = error instanceof Error ? error.message : "The agent could not initialize.";
           const retryBudget = this.budgetStopReason(match, game, state);
@@ -466,6 +472,8 @@ export class MatchController {
         if (budgetReason) { this.budgetStop(match, budgetReason); return; }
         const playerId = game.currentPlayer(state);
         if (!playerId) throw new Error("The game has no current player but is not terminal.");
+        const playerBudget = this.budgetStopReason(match, game, state, playerId);
+        if (playerBudget) { this.budgetStop(match, playerBudget); return; }
         match.currentPlayerId = playerId;
         const seat = this.player(match, playerId);
         const adapter = running.agents.get(playerId);
@@ -502,11 +510,11 @@ export class MatchController {
 
         for (let attemptNumber = resumeAttempt; attemptNumber <= match.settings.maxRetries + 1; attemptNumber += 1) {
           if (running.control !== "continue") break;
-          const attemptBudgetReason = this.budgetStopReason(match, game, state);
+          const attemptBudgetReason = this.budgetStopReason(match, game, state, playerId);
           if (attemptBudgetReason) { this.budgetStop(match, attemptBudgetReason); return; }
           const startedAt = new Date().toISOString();
           const invocationId = randomUUID();
-          const reservation: AgentAttempt = { attempt: attemptNumber, invocationId, startedAt, deadlineAt: new Date(Date.parse(startedAt) + Math.min(observation.clock.turnTimeoutMs, remainingMatchMs(match))).toISOString(), status: "started", phase: "provider", toolCalls: null, usage: { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" } };
+          const reservation: AgentAttempt = { attempt: attemptNumber, invocationId, startedAt, deadlineAt: new Date(Date.parse(startedAt) + Math.min(observation.clock.turnTimeoutMs, remainingMatchMs(match), this.remainingPlayerMs(match, playerId))).toISOString(), status: "started", phase: "provider", toolCalls: null, usage: { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" } };
           attempts.push(reservation);
           if (!this.persistCheckpoint(match, game, state)) return;
           const finishAttempt = (completed: AgentAttempt) => Object.assign(reservation, completed, { invocationId, deadlineAt: reservation.deadlineAt });
@@ -517,12 +525,17 @@ export class MatchController {
           running.inFlight.add(control);
           try {
             const attemptObservation = feedback ? { ...observation, feedback } : observation;
-            reply = await this.invokeWithTimeout(adapter, attemptObservation, control, remainingMatchMs(match));
+            reply = await this.invokeWithTimeout(adapter, attemptObservation, control, Math.min(remainingMatchMs(match), this.remainingPlayerMs(match, playerId)));
           } catch (error) { failure = error; }
           finally {
             running.inFlight.delete(control);
             await adapter.shutdown();
           }
+
+          if (match.series && reply && (!reply.resolvedModel || reply.resolvedModel !== seat.agent.model || reply.toolCalls !== 0)) {
+            failure = new AgentExecutionError(`Series model or tool qualification failed for ${seat.label}: requested ${seat.agent.model}, reported ${reply.resolvedModel ?? "unknown"}, tool calls ${reply.toolCalls ?? "unknown"}.`);
+            reply = undefined;
+          } else if (reply?.resolvedModel) seat.agent.resolvedModel = reply.resolvedModel;
 
           if (running.control !== "continue") {
             finishAttempt(this.attempt(attemptNumber, startedAt, "cancelled", {
@@ -627,7 +640,7 @@ export class MatchController {
           match.history.push(record);
           match.pendingTurn = undefined;
           if (game.forfeit) {
-            const nextState = game.forfeit(game.deserialize(game.serialize(state)), playerId);
+            const nextState = game.forfeit(game.cloneState(state), playerId);
             const result = game.result(nextState);
             match.gameState = game.serialize(nextState);
             match.currentPlayerId = game.currentPlayer(nextState) ?? undefined;
@@ -655,7 +668,7 @@ export class MatchController {
           return;
         }
 
-        const nextState = game.applyAction(game.deserialize(game.serialize(state)), playerId, selectedAction);
+        const nextState = game.applyAction(game.cloneState(state), playerId, selectedAction);
         match.pendingTurn = undefined;
         const terminalResult = game.isTerminal(nextState)
           ? game.result(nextState) ?? { kind: "draw" as const, notation: "1/2-1/2", reason: "Game ended without a result." }
@@ -730,12 +743,24 @@ export class MatchController {
     }
   }
 
-  private budgetStopReason(match: MatchRecord, game: GameDefinition<unknown>, state: unknown): string | undefined {
+  private remainingPlayerMs(match: MatchRecord, playerId: string): number {
+    const maximum = match.settings.budgets.maxActiveMinutesPerPlayer;
+    if (!maximum) return Number.POSITIVE_INFINITY;
+    const used = [...match.history, ...(match.pendingTurn ? [match.pendingTurn] : [])]
+      .filter((turn) => turn.playerId === playerId).flatMap((turn) => turn.attempts)
+      .reduce((total, attempt) => total + (attempt.latencyMs ?? 0), 0);
+    return maximum * 60_000 - used;
+  }
+
+  private budgetStopReason(match: MatchRecord, game: GameDefinition<unknown>, state: unknown, playerId?: string): string | undefined {
     const budgets = match.settings.budgets;
     const plies = game.plyCount(state);
     if (plies >= budgets.maxPlies) return `maximum plies (${budgets.maxPlies}) reached`;
     const requests = matchRequests(match);
     if (requests >= budgets.maxRequests) return `maximum requests (${budgets.maxRequests}) reached`;
+    if (playerId && budgets.maxRequestsPerPlayer && [...match.history, ...(match.pendingTurn ? [match.pendingTurn] : [])]
+      .filter((turn) => turn.playerId === playerId).flatMap((turn) => turn.attempts).filter((attempt) => attempt.phase !== "initialization").length >= budgets.maxRequestsPerPlayer) return `${playerId} request limit reached`;
+    if (playerId && this.remainingPlayerMs(match, playerId) <= 0) return `${playerId} active provider time limit reached`;
     if (remainingMatchMs(match) <= 0) return `maximum ${match.timeAccounting ? "active" : "wall"} time (${budgets.maxWallMinutes} min) reached`;
     if (budgets.maxReportedCostUsd !== null) {
       const cost = matchReportedCost(match);

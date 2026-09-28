@@ -213,13 +213,54 @@ test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess c
     assert.equal(finished.match.result.winnerId, "player1");
     assert.ok(finished.match.replay.length >= 4);
     assert.equal(JSON.stringify(finished.match.replay.slice(0, -1)).includes(word), false);
+    const historicalEvents = (await request(`/api/matches/${id}/events`)).events as Array<{ payload?: { publicState?: { terminal: boolean } } }>;
+    for (const event of historicalEvents) if (event.payload?.publicState && !event.payload.publicState.terminal) {
+      assert.equal(JSON.stringify(event).includes(word), false, "pre-terminal event was changed by final reveal");
+    }
     const raw = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
     assert.equal(raw.matches[0].gameState.word, word);
-    assert.equal(raw.version, 4);
+    assert.equal(raw.version, 5);
     for (const event of raw.matches[0].events) {
       if (JSON.stringify(event).includes(word)) assert.equal(event.payload?.publicState?.terminal, true);
     }
     const list = await request("/api/matches");
     for (const key of ["gameState", "pendingTurn", "history", "events", "responseExcerpt", "stderrExcerpt"]) assert.equal(key in list.matches[0], false);
+  } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("series API persists private challenges and blocks unqualified Codex scoring", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-series-api-"));
+  const { mkdirSync, chmodSync } = await import("node:fs");
+  const bin = join(folder, "bin"); mkdirSync(bin);
+  const fixture = join(bin, "codex");
+  writeFileSync(fixture, `#!${process.execPath}\nif (process.argv.includes('--version')) { console.log('codex fixture 1'); process.exit(0); }`); chmodSync(fixture, 0o700);
+  const port = 5500 + Math.floor(Math.random() * 200);
+  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], { cwd: projectRoot,
+    env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
+  const request = async (path: string, body?: unknown) => {
+    const result = await probe(port, { path, ...(body ? { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } } : {}) });
+    return { status: result.status, value: JSON.parse(result.body) };
+  };
+  try {
+    await waitForListening(child, port);
+    const invalid = await request("/api/series", { agents: [{ provider: "codex", model: "" }, { provider: "codex", model: "fixture-b" }] });
+    assert.equal(invalid.status, 400);
+    const created = await request("/api/series", { agents: [{ provider: "codex", model: "fixture-a" }, { provider: "codex", model: "fixture-b" }] });
+    assert.equal(created.status, 201);
+    const id = created.value.series.id as string;
+    const store = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
+    const seed = store.series[0].slots[5].challengeSeed as string;
+    assert.equal(JSON.stringify(created.value).includes(seed), false);
+    assert.equal((await request(`/api/series/${id}/start`, {})).status, 200);
+    let detail;
+    for (let i = 0; i < 50; i++) {
+      detail = (await request(`/api/series/${id}`)).value.series;
+      if (detail.status === "paused") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(detail.status, "paused");
+    assert.equal(detail.slots[0].status, "unscored");
+    assert.equal(JSON.stringify((await request(`/api/series/${id}/export`)).value).includes(seed), false);
+    assert.equal((await request(`/api/series/${id}/stop`, {})).status, 200);
   } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
 });

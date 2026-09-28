@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import { join } from "node:path";
 import { AgentExecutionError, AgentProtocolError } from "../src/domain/agent.js";
-import { CodexCLIAdapter, OpenCodeAdapter, parseStructuredAction } from "../src/server/adapters.js";
+import { ClaudeCodeAdapter, CodexCLIAdapter, OpenCodeAdapter, parseStructuredAction } from "../src/server/adapters.js";
 import { ChessGame } from "../src/games/chess/ChessGame.js";
 
 const action = { type: "move", payload: { move: "e2e4" } };
@@ -60,11 +60,33 @@ test("Codex CLI adapter uses supported headless policy options and reads a struc
     assert.equal(reply.usage.inputTokens, 42);
     assert.equal(reply.usage.outputTokens, 3);
     assert.equal(reply.toolCalls, 0);
+    assert.equal(adapter.isolationQualified, false);
     const args = readFileSync(join(folder, "arguments.txt"), "utf8");
     assert.match(args, /approval_policy="never"/);
+    assert.match(args, /--ignore-user-config/);
     assert.doesNotMatch(args, /--ask-for-approval/);
     await adapter.shutdown();
   }, "valid");
+});
+
+test("Claude no-tools invocation reports resolved model and policy evidence", async () => {
+  const previousPath = process.env.PATH;
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-claude-test-"));
+  const executable = join(folder, "claude");
+  const envelope = JSON.stringify({ structured_output: action, modelUsage: { "claude-test-model": { inputTokens: 1 } }, usage: { input_tokens: 7, output_tokens: 2 } });
+  writeFileSync(executable, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'claude test'; exit 0; fi\nprintf '%s\\n' "$@" > "${folder}/args.txt"\nprintf '%s\\n' '${envelope}'\n`);
+  chmodSync(executable, 0o755);
+  process.env.PATH = `${folder}:/bin:/usr/bin`;
+  try {
+    const adapter = new ClaudeCodeAdapter({ provider: "claude", model: "claude-test-model", name: "test" });
+    await adapter.initialize();
+    const reply = await adapter.act(observation, control());
+    assert.equal(reply.resolvedModel, "claude-test-model");
+    assert.equal(reply.toolCalls, 0);
+    assert.equal(adapter.isolationQualified, true);
+    assert.match(readFileSync(join(folder, "args.txt"), "utf8"), /--bare/);
+    await adapter.shutdown();
+  } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
 });
 
 test("agent timeout kills the CLI process group", async () => {
@@ -91,7 +113,7 @@ test("OpenCode adapter selects a dedicated no-tools agent even when user config 
   const executable = join(folder, "opencode");
   const captureConfig = join(folder, "config.json");
   const captureArgs = join(folder, "args.txt");
-  const event = JSON.stringify({ type: "text", part: { type: "text", text: JSON.stringify(action) } });
+  const event = JSON.stringify({ type: "text", part: { type: "text", text: JSON.stringify(action), providerID: "test-provider", modelID: "test-model" } });
   const script = `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'opencode test 1.0'; exit 0; fi\nprintf '%s' "$OPENCODE_CONFIG_CONTENT" > "$BATTLE_TEST_CONFIG"\nprintf '%s\\n' "$@" > "$BATTLE_TEST_ARGS"\nprintf '%s\\n' '${event}'\n`;
   writeFileSync(executable, script);
   chmodSync(executable, 0o755);
@@ -103,6 +125,7 @@ test("OpenCode adapter selects a dedicated no-tools agent even when user config 
     await adapter.initialize();
     const reply = await adapter.act(observation, control());
     assert.deepEqual(reply.action, action);
+    assert.equal(reply.resolvedModel, "test-provider/test-model");
     const config = JSON.parse(readFileSync(captureConfig, "utf8")) as {
       agent: Record<string, { tools: Record<string, boolean>; permission: Record<string, string> }>;
     };

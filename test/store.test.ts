@@ -39,7 +39,7 @@ function tempStore(): { store: MatchStore; folder: string; path: string; cleanup
 test("a missing store loads as empty and saves a versioned envelope", () => {
   const { store, path, cleanup } = tempStore();
   try {
-    assert.deepEqual(store.load(), { matches: [], migrated: false, quarantined: 0 });
+    assert.deepEqual(store.load(), { matches: [], series: [], migrated: false, quarantined: 0 });
     store.save([sampleRecord()]);
     const parsed = JSON.parse(readFileSync(path, "utf8")) as { version: number; matches: unknown[] };
     assert.equal(parsed.version, STORE_VERSION);
@@ -95,7 +95,7 @@ test("unsupported numeric versions and duplicate IDs preserve recoverable record
       assert.throws(() => store.load(), /version/i);
       assert.equal(readFileSync(path, "utf8"), source);
     }
-    writeFileSync(path, JSON.stringify({ version: STORE_VERSION, matches: [sampleRecord(), sampleRecord()] }));
+    writeFileSync(path, JSON.stringify({ version: STORE_VERSION, matches: [sampleRecord(), sampleRecord()], series: [] }));
     const loaded = store.load();
     assert.equal(loaded.matches.length, 1);
     assert.equal(loaded.quarantined, 1);
@@ -107,7 +107,7 @@ test("unsupported numeric versions and duplicate IDs preserve recoverable record
 test("a fabricated finished result is quarantined before it reaches the controller", () => {
   const { store, path, cleanup } = tempStore();
   try {
-    writeFileSync(path, JSON.stringify({ version: STORE_VERSION, matches: [
+    writeFileSync(path, JSON.stringify({ version: STORE_VERSION, series: [], matches: [
       sampleRecord({ id: "valid" }),
       sampleRecord({ id: "fabricated", status: "finished", result: { kind: "win", winnerId: "white", notation: "1-0", reason: "fabricated" } }),
     ] }));
@@ -186,7 +186,7 @@ test("stale-lock recovery competition has one winner", async () => {
 test("invalid records are quarantined while valid records survive", () => {
   const { store, folder, path, cleanup } = tempStore();
   try {
-    writeFileSync(path, JSON.stringify({ version: STORE_VERSION, matches: [sampleRecord({ id: "good" }), { id: "bad" }] }));
+    writeFileSync(path, JSON.stringify({ version: STORE_VERSION, matches: [sampleRecord({ id: "good" }), { id: "bad" }], series: [] }));
     const loaded = store.load();
     assert.equal(loaded.matches.length, 1);
     assert.equal(loaded.matches[0].id, "good");

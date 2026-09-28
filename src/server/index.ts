@@ -3,7 +3,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
-import { PROVIDERS, type MatchRecord, type PlayerConfig, type Provider } from "../shared.js";
+import { PROVIDERS, type MatchRecord, type PlayerConfig, type Provider, type SeriesRecord } from "../shared.js";
 import { AgentRegistry } from "../domain/agent.js";
 import { MatchController } from "../domain/MatchController.js";
 import { defaultGames } from "../domain/defaultGames.js";
@@ -11,6 +11,7 @@ import { summaryOf, projectRecord } from "../domain/projection.js";
 import { agentRegistryDefaults, detectProviders } from "./adapters.js";
 import { acquireStoreOwnership, loadMatches, releaseStoreOwnership, saveMatches, STORE_VERSION } from "./store.js";
 import { shouldPersistChange, shouldPublishSnapshot } from "./eventPolicy.js";
+import { SeriesManager, publicSeries, seriesExport } from "./series.js";
 
 const app = express();
 const httpServer = createServer(app);
@@ -24,10 +25,12 @@ try {
 }
 
 let storedMatches: MatchRecord[] = [];
+let storedSeries: SeriesRecord[] = [];
 let storageWarning: string | null = null;
 try {
   const loaded = loadMatches();
   storedMatches = loaded.matches;
+  storedSeries = loaded.series;
   storageWarning = loaded.recoveryWarning ?? null;
   if (loaded.migrated) {
     console.log(`Migrated saved matches to store version ${STORE_VERSION}.${loaded.backupPath ? ` Backup: ${loaded.backupPath}.` : ""}${loaded.quarantined ? ` Quarantined ${loaded.quarantined} invalid record(s).` : ""}`);
@@ -115,7 +118,7 @@ function publishSnapshot(): void {
 function stateChanged(record: MatchRecord, event?: import("../shared.js").MatchEvent): void {
   if (shouldPersistChange(event)) {
     const started = Date.now();
-    saveMatches(storedMatches);
+    saveMatches(storedMatches, storedSeries);
     logMetric("checkpoint", { matches: storedMatches.length, ms: Date.now() - started });
   }
   if (event) {
@@ -124,6 +127,7 @@ function stateChanged(record: MatchRecord, event?: import("../shared.js").MatchE
     for (const response of eventClients) writeToClient(response, event.type, encoded, event.sequence === undefined ? undefined : `${record.id}:${event.sequence}`);
   }
   if (shouldPublishSnapshot(event) || record.gameId === "hangman" || event?.type === "agent.started") publishSnapshot();
+  if (event) seriesManager?.onMatchChange(record);
 }
 
 const games = defaultGames;
@@ -133,6 +137,7 @@ const agents = new AgentRegistry()
   .register("claude", agentDefaults.claude)
   .register("opencode", agentDefaults.opencode);
 let controller: MatchController;
+let seriesManager: SeriesManager | undefined;
 try {
   controller = new MatchController(games, agents, storedMatches, () => providerCache.value, stateChanged, () => {
     const candidate = controller.getRecoveryCandidate();
@@ -142,6 +147,7 @@ try {
     }
     publishSnapshot();
   });
+  seriesManager = new SeriesManager(storedSeries, controller, () => saveMatches(storedMatches, storedSeries));
 } catch (error) {
   console.error("Could not restore saved matches.", error);
   releaseStoreOwnership();
@@ -233,6 +239,40 @@ app.get("/api/matches/:id/attempts", (request, response) => {
 
 app.get("/api/games", (_request, response) => response.json({ games: games.list() }));
 
+app.get("/api/series", (_request, response) => response.json({ series: seriesManager!.list().map((record) => publicSeries(record, storedMatches)) }));
+app.get("/api/series/:id", (request, response) => {
+  try { response.json({ series: publicSeries(seriesManager!.get(matchIdOf(request)), storedMatches) }); }
+  catch { response.status(404).json({ error: "Series not found.", code: "not_found" }); }
+});
+app.get("/api/series/:id/export", (request, response) => {
+  try { response.json(seriesExport(seriesManager!.get(matchIdOf(request)), storedMatches)); }
+  catch { response.status(404).json({ error: "Series not found.", code: "not_found" }); }
+});
+app.post("/api/series", asyncRoute(async (request, response) => {
+  const body = request.body as Record<string, unknown>;
+  if (!Array.isArray(body.agents) || body.agents.length !== 2) throw new Error("Series requires two agents.");
+  const parsed = body.agents.map(parsePlayer);
+  if (parsed.some((agent) => !agent.model.trim())) throw new Error("Series requires explicit model IDs for both agents.");
+  const detected = await providerCache.value;
+  for (const agent of parsed) if (!detected.some((provider) => provider.provider === agent.provider && provider.installed)) throw new Error(`${agent.provider} CLI is unavailable.`);
+  const raw = body.budgets && typeof body.budgets === "object" ? body.budgets as Record<string, unknown> : {};
+  const budgets = { maxPlies: Number(raw.maxPlies ?? 150), maxRequests: Number(raw.maxRequests ?? 200), maxWallMinutes: Number(raw.maxWallMinutes ?? 30),
+    maxReportedCostUsd: raw.maxReportedCostUsd === undefined || raw.maxReportedCostUsd === null || raw.maxReportedCostUsd === "" ? null : Number(raw.maxReportedCostUsd) };
+  const created = seriesManager!.create(parsed as [PlayerConfig, PlayerConfig], Number(body.turnTimeoutSeconds ?? 120), budgets);
+  response.status(201).json({ series: publicSeries(created, storedMatches) });
+}));
+for (const command of ["start", "pause", "stop", "retry", "skip"] as const) {
+  app.post(`/api/series/:id/${command}`, asyncRoute(async (request, response) => {
+    const id = matchIdOf(request);
+    if (command === "start") await seriesManager!.start(id);
+    else if (command === "pause") await seriesManager!.pause(id);
+    else if (command === "stop") await seriesManager!.stop(id);
+    else if (command === "retry") seriesManager!.retry(id);
+    else seriesManager!.skip(id);
+    response.json({ series: publicSeries(seriesManager!.get(id), storedMatches) });
+  }));
+}
+
 app.get("/api/events", (request: Request, response: Response) => {
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache, no-transform");
@@ -246,6 +286,7 @@ app.get("/api/events", (request: Request, response: Response) => {
 });
 
 app.post("/api/matches", asyncRoute(async (request, response) => {
+  if (seriesManager!.list().some((record) => ["ready", "running", "paused"].includes(record.status))) throw new Error("Finish or stop the current series before creating a casual match.");
   const body = request.body as Record<string, unknown>;
   const rawBudgets = (body.budgets && typeof body.budgets === "object" ? body.budgets : {}) as Record<string, unknown>;
   const costLimit = rawBudgets.maxReportedCostUsd;

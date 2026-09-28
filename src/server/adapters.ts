@@ -23,6 +23,7 @@ interface InterpreterResult {
   toolCalls: number | null;
   providerError?: string;
   protocolError?: string;
+  resolvedModel?: string;
 }
 
 interface ProcessResult {
@@ -107,16 +108,18 @@ function tryParseAction(value: unknown): GameAction | undefined {
   return parseActionEnvelope(value);
 }
 
-function parseCodexEvents(stdout: string): { usage: AgentUsage; toolCalls: number | null } {
+function parseCodexEvents(stdout: string): { usage: AgentUsage; toolCalls: number | null; resolvedModel?: string } {
   let inputTokens: number | null = null;
   let outputTokens: number | null = null;
   let toolCalls = 0;
   let sawEvents = false;
+  let resolvedModel: string | undefined;
   for (const line of stdout.split(/\r?\n/)) {
     try {
-      const event = JSON.parse(line) as { type?: string; usage?: Record<string, unknown>; item?: { type?: string } };
+      const event = JSON.parse(line) as { type?: string; usage?: Record<string, unknown>; item?: { type?: string }; model?: string };
       if (!event || typeof event !== "object") continue;
       sawEvents = true;
+      if (typeof event.model === "string") resolvedModel = event.model;
       if (event.type === "turn.completed" && event.usage) {
         inputTokens = parseNumber(event.usage.input_tokens) ?? inputTokens;
         outputTokens = parseNumber(event.usage.output_tokens) ?? outputTokens;
@@ -124,7 +127,7 @@ function parseCodexEvents(stdout: string): { usage: AgentUsage; toolCalls: numbe
       if (event.type === "item.started" && event.item && /tool|command|search|mcp/i.test(event.item.type ?? "")) toolCalls += 1;
     } catch { /* JSONL can include non-event diagnostics. */ }
   }
-  return { usage: { inputTokens, outputTokens, costUsd: null, coverage: usageCoverage({ inputTokens, outputTokens, costUsd: null }) }, toolCalls: sawEvents ? toolCalls : null };
+  return { usage: { inputTokens, outputTokens, costUsd: null, coverage: usageCoverage({ inputTokens, outputTokens, costUsd: null }) }, toolCalls: sawEvents ? toolCalls : null, ...(resolvedModel ? { resolvedModel } : {}) };
 }
 
 function claudeUsage(envelope: Record<string, unknown>): AgentUsage {
@@ -149,6 +152,7 @@ function interpretCodex(root: { stdout: string; responseText: string }): Interpr
     action,
     usage: metadata.usage,
     toolCalls: metadata.toolCalls,
+    ...(metadata.resolvedModel ? { resolvedModel: metadata.resolvedModel } : {}),
     ...(action ? {} : { protocolError: "Codex response file did not contain one structured action JSON object." }),
   };
 }
@@ -165,10 +169,14 @@ function interpretClaude(root: { stdout: string; responseText: string }): Interp
   }
   const candidate = envelope.structured_output ?? envelope.result;
   const action = tryParseAction(candidate);
+  const modelUsage = isRecord(envelope.modelUsage) ? Object.keys(envelope.modelUsage) : [];
+  const resolvedModel = typeof envelope.model === "string" ? envelope.model : modelUsage.length === 1 ? modelUsage[0] : undefined;
   return {
     action,
     usage,
-    toolCalls: null,
+    // The invocation uses --bare, --tools "", and --strict-mcp-config.
+    toolCalls: 0,
+    ...(resolvedModel ? { resolvedModel } : {}),
     ...(action ? {} : { protocolError: "Claude returned no structured action; expected a structured_output or JSON result field." }),
   };
 }
@@ -179,12 +187,16 @@ function interpretOpenCode(root: { stdout: string }): InterpreterResult {
   let costUsd: number | null = null;
   let toolCalls = 0;
   let sawEvents = false;
+  let resolvedModel: string | undefined;
   const text: string[] = [];
   for (const line of root.stdout.split(/\r?\n/)) {
     try {
-      const event = JSON.parse(line) as { type?: string; part?: { type?: string; tokens?: { input?: number; output?: number }; cost?: number; text?: string }; text?: string };
+      const event = JSON.parse(line) as { type?: string; part?: { type?: string; tokens?: { input?: number; output?: number }; cost?: number; text?: string; modelID?: string; providerID?: string }; text?: string; modelID?: string; providerID?: string };
       if (!event || typeof event !== "object") continue;
       sawEvents = true;
+      const modelID = event.part?.modelID ?? event.modelID;
+      const providerID = event.part?.providerID ?? event.providerID;
+      if (modelID && providerID) resolvedModel = `${providerID}/${modelID}`;
       if (event.type === "tool_use" || event.type === "tool" || event.part?.type === "tool") toolCalls += 1;
       if (event.part?.type === "step-finish" && event.part.tokens) {
         inputTokens = parseNumber(event.part.tokens.input) ?? inputTokens;
@@ -199,6 +211,7 @@ function interpretOpenCode(root: { stdout: string }): InterpreterResult {
     action,
     usage: { inputTokens, outputTokens, costUsd, coverage: usageCoverage({ inputTokens, outputTokens, costUsd }) },
     toolCalls: sawEvents ? toolCalls : null,
+    ...(resolvedModel ? { resolvedModel } : {}),
     ...(action ? {} : { protocolError: "OpenCode response did not contain one structured action JSON object." }),
   };
 }
@@ -228,6 +241,7 @@ function buildPrompt(observation: GameObservation): string {
 abstract class CliAgentAdapter implements AgentAdapter {
   readonly id: string;
   readonly restrictions?: string;
+  readonly isolationQualified: boolean = false;
   private executable?: string;
   private readonly activeChildren = new Set<ChildProcess>();
 
@@ -279,6 +293,7 @@ abstract class CliAgentAdapter implements AgentAdapter {
         stderrExcerpt: excerpt(response.stderr),
         toolCalls: interpreted.toolCalls,
         usage: interpreted.usage,
+        ...(interpreted.resolvedModel ? { resolvedModel: interpreted.resolvedModel } : {}),
       };
     } catch (error) {
       if (error instanceof AgentExecutionError || error instanceof AgentProtocolError) throw error;
@@ -303,6 +318,7 @@ abstract class CliAgentAdapter implements AgentAdapter {
 }
 
 export class CodexCLIAdapter extends CliAgentAdapter {
+  override readonly isolationQualified = false;
   override readonly restrictions = "Codex read-only sandbox, ephemeral session, approval_policy=never; reported tool calls are rejected and no tool observation is undone.";
   protected invocation(observation: GameObservation, workingDirectory: string): Invocation {
     const schemaPath = join(workingDirectory, "action-schema.json");
@@ -314,7 +330,7 @@ export class CodexCLIAdapter extends CliAgentAdapter {
       : [];
     return {
       args: [
-        "exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "-c", 'approval_policy="never"',
+        "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "-c", 'approval_policy="never"',
         "--json", "--output-schema", schemaPath, "--output-last-message", responsePath, "--cd", workingDirectory,
         ...this.getModelArgs(), ...reasoningArgs,
         buildPrompt(observation),
@@ -327,6 +343,7 @@ export class CodexCLIAdapter extends CliAgentAdapter {
 }
 
 export class ClaudeCodeAdapter extends CliAgentAdapter {
+  override readonly isolationQualified = true;
   override readonly restrictions = "Claude Code print mode with tools disabled, strict MCP config, no slash commands and no session persistence; user hooks/plugins are not proven disabled.";
   protected invocation(observation: GameObservation): Invocation {
     const reasoning = this.config.reasoning?.trim().toLowerCase();
@@ -335,7 +352,7 @@ export class ClaudeCodeAdapter extends CliAgentAdapter {
       args: [
         "--print", "--output-format", "json", "--json-schema", JSON.stringify(actionOutputSchema(observation.actionSchema)),
         "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "",
-        "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence",
+        "--strict-mcp-config", "--bare", "--disable-slash-commands", "--no-session-persistence",
         ...effortArgs,
         ...(this.config.model.trim() ? ["--model", this.config.model.trim()] : []),
         buildPrompt(observation),
@@ -366,6 +383,7 @@ function openCodeRestrictedConfig(): string {
 }
 
 export class OpenCodeAdapter extends CliAgentAdapter {
+  override readonly isolationQualified = true;
   override readonly restrictions = "OpenCode run with --pure and a per-invocation agent that denies all built-in and custom tools; not a general account/config isolation boundary.";
   protected invocation(observation: GameObservation, workingDirectory: string): Invocation {
     const env = safeEnvironment();

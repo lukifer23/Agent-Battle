@@ -22,6 +22,8 @@ export interface MatchBudgets {
   maxRequests: number;
   maxWallMinutes: number;
   maxReportedCostUsd: number | null;
+  maxRequestsPerPlayer?: number;
+  maxActiveMinutesPerPlayer?: number;
 }
 
 /** New matches measure execution time; older records without this field retain creation-age semantics. */
@@ -192,6 +194,45 @@ export interface MatchRecord {
   runGeneration?: number;
   /** Durable in-flight turn so a resume keeps rejection feedback and retry budget. */
   pendingTurn?: PendingTurn;
+  series?: { id: string; slotId: string; attempt: number };
+}
+
+export interface SeriesSlot {
+  id: string;
+  ordinal: number;
+  gameId: "chess" | "hangman";
+  challengeId: string;
+  /** Private until the entire series has completed. */
+  challengeSeed?: string;
+  roles: Record<string, 0 | 1>;
+  matchIds: string[];
+  skipped: boolean;
+}
+
+export interface SeriesRecord {
+  id: string;
+  version: "battle-series-1";
+  createdAt: string;
+  updatedAt: string;
+  status: "ready" | "running" | "paused" | "completed" | "stopped";
+  agents: [PlayerConfig, PlayerConfig];
+  settings: { turnTimeoutSeconds: number; budgets: MatchBudgets };
+  /** Private root for deterministic Hangman challenges. */
+  masterSeed: string;
+  slots: SeriesSlot[];
+  error?: string;
+}
+
+export interface PublicSeriesSlot extends Omit<SeriesSlot, "challengeSeed"> {
+  challengeSeed?: string;
+  status: "pending" | "running" | "scored" | "unscored" | "skipped";
+  result?: MatchResult;
+}
+
+export interface PublicSeries extends Omit<SeriesRecord, "masterSeed" | "slots"> {
+  slots: PublicSeriesSlot[];
+  aggregate: Record<string, { wins: number; draws: number; losses: number; unscored: number; requests: number; inputTokens: number; outputTokens: number; costUsd: number; latencyMs: number;
+    coverage: Record<"inputTokens" | "outputTokens" | "costUsd" | "latencyMs", { reported: number; total: number }> }>;
 }
 
 /** Allowlisted list DTO. Canonical state and diagnostics never belong here. */
@@ -208,6 +249,7 @@ export interface MatchSummary {
   actionCount: number;
   timeControl: { maxMinutes: number; turnSeconds: number; mode: "active" | "legacy" };
   result?: MatchResult;
+  seriesId?: string;
 }
 export interface PublicMatchDetail extends MatchSummary {
   timeAccounting?: MatchTimeAccounting;
@@ -219,6 +261,7 @@ export interface PublicMatchDetail extends MatchSummary {
   currentPlayerId?: string;
   error?: string;
   pendingTurn?: PendingTurn;
+  series?: MatchRecord["series"];
 }
 
 export interface ProviderInfo {

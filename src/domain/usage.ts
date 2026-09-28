@@ -11,6 +11,7 @@ export interface UsageTotal {
   reasoningTokens: number;
   costUsd: number;
   coverage: "none" | "partial" | "full";
+  coverageByMetric: Record<"inputTokens" | "outputTokens" | "cachedInputTokens" | "cacheWriteTokens" | "reasoningTokens" | "costUsd", { reported: number; total: number; status: "none" | "partial" | "full" }>;
 }
 
 function addOptional(total: { cachedInputTokens: number; cacheWriteTokens: number; reasoningTokens: number }, usage: AgentAttempt["usage"]): boolean {
@@ -23,18 +24,24 @@ function addOptional(total: { cachedInputTokens: number; cacheWriteTokens: numbe
 
 /** Aggregates reported usage across attempts, tracking coverage instead of treating unknown as zero. */
 export function aggregateUsage(attempts: AgentAttempt[]): UsageTotal {
-  const total = { requests: attempts.filter((attempt) => attempt.phase !== "initialization").length, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0 };
+  const providerAttempts = attempts.filter((attempt) => attempt.phase !== "initialization");
+  const total = { requests: providerAttempts.length, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0 };
   let anyData = false;
   let missing = false;
-  for (const attempt of attempts) {
+  for (const attempt of providerAttempts) {
     const usage = attempt.usage;
     if (usage.inputTokens === null) missing = true; else { total.inputTokens += usage.inputTokens; anyData = true; }
     if (usage.outputTokens === null) missing = true; else { total.outputTokens += usage.outputTokens; anyData = true; }
     if (usage.costUsd === null) missing = true; else { total.costUsd += usage.costUsd; anyData = true; }
     if (addOptional(total, usage)) missing = true; else anyData = true;
   }
-  const coverage = attempts.length === 0 ? "none" : !anyData ? "none" : missing ? "partial" : "full";
-  return { ...total, coverage, costKnown: attempts.some((a) => a.usage.costUsd !== null), tokensKnown: attempts.some((a) => a.usage.inputTokens !== null || a.usage.outputTokens !== null) };
+  const coverage = providerAttempts.length === 0 ? "none" : !anyData ? "none" : missing ? "partial" : "full";
+  const metrics = ["inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens", "reasoningTokens", "costUsd"] as const;
+  const coverageByMetric = Object.fromEntries(metrics.map((metric) => {
+    const reported = providerAttempts.filter((attempt) => typeof attempt.usage[metric] === "number").length;
+    return [metric, { reported, total: providerAttempts.length, status: reported === 0 ? "none" : reported === providerAttempts.length ? "full" : "partial" }];
+  })) as UsageTotal["coverageByMetric"];
+  return { ...total, coverage, coverageByMetric, costKnown: coverageByMetric.costUsd.reported > 0, tokensKnown: coverageByMetric.inputTokens.reported > 0 || coverageByMetric.outputTokens.reported > 0 };
 }
 
 export function allAttempts(match: MatchRecord): AgentAttempt[] {

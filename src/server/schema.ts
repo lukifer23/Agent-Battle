@@ -1,4 +1,6 @@
+import { createHash, createHmac } from "node:crypto";
 import { PROVIDERS, type AgentAttempt, type AgentUsage, type MatchEnvironment, type MatchRecord, type MatchStatus, type PendingTurn, type PlayerSeat, type Provider, type TurnTelemetry } from "../shared.js";
+import type { SeriesRecord } from "../shared.js";
 
 export interface ValidationResult<T> {
   value?: T;
@@ -192,8 +194,14 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
     }
     const cost = settings.budgets.maxReportedCostUsd;
     if (cost !== null && (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0)) return { error: "reported cost budget is invalid" };
+    for (const key of ["maxRequestsPerPlayer", "maxActiveMinutesPerPlayer"] as const) {
+      const value = settings.budgets[key];
+      if (value !== undefined && (!Number.isSafeInteger(value) || (value as number) < 1)) return { error: `${key} budget is invalid` };
+    }
   }
   if (raw.gameState === undefined || raw.gameState === null) return { error: "game state is missing" };
+  if (raw.series !== undefined && (!isPlainObject(raw.series) || !isString(raw.series.id) || !isString(raw.series.slotId)
+    || !Number.isSafeInteger(raw.series.attempt) || (raw.series.attempt as number) < 1)) return { error: "series linkage is invalid" };
   if (!Array.isArray(raw.history)) return { error: "history is missing" };
   const history: TurnTelemetry[] = [];
   for (const [index, turn] of raw.history.entries()) {
@@ -266,6 +274,8 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
           maxRequests: isFiniteNumber((settings.budgets as { maxRequests?: unknown } | undefined)?.maxRequests) ? (settings.budgets as { maxRequests: number }).maxRequests : 200,
           maxWallMinutes: isFiniteNumber((settings.budgets as { maxWallMinutes?: unknown } | undefined)?.maxWallMinutes) ? (settings.budgets as { maxWallMinutes: number }).maxWallMinutes : 30,
           maxReportedCostUsd: isFiniteNumber((settings.budgets as { maxReportedCostUsd?: unknown } | undefined)?.maxReportedCostUsd) ? (settings.budgets as { maxReportedCostUsd: number }).maxReportedCostUsd : null,
+          ...(isFiniteNumber((settings.budgets as { maxRequestsPerPlayer?: unknown } | undefined)?.maxRequestsPerPlayer) ? { maxRequestsPerPlayer: (settings.budgets as { maxRequestsPerPlayer: number }).maxRequestsPerPlayer } : {}),
+          ...(isFiniteNumber((settings.budgets as { maxActiveMinutesPerPlayer?: unknown } | undefined)?.maxActiveMinutesPerPlayer) ? { maxActiveMinutesPerPlayer: (settings.budgets as { maxActiveMinutesPerPlayer: number }).maxActiveMinutesPerPlayer } : {}),
         },
       },
       gameState: raw.gameState,
@@ -278,16 +288,55 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
       ...(isString(raw.error) ? { error: raw.error } : {}),
       ...(isFiniteNumber(raw.runGeneration) ? { runGeneration: raw.runGeneration } : {}),
       ...(pendingTurn ? { pendingTurn } : {}),
+      ...(isPlainObject(raw.series) && isString(raw.series.id) && isString(raw.series.slotId) && Number.isSafeInteger(raw.series.attempt) && (raw.series.attempt as number) >= 1
+        ? { series: { id: raw.series.id, slotId: raw.series.slotId, attempt: raw.series.attempt as number } } : {}),
     },
   };
 }
 
-export function validateStoreEnvelope(root: unknown): { version: number; records: unknown[] } {
-  if (Array.isArray(root)) return { version: 1, records: root };
+export function validateSeriesRecord(raw: unknown): SeriesRecord {
+  if (!isPlainObject(raw) || raw.version !== "battle-series-1" || !isString(raw.id) || !isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)
+    || !["ready", "running", "paused", "completed", "stopped"].includes(String(raw.status))
+    || !/^[0-9a-f]{64}$/.test(String(raw.masterSeed)) || !Array.isArray(raw.agents) || raw.agents.length !== 2
+    || !isPlainObject(raw.settings) || !Array.isArray(raw.slots) || raw.slots.length !== 10) throw new Error("Invalid battle series record.");
+  const agents = raw.agents.map((agent) => validatePlayer({ id: "seat", label: "Seat", agent }));
+  if (agents.some((agent) => !agent.value || agent.error || !agent.value.agent.model.trim())) throw new Error("Invalid series agent identity.");
+  const settings = raw.settings;
+  if (!Number.isSafeInteger(settings.turnTimeoutSeconds) || (settings.turnTimeoutSeconds as number) < 30 || (settings.turnTimeoutSeconds as number) > 600 || !isPlainObject(settings.budgets)) throw new Error("Invalid series settings.");
+  const budgets = settings.budgets;
+  if (!["maxPlies", "maxRequests", "maxWallMinutes"].every((key) => Number.isSafeInteger(budgets[key]) && (budgets[key] as number) > 0)
+    || !(budgets.maxReportedCostUsd === null || isFiniteNumber(budgets.maxReportedCostUsd) && budgets.maxReportedCostUsd >= 0)) throw new Error("Invalid series budgets.");
+  const slots = raw.slots.map((slot, ordinal) => {
+    if (!isPlainObject(slot) || slot.ordinal !== ordinal || !isString(slot.id) || !isString(slot.challengeId)
+      || slot.gameId !== (ordinal < 5 ? "chess" : "hangman") || !isPlainObject(slot.roles)
+      || !Array.isArray(slot.matchIds) || !slot.matchIds.every(isString) || typeof slot.skipped !== "boolean") throw new Error("Invalid series slot.");
+    const expectedRoles = ordinal < 5 ? ["white", "black"] : ["player1", "player2"];
+    if (Object.keys(slot.roles).sort().join() !== [...expectedRoles].sort().join() || slot.roles[expectedRoles[0]] === slot.roles[expectedRoles[1]]
+      || ![0, 1].includes(slot.roles[expectedRoles[0]] as number) || ![0, 1].includes(slot.roles[expectedRoles[1]] as number)) throw new Error("Invalid series role schedule.");
+    if (slot.roles[expectedRoles[0]] !== (ordinal % 5 % 2 === 0 ? 0 : 1)) throw new Error("Series role balance differs from schedule.");
+    if (ordinal >= 5 && !/^[0-9a-f]{64}$/.test(String(slot.challengeSeed))) throw new Error("Invalid series challenge seed.");
+    if (ordinal < 5 && slot.challengeSeed !== undefined) throw new Error("Chess slot has a seed.");
+    if (ordinal >= 5) {
+      const expectedSeed = createHmac("sha256", Buffer.from(raw.masterSeed as string, "hex")).update(`battle-series-1:hangman:${ordinal - 5}`).digest("hex");
+      const expectedId = createHash("sha256").update(`hangman:${expectedSeed}`).digest("hex");
+      if (slot.challengeSeed !== expectedSeed || slot.challengeId !== expectedId) throw new Error("Series challenge provenance differs from seed.");
+    } else if (slot.challengeId !== "standard-start-v1") throw new Error("Invalid Chess challenge ID.");
+    return slot as unknown as SeriesRecord["slots"][number];
+  });
+  if (new Set(slots.map((slot) => slot.id)).size !== 10 || new Set(slots.flatMap((slot) => slot.matchIds)).size !== slots.flatMap((slot) => slot.matchIds).length) throw new Error("Duplicate series slot or match identity.");
+  return { id: raw.id, version: "battle-series-1", createdAt: raw.createdAt, updatedAt: raw.updatedAt, status: raw.status as SeriesRecord["status"],
+    agents: agents.map((agent) => agent.value!.agent) as SeriesRecord["agents"], settings: { turnTimeoutSeconds: settings.turnTimeoutSeconds as number,
+      budgets: { maxPlies: budgets.maxPlies as number, maxRequests: budgets.maxRequests as number, maxWallMinutes: budgets.maxWallMinutes as number, maxReportedCostUsd: budgets.maxReportedCostUsd as number | null } },
+    masterSeed: raw.masterSeed as string, slots, ...(isString(raw.error) ? { error: raw.error } : {}) };
+}
+
+export function validateStoreEnvelope(root: unknown): { version: number; records: unknown[]; series: unknown[] } {
+  if (Array.isArray(root)) return { version: 1, records: root, series: [] };
   if (isPlainObject(root) && Array.isArray(root.matches)) {
     const version = root.version;
-    if (!Number.isSafeInteger(version) || (version as number) < 2 || (version as number) > 4) throw new Error(`Unsupported store version ${String(version)}.`);
-    return { version: version as number, records: root.matches };
+    if (!Number.isSafeInteger(version) || (version as number) < 2 || (version as number) > 5) throw new Error(`Unsupported store version ${String(version)}.`);
+    if (version === 5 && !Array.isArray(root.series)) throw new Error("Series array is missing.");
+    return { version: version as number, records: root.matches, series: version === 5 ? root.series as unknown[] : [] };
   }
   throw new Error("Saved store must be an array of matches or a versioned envelope with a matches array.");
 }

@@ -8,7 +8,10 @@ export function HangmanArena({ match }: { match: PublicMatchDetail }) {
   const latest = match.gameState as View;
   const view = step === null ? latest : frames[step] ?? latest;
   return <div className="hangman-arena">
-    <p className="board-summary">One word. Two independent lanes. Seven misses allowed.</p>
+    <div className="hangman-match-summary" role="status">
+      {match.result ? <><strong>{match.result.kind === "draw" ? "Draw" : `${match.players.find((player) => player.id === match.result?.winnerId)?.label ?? "Winner"} wins`}</strong><span>{match.result.reason} · {match.result.notation}</span></>
+        : <><strong>Same word, separate lanes</strong><span>Seven misses each. The word stays hidden until both lanes finish.</span></>}
+    </div>
     <div className="hangman-lanes">{match.players.map((player) => {
       const lane = view.lanes[player.id];
       const pendingAttempts = step === null && match.pendingTurn?.playerId === player.id ? match.pendingTurn.attempts : [];
