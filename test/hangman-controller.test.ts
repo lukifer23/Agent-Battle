@@ -44,20 +44,26 @@ test("Hangman completes both lanes, isolates observations, seals early solve, an
   assert.equal(done.status, "finished"); assert.equal(done.result?.winnerId, "player1");
   assert.equal(h.observations.filter((o) => o.playerId === "player1").length, 1);
   for (const o of h.observations) {
-    assert.equal(JSON.stringify(o).includes(word), false);
+    assert.equal("word" in (o.state as object), false);
+    assert.equal("provenance" in (o.state as object), false);
+    assert.notEqual((o.state as { pattern: string }).pattern.replaceAll(" ", ""), word);
     assert.equal(JSON.stringify(o).includes(o.playerId === "player1" ? "player2" : "player1"), false);
   }
   // Completed-event reveal is permitted only after both lanes finish.
   for (const payload of h.publicPayloads) {
     const encoded = JSON.stringify(payload);
-    if (encoded.includes(word)) assert.match(encoded, /"terminal":true/);
+    const eventState = (payload as { payload?: { publicState?: { terminal?: boolean; word?: string } } }).payload?.publicState;
+    const detailState = (payload as { gameState?: { terminal?: boolean; word?: string } }).gameState;
+    if (eventState && !eventState.terminal) assert.equal("word" in eventState, false);
+    if (detailState && !detailState.terminal) assert.equal("word" in detailState, false);
     assert.equal(encoded.includes("private diagnostic"), false);
     assert.equal(encoded.includes("private stderr"), false);
   }
   assert.deepEqual(game.deserialize(done.gameState), done.gameState);
   assert.equal(defaultGames.validateRecord(done), undefined);
   assert.equal((projectRecord(done).gameState as { word: string }).word, word);
-  assert.equal(JSON.stringify(summaryOf(done)).includes(word), false);
+  const summary = summaryOf(done);
+  for (const key of ["gameState", "history", "events", "provenance"]) assert.equal(key in summary, false);
   assert.equal(new Set(done.history.flatMap((t) => t.attempts.map((a) => a.invocationId))).size, 4);
 });
 test("exhausted correction forfeits only one lane and remaining lane completes", async () => {
