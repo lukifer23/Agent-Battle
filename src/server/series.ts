@@ -64,7 +64,8 @@ function linkedMatch(slot: SeriesSlot, matches: MatchRecord[]): MatchRecord | un
 export function publicSeries(series: SeriesRecord, matches: MatchRecord[], includeProvenance = false): PublicSeries {
   const aggregate: PublicSeries["aggregate"] = {};
   const slots: PublicSeriesSlot[] = series.slots.map((slot) => {
-    const match = linkedMatch(slot, matches);
+    const linked = slot.matchIds.map((id) => matches.find((candidate) => candidate.id === id)).filter((candidate): candidate is MatchRecord => Boolean(candidate));
+    const match = linked.at(-1);
     const status: PublicSeriesSlot["status"] = slot.skipped ? "skipped" : !match ? "pending" : match.status === "finished" || match.status === "forfeit" ? "scored" : terminal.has(match.status) ? "unscored" : "running";
     if (match) for (const [agentIndex] of series.agents.entries()) {
       const key = `${slot.gameId}:${agentIndex}`;
@@ -72,8 +73,12 @@ export function publicSeries(series: SeriesRecord, matches: MatchRecord[], inclu
         coverage: { inputTokens: { reported: 0, total: 0 }, outputTokens: { reported: 0, total: 0 }, costUsd: { reported: 0, total: 0 }, latencyMs: { reported: 0, total: 0 } } };
       const role = Object.entries(slot.roles).find(([, index]) => index === agentIndex)?.[0];
       if (role) row.roleCounts[role] = (row.roleCounts[role] ?? 0) + 1;
-      const pending = match.pendingTurn;
-      const attempts = [...match.history.filter((turn) => turn.playerId === role).flatMap((turn) => turn.attempts), ...(pending && role && pending.playerId === role ? pending.attempts : [])];
+      // A retry keeps the same slot and challenge, but its earlier provider
+      // invocations still consumed resources and remain unscored evidence.
+      const attempts = linked.flatMap((trial) => [
+        ...trial.history.filter((turn) => turn.playerId === role).flatMap((turn) => turn.attempts),
+        ...(trial.pendingTurn && trial.pendingTurn.playerId === role ? trial.pendingTurn.attempts : []),
+      ]);
       const usage = aggregateUsage(attempts);
       row.requests += usage.requests; row.inputTokens += usage.inputTokens; row.outputTokens += usage.outputTokens; row.costUsd += usage.costUsd;
       const providerAttempts = attempts.filter((attempt) => attempt.phase !== "initialization");
@@ -91,7 +96,8 @@ export function publicSeries(series: SeriesRecord, matches: MatchRecord[], inclu
         else row.losses++;
         row.points = row.wins + row.draws * 0.5;
         row.normalizedPerformance = row.points / row.possiblePoints;
-      } else if (status === "unscored") row.unscored++;
+      }
+      row.unscored += linked.filter((trial) => ["stopped", "error"].includes(trial.status)).length;
       aggregate[key] = row;
     }
     return { id: slot.id, ordinal: slot.ordinal, gameId: slot.gameId, challengeId: slot.challengeId, roles: structuredClone(slot.roles), matchIds: [...slot.matchIds], skipped: slot.skipped,

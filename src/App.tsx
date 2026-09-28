@@ -136,8 +136,8 @@ function App() {
   const [gameId, setGameId] = useState(() => loadView() === "series" ? "chess" : loadView());
   const [viewMode, setViewMode] = useState<string>(loadView);
   const [games, setGames] = useState<Array<{ id: string; label: string; version: string; playerIds: string[]; playerLabels: string[]; series?: { supportsSeededChallenges: boolean; recommendedRepetitions: number; seatSensitive: boolean } }>>([]);
-  const [maxPlies, setMaxPlies] = useState(150);
-  const [maxRequests, setMaxRequests] = useState(200);
+  const [maxPlies, setMaxPlies] = useState(250);
+  const [maxRequests, setMaxRequests] = useState(500);
   const [timePreset, setTimePreset] = useState<number | "custom">(30);
   const [customMinutes, setCustomMinutes] = useState(45);
   const maxWallMinutes = timePreset === "custom" ? customMinutes : timePreset;
@@ -325,7 +325,7 @@ function App() {
     for (const match of state?.recentMatches ?? []) {
       if (match.seriesId) continue;
       if (match.gameId !== (selectedMatch?.gameId ?? gameId)) continue;
-      if (match.gameId === "hangman" && !verifiedDistinctModels(match.players[0].agent, match.players[1].agent)) continue;
+      if (!verifiedDistinctModels(match.players[0].agent, match.players[1].agent)) continue;
       if (!match.result || !["finished", "forfeit"].includes(match.status)) continue;
       for (const player of match.players) {
         const side = player.id;
@@ -356,7 +356,7 @@ function App() {
   const canCreate = !storageBlocked && (!state?.activeMatch || !["ready", "running", "paused", "interrupted"].includes(state.activeMatch.status));
   const activeSeries = seriesList.find((series) => ["ready", "running", "paused"].includes(series.status));
   const distinctModels = distinctExplicitModels({ model: whiteModel }, { model: blackModel });
-  const unqualifiedMatch = Boolean(selectedMatch?.gameId === "hangman" && !verifiedDistinctModels(selectedMatch.players[0].agent, selectedMatch.players[1].agent));
+  const unqualifiedMatch = Boolean(selectedMatch && !verifiedDistinctModels(selectedMatch.players[0].agent, selectedMatch.players[1].agent));
   const startBlocker = storageBlocked ? "Saved history is unavailable. Restore storage before starting."
     : !providersChecked || !chosenGame ? "Checking games and local agent CLIs…"
     : !installed(whiteProvider) || !installed(blackProvider) ? "Install the selected agent CLI and sign in to use it."
@@ -728,7 +728,7 @@ function App() {
                 onClick={() => chooseView(match.gameId as "chess" | "hangman", match.id)}>
                 <span className="history-date">{new Date(match.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
                 <span className="history-players"><b>{competitorLabel(match.players[0].agent)}</b><small>vs</small><b>{competitorLabel(match.players[1].agent)}</b></span>
-                <span className={`history-result ${match.result ? "" : "muted"}`}>{match.gameId === "hangman" && !verifiedDistinctModels(match.players[0].agent, match.players[1].agent) ? "unverified" : match.result?.notation ?? match.status}</span>
+                <span className={`history-result ${match.result ? "" : "muted"}`}>{match.result && !verifiedDistinctModels(match.players[0].agent, match.players[1].agent) ? "unverified" : match.result?.notation ?? match.status}</span>
                 <span className="history-moves">{match.actionCount} actions · {match.gameId}</span>
               </button>)}
             </div>

@@ -46,7 +46,9 @@ export interface CreateMatchRequest {
   series?: { id: string; slotId: string; attempt: number };
 }
 
-const DEFAULT_BUDGETS: MatchBudgets = { maxPlies: 150, maxRequests: 200, maxWallMinutes: 30, maxReportedCostUsd: null };
+// Battleship can require 201 accepted actions (two placements plus 199 shots).
+// Leave room for one correction per action in the default request budget.
+const DEFAULT_BUDGETS: MatchBudgets = { maxPlies: 250, maxRequests: 500, maxWallMinutes: 30, maxReportedCostUsd: null };
 const ADAPTER_VERSION = "agent-battle/adapter-v3";
 
 function clampBudget(value: unknown, fallback: number, maximum: number): number {
