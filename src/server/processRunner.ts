@@ -11,6 +11,8 @@ export interface ProcessRunOptions {
   cwd: string;
   timeoutMs: number;
   outputLimitBytes?: number;
+  /** Allow the adapter to interpret a bounded structured error envelope. */
+  returnNonzeroExit?: boolean;
   signal?: AbortSignal;
   onChild?: (child: ChildProcess | null) => void;
 }
@@ -19,6 +21,7 @@ export interface ProcessRunResult {
   stdout: string;
   stderr: string;
   latencyMs: number;
+  exitCode?: number | null;
 }
 
 const TERMINATION_GRACE_MS = 1500;
@@ -141,11 +144,11 @@ export function runProcess(options: ProcessRunOptions): Promise<ProcessRunResult
         reject(new AgentExecutionError(`Move timed out after ${Math.ceil(options.timeoutMs / 1000)} seconds.`, true, excerpt(stdout), excerpt(stderr), latencyMs));
       } else if (tooLarge) {
         reject(new AgentExecutionError(`CLI output exceeded the ${Math.round(limit / 1024)} KB limit.`, false, excerpt(stdout), excerpt(stderr), latencyMs));
-      } else if (code !== 0) {
+      } else if (code !== 0 && !options.returnNonzeroExit) {
         const diagnostic = excerpt(stderr, 700);
         reject(new AgentExecutionError(`CLI exited with ${code ?? signal ?? "unknown status"}.${diagnostic ? ` ${diagnostic}` : ""}`, false, excerpt(stdout), diagnostic, latencyMs));
       } else {
-        resolve({ stdout, stderr, latencyMs });
+        resolve({ stdout, stderr, latencyMs, exitCode: code });
       }
     };
 

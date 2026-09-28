@@ -1,3 +1,4 @@
+import { comparisonEligibility } from "./comparison.js";
 import { defaultGames } from "./defaultGames.js";
 import type { AgentAttempt, MatchRecord, PendingTurn, TurnTelemetry, PublicMatchDetail, MatchSummary, MatchEvent } from "../shared.js";
 
@@ -11,6 +12,7 @@ function projectAttempt(attempt: AgentAttempt): AgentAttempt {
     ...(attempt.latencyMs !== undefined ? { latencyMs: attempt.latencyMs } : {}),
     ...(attempt.accountedMs !== undefined ? { accountedMs: attempt.accountedMs } : {}),
     ...(attempt.resolvedModel ? { resolvedModel: attempt.resolvedModel } : {}),
+    ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}),
     status: attempt.status,
     ...(attempt.phase ? { phase: attempt.phase } : {}),
     ...(attempt.action ? { action: attempt.action } : {}),
@@ -76,6 +78,7 @@ export function projectRecord(record: MatchRecord, eventLimit = 40, registry = d
   return {
     ...summaryOf(record),
     settings: structuredClone(record.settings),
+    ...(record.environment ? { environment: structuredClone(record.environment) } : {}),
     ...(record.timeAccounting ? { timeAccounting: { ...record.timeAccounting } } : {}),
     gameState: game.publicState(game.deserialize(record.gameState)),
     ...(game.publicReplay ? { replay: game.publicReplay(game.deserialize(record.gameState)) } : {}),
@@ -118,6 +121,7 @@ export function summaryOf(record: MatchRecord): MatchSummary {
     createdAt: record.createdAt, updatedAt: record.updatedAt, status: record.status,
     players: record.players.map((p) => ({ id: p.id, label: p.label, agent: { provider: p.agent.provider, model: p.agent.model, name: p.agent.name, ...(p.agent.reasoning ? { reasoning: p.agent.reasoning } : {}), ...(p.agent.resolvedModel ? { resolvedModel: p.agent.resolvedModel } : {}) } })) as MatchRecord["players"],
     timeControl: { maxMinutes: record.settings.budgets.maxWallMinutes, turnSeconds: record.settings.turnTimeoutSeconds, mode: record.timeAccounting ? "active" : "legacy" },
+    comparison: comparisonEligibility(record),
     revision: record.revision, actionCount: record.history.filter((t) => t.valid).length,
     ...(record.result ? { result: { kind: record.result.kind, notation: record.result.notation, reason: record.result.reason, ...(record.result.winnerId ? { winnerId: record.result.winnerId } : {}) } } : {}),
     ...(record.series ? { seriesId: record.series.id } : {}),

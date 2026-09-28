@@ -56,7 +56,8 @@ test("series totals retain requests and failed evidence from earlier tries of a 
     toolCalls: 0, usage: { inputTokens: 10, outputTokens: 5, costUsd, coverage: "partial" } });
   const failed = { id: "failed", status: "error", history: [{ playerId: "white", attempts: [attempt(0.3)] }] } as unknown as MatchRecord;
   const scored = { id: "scored", status: "finished", result: { kind: "win", winnerId: "white", notation: "1-0", reason: "checkmate" },
-    history: [{ playerId: "white", attempts: [attempt(0.2)] }] } as unknown as MatchRecord;
+    players: [{ id: "white", label: "White", agent: agents[0] }, { id: "black", label: "Black", agent: agents[1] }], environment: { noToolsPlayerIds: ["white", "black"] },
+    history: [{ playerId: "white", attempts: [{ ...attempt(0.2), resolvedModel: agents[0].model }] }, { playerId: "black", attempts: [{ ...attempt(0), resolvedModel: agents[1].model }] }] } as unknown as MatchRecord;
   const row = publicSeries(series, [failed, scored]).aggregate["chess:0"];
   assert.equal(row.scored, 1);
   assert.equal(row.unscored, 1);
@@ -65,6 +66,13 @@ test("series totals retain requests and failed evidence from earlier tries of a 
   assert.equal(row.inputTokens, 20);
   assert.equal(row.costUsd, 0.5);
   assert.deepEqual(row.coverage.costUsd, { reported: 2, total: 2 });
+  const partial = structuredClone(series);
+  partial.slots.push({ ...partial.slots[0], id: "pending", ordinal: 1, matchIds: [] });
+  assert.equal(publicSeries(partial, [failed, scored]).aggregate["overall:0"].normalizedPerformance, null);
+  const unqualified = structuredClone(scored);
+  delete unqualified.history[1].attempts[0].resolvedModel;
+  assert.equal(publicSeries(series, [failed, unqualified]).slots[0].status, "unscored");
+
 });
 
 test("failed series checkpoints leave start, pause, stop, retry and skip state unchanged", async () => {
@@ -112,8 +120,8 @@ test("v2 fixture series completes Chess, Hangman and Battleship with private fle
   const registry = new AgentRegistry().register("codex", (config) => ({ id: config.model, config, isolationQualified: true, initialize: async () => undefined, shutdown: async () => undefined,
     act: async (observation): Promise<AgentReply> => {
       let action;
-      if (observation.gameId === "chess") action = { type: "resign", payload: {} };
-      else if (observation.gameId === "hangman") action = { type: "solve", payload: { word: (matches.find((item) => item.id === observation.matchId)!.gameState as { word: string }).word } };
+      if (observation.gameId === "chess") action = observation.playerId === "white" ? { type: "move", payload: { move: "e2e4" } } : { type: "resign", payload: {} };
+      else if (observation.gameId === "hangman") action = observation.playerId === "player1" ? { type: "guess_letter", payload: { letter: "e" } } : { type: "solve", payload: { word: (matches.find((item) => item.id === observation.matchId)!.gameState as { word: string }).word } };
       else {
         const state = observation.state as { phase: string; ownShots: Array<{ coordinate: string }> };
         action = state.phase === "placement" ? { type: "place_fleet", payload: { ships } } : { type: "fire", payload: { coordinate: targets.find((target) => !state.ownShots.some((shot) => shot.coordinate === target)) } };
@@ -143,11 +151,31 @@ test("v2 fixture series completes Chess, Hangman and Battleship with private fle
     assert.equal(JSON.stringify(detail.replay!.at(-1)).includes("placements"), true);
     assert.equal(JSON.stringify(detail.history).includes('"ship":"carrier"'), false);
     assert.equal(JSON.stringify(detail.events.filter((event) => !(event.payload?.publicState as { terminal?: boolean })?.terminal)).includes("placements"), false);
-    assert.equal(store.load().series[0].version, "battle-series-2");
+    const reloaded = store.load();
+    assert.equal(reloaded.series[0].version, "battle-series-2");
+    assert.ok(reloaded.matches.every((match) => projectRecord(match).comparison?.eligible));
+    assert.equal(projectRecord(reloaded.matches[0]).environment?.adapterVersion, "agent-battle/adapter-v5");
     const summary = publicSeries(series, matches);
     assert.ok(summary.aggregate["battleship:0"].scored === 1);
     assert.ok(summary.aggregate["overall:0"].normalizedPerformance !== null);
     const exported = seriesExport(series, matches);
     assert.equal(exported.reproducibility?.masterSeed, series.masterSeed);
   } finally { await controller.shutdown(); rmSync(folder, { recursive: true, force: true }); }
+});
+
+
+test("a terminal unqualified game pauses its series and remains skippable", async () => {
+  const series = makeSeriesV2([...agents], 120, budgets, { mode: "exploratory", games: [plan.games[0]] }, "fa".repeat(32));
+  const match = { id: "unqualified-forfeit", status: "forfeit", result: { kind: "win", winnerId: "black" }, players: [], history: [], series: { id: series.id, slotId: series.slots[0].id, attempt: 1 } } as unknown as MatchRecord;
+  // An actual record always has two players; use them but no response evidence.
+  match.players = [{ id: "white", label: "White", agent: agents[0] }, { id: "black", label: "Black", agent: agents[1] }];
+  const controller = { list: () => [match], active: () => undefined } as unknown as MatchController;
+  const manager = new SeriesManager([series], controller, () => undefined);
+  await manager.start(series.id);
+  assert.equal(series.status, "paused");
+  assert.equal(publicSeries(series, [match]).slots[0].status, "unscored");
+  manager.skip(series.id);
+  assert.equal(series.slots[0].skipped, true);
+  assert.equal(series.status, "completed");
+  assert.equal(match.status, "forfeit", "raw result is retained without scoring it");
 });

@@ -50,7 +50,7 @@ export interface CreateMatchRequest {
 // Battleship can require 201 accepted actions (two placements plus 199 shots).
 // Leave room for one correction per action in the default request budget.
 const DEFAULT_BUDGETS: MatchBudgets = { maxPlies: 250, maxRequests: 500, maxWallMinutes: 30, maxReportedCostUsd: null };
-const ADAPTER_VERSION = "agent-battle/adapter-v4";
+const ADAPTER_VERSION = "agent-battle/adapter-v5";
 
 function clampBudget(value: unknown, fallback: number, maximum: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
@@ -220,7 +220,7 @@ export class MatchController {
     for (const provider of detected) if (provider.version) cliVersions[provider.provider] = provider.version;
     const environment: MatchEnvironment = {
       adapterVersion: ADAPTER_VERSION,
-      promptVersion: "observation-contract-v2",
+      promptVersion: "observation-contract-v3",
       toolSchemaVersion: game.actionSchemaVersion,
       cliVersions,
     };
@@ -439,6 +439,7 @@ export class MatchController {
         running.agents.set(seat.id, adapter);
         try {
           await adapter.initialize();
+          if (match.environment) match.environment.noToolsPlayerIds = [...(match.environment.noToolsPlayerIds ?? []).filter((id) => id !== seat.id), ...(adapter.isolationQualified ? [seat.id] : [])];
           if (match.series && !adapter.isolationQualified) throw new AgentExecutionError(`${seat.agent.provider} tool isolation is not qualified for scored series trials.`);
         } catch (error) {
           const message = error instanceof Error ? error.message : "The agent could not initialize.";
@@ -534,15 +535,17 @@ export class MatchController {
             await adapter.shutdown();
           }
 
-          if (match.series && reply && (!reply.resolvedModel || reply.resolvedModel !== seat.agent.model || reply.toolCalls !== 0)) {
-            failure = new AgentExecutionError(`Series model or tool qualification failed for ${seat.label}: requested ${seat.agent.model}, reported ${reply.resolvedModel ?? "unknown"}, tool calls ${reply.toolCalls ?? "unknown"}.`);
-          } else if (reply?.resolvedModel) seat.agent.resolvedModel = reply.resolvedModel;
+          const evidence = reply ?? (failure instanceof AgentProtocolError ? failure : failure instanceof AgentExecutionError && failure.evidence ? { ...failure, ...failure.evidence } : undefined);
+          const qualificationFailed = Boolean(match.series && (evidence || failure instanceof AgentExecutionError && failure.timedOut) && (!evidence?.resolvedModel || evidence.resolvedModel !== seat.agent.model || evidence.toolCalls !== 0));
+          if (qualificationFailed) {
+            failure = new AgentExecutionError(`Series model or tool qualification failed for ${seat.label}: requested ${seat.agent.model}, reported ${evidence?.resolvedModel ?? "unknown"}, tool calls ${evidence?.toolCalls ?? "unknown"}.`);
+          } else if (evidence?.resolvedModel) seat.agent.resolvedModel = evidence.resolvedModel;
 
           if (running.control !== "continue") {
             finishAttempt(this.attempt(attemptNumber, startedAt, "cancelled", {
               phase: "controller",
               ...(failure instanceof AgentExecutionError ? { error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs } : {}),
-              ...(reply ? { latencyMs: reply.latencyMs, responseExcerpt: reply.responseExcerpt, stderrExcerpt: reply.stderrExcerpt, toolCalls: reply.toolCalls, usage: reply.usage } : {}),
+              ...(reply ? { latencyMs: reply.latencyMs, responseExcerpt: reply.responseExcerpt, stderrExcerpt: reply.stderrExcerpt, toolCalls: reply.toolCalls, usage: reply.usage, resolvedModel: reply.resolvedModel, sessionId: reply.sessionId } : {}),
             }));
             break;
           }
@@ -554,9 +557,9 @@ export class MatchController {
           }
 
           if (failure instanceof AgentExecutionError && !failure.timedOut) {
-            finishAttempt(this.attempt(attemptNumber, startedAt, "error", { phase: reply ? "qualification" : "provider", error: failure.message,
-              responseExcerpt: reply?.responseExcerpt ?? failure.responseExcerpt, stderrExcerpt: reply?.stderrExcerpt ?? failure.stderrExcerpt,
-              latencyMs: reply?.latencyMs ?? failure.latencyMs, ...(reply ? { toolCalls: reply.toolCalls, usage: reply.usage, resolvedModel: reply.resolvedModel } : {}) }));
+            finishAttempt(this.attempt(attemptNumber, startedAt, "error", { phase: qualificationFailed ? "qualification" : "provider", error: failure.message,
+              responseExcerpt: evidence?.responseExcerpt ?? failure.responseExcerpt, stderrExcerpt: evidence?.stderrExcerpt ?? failure.stderrExcerpt,
+              latencyMs: evidence?.latencyMs ?? failure.latencyMs, ...(evidence ? { toolCalls: evidence.toolCalls, usage: evidence.usage, resolvedModel: evidence.resolvedModel, sessionId: evidence.sessionId } : {}) }));
             const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
             match.history.push(record);
             match.pendingTurn = undefined;
@@ -579,7 +582,7 @@ export class MatchController {
             finishAttempt(this.attempt(attemptNumber, startedAt, "invalid", {
               phase: "protocol", error: failure.message, responseExcerpt: failure.responseExcerpt,
               latencyMs: failure.latencyMs, stderrExcerpt: failure.stderrExcerpt,
-              toolCalls: failure.toolCalls, usage: failure.usage,
+              toolCalls: failure.toolCalls, usage: failure.usage, resolvedModel: failure.resolvedModel, sessionId: failure.sessionId,
             }));
           } else if (failure instanceof AgentExecutionError && failure.timedOut) {
             validation = { valid: false, reason: failure.message };
@@ -603,6 +606,8 @@ export class MatchController {
               responseExcerpt: reply.responseExcerpt,
               stderrExcerpt: reply.stderrExcerpt,
               toolCalls: reply.toolCalls,
+              resolvedModel: reply.resolvedModel,
+              sessionId: reply.sessionId,
               usage: reply.usage,
             }));
           } else {

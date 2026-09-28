@@ -38,6 +38,7 @@ export interface MatchEnvironment {
   promptVersion: string;
   toolSchemaVersion: string;
   cliVersions: Partial<Record<Provider, string>>;
+  noToolsPlayerIds?: string[];
 }
 
 export function competitorId(config: PlayerConfig): string {
@@ -47,10 +48,14 @@ export function competitorId(config: PlayerConfig): string {
 }
 
 /** A comparison needs two named models; CLI defaults cannot establish distinct identities. */
+export function explicitModelId(model: string): boolean {
+  return Boolean(model.trim()) && !/^(CLI configured default|CLI default|default)$/i.test(model.trim());
+}
+
 export function distinctExplicitModels(a: Pick<PlayerConfig, "model">, b: Pick<PlayerConfig, "model">): boolean {
   const first = a.model.trim().toLowerCase();
   const second = b.model.trim().toLowerCase();
-  return first.length > 0 && second.length > 0 && first !== second;
+  return explicitModelId(first) && explicitModelId(second) && first !== second;
 }
 
 export function verifiedDistinctModels(a: PlayerConfig, b: PlayerConfig): boolean {
@@ -119,6 +124,7 @@ export interface AgentAttempt {
   status: "started" | "interrupted" | "valid" | "invalid" | "timeout" | "error" | "cancelled";
   phase?: "initialization" | "provider" | "protocol" | "controller" | "storage" | "qualification";
   resolvedModel?: string;
+  sessionId?: string;
   /** Controller-measured provider reservation time when provider latency is unknown. */
   accountedMs?: number;
   action?: GameAction;
@@ -253,6 +259,7 @@ export interface PublicSeriesSlot extends Omit<SeriesSlot, "challengeSeed"> {
   challengeSeed?: string;
   status: "pending" | "running" | "scored" | "unscored" | "skipped";
   result?: MatchResult;
+  unscoredReasons?: string[];
 }
 
 export interface PublicSeries extends Omit<SeriesRecord, "masterSeed" | "slots"> {
@@ -276,8 +283,10 @@ export interface MatchSummary {
   timeControl: { maxMinutes: number; turnSeconds: number; mode: "active" | "legacy" };
   result?: MatchResult;
   seriesId?: string;
+  comparison?: { eligible: boolean; reasons: string[] };
 }
 export interface PublicMatchDetail extends MatchSummary {
+  environment?: MatchEnvironment;
   timeAccounting?: MatchTimeAccounting;
   replay?: unknown[];
   gameState: unknown;

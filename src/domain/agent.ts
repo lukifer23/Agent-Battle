@@ -8,6 +8,7 @@ export interface AgentReply {
   toolCalls: number | null;
   usage: AgentAttempt["usage"];
   resolvedModel?: string;
+  sessionId?: string;
 }
 
 export interface AttemptControl {
@@ -51,6 +52,8 @@ export class AgentProtocolError extends Error {
     readonly stderrExcerpt = "",
     readonly toolCalls: number | null = null,
     readonly usage: AgentAttempt["usage"] = { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" },
+    readonly resolvedModel?: string,
+    readonly sessionId?: string,
   ) {
     super(message);
     this.name = "AgentProtocolError";
@@ -64,6 +67,7 @@ export class AgentExecutionError extends Error {
     readonly responseExcerpt = "",
     readonly stderrExcerpt = "",
     readonly latencyMs?: number,
+    readonly evidence?: Pick<AgentReply, "usage" | "toolCalls" | "resolvedModel" | "sessionId">,
   ) {
     super(message);
     this.name = "AgentExecutionError";

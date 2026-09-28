@@ -62,6 +62,7 @@ test("Codex CLI adapter uses supported headless policy options and reads a struc
     assert.equal(reply.toolCalls, 0);
     assert.equal(adapter.isolationQualified, false);
     const args = readFileSync(join(folder, "arguments.txt"), "utf8");
+    assert.match(args, /--model\ntest-model\n/);
     assert.match(args, /approval_policy="never"/);
     assert.match(args, /--ignore-user-config/);
     assert.doesNotMatch(args, /--ask-for-approval/);
@@ -73,7 +74,7 @@ test("Claude no-tools invocation reports resolved model and policy evidence", as
   const previousPath = process.env.PATH;
   const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-claude-test-"));
   const executable = join(folder, "claude");
-  const envelope = JSON.stringify({ structured_output: action, modelUsage: { "claude-test-model": { inputTokens: 1 } }, usage: { input_tokens: 7, output_tokens: 2 } });
+  const envelope = JSON.stringify({ type: "system", subtype: "init", tools: ["StructuredOutput"] }) + "\n" + JSON.stringify({ type: "result", structured_output: { action }, modelUsage: { "claude-test-model": { inputTokens: 1 } }, usage: { input_tokens: 7, output_tokens: 2 } });
   writeFileSync(executable, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'claude test'; exit 0; fi\nprintf '%s\\n' "$@" > "${folder}/args.txt"\nprintf '%s\\n' "$CLAUDE_CODE_SIMPLE" > "${folder}/simple.txt"\nprintf '%s\\n' "$MAX_THINKING_TOKENS" > "${folder}/thinking.txt"\nprintf '%s\\n' '${envelope}'\n`);
   chmodSync(executable, 0o755);
   process.env.PATH = `${folder}:/bin:/usr/bin`;
@@ -86,9 +87,13 @@ test("Claude no-tools invocation reports resolved model and policy evidence", as
     assert.equal(adapter.isolationQualified, true);
     const args = readFileSync(join(folder, "args.txt"), "utf8").split("\n");
     assert.ok(!args.includes("--bare"), "bare mode disables OAuth/keychain authentication");
+    assert.equal(args[args.indexOf("--model") + 1], "claude-test-model");
     assert.equal(args[args.indexOf("--tools") + 1], "");
     assert.equal(args[args.indexOf("--setting-sources") + 1], "");
     assert.deepEqual(JSON.parse(args[args.indexOf("--settings") + 1]), { disableAllHooks: true, autoMemoryEnabled: false });
+    const schema = JSON.parse(args[args.indexOf("--json-schema") + 1]);
+    assert.deepEqual(schema.required, ["action"]);
+    assert.deepEqual(schema.properties.action.required, ["type", "payload"]);
     assert.ok(args.includes("--safe-mode"));
     assert.equal(readFileSync(join(folder, "thinking.txt"), "utf8").trim(), "0");
     assert.ok(!args.includes("--effort"), "none is implemented by disabling thinking, not an unsupported effort enum");
@@ -154,4 +159,52 @@ test("OpenCode adapter selects a dedicated no-tools agent even when user config 
     else process.env.BATTLE_TEST_ARGS = previousCaptureArgs;
     rmSync(folder, { recursive: true, force: true });
   }
+});
+
+test("Claude stream errors preserve identity and usage on nonzero exit without retaining thinking", async () => {
+  const previousPath = process.env.PATH;
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-stream-error-"));
+  const stream = [
+    { type: "system", subtype: "init", tools: ["StructuredOutput"] },
+    { type: "assistant", message: { content: [{ type: "thinking", thinking: "DO_NOT_PERSIST_REASONING" }] } },
+    { type: "result", subtype: "error_max_structured_output_retries", is_error: true, session_id: "error-session", modelUsage: { "model-a": {} }, usage: { input_tokens: 25, output_tokens: 4 }, total_cost_usd: 0.02 },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  writeFileSync(join(folder, "claude"), `#!/bin/sh\ncat <<'STREAM'\n${stream}\nSTREAM\nexit 1\n`);
+  chmodSync(join(folder, "claude"), 0o755); process.env.PATH = `${folder}:/bin:/usr/bin`;
+  try {
+    const adapter = new ClaudeCodeAdapter({ provider: "claude", model: "model-a", name: "test" });
+    await assert.rejects(adapter.act(observation, control()), (error: unknown) => {
+      assert.ok(error instanceof AgentExecutionError);
+      assert.match(error.message, /error_max_structured_output_retries/);
+      assert.equal(error.evidence?.resolvedModel, "model-a");
+      assert.equal(error.evidence?.toolCalls, 0);
+      assert.equal(error.evidence?.usage.inputTokens, 25);
+      assert.equal(error.evidence?.sessionId, "error-session");
+      assert.doesNotMatch(error.responseExcerpt, /DO_NOT_PERSIST_REASONING/);
+      return true;
+    });
+    await adapter.shutdown();
+  } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("Claude external tool evidence is counted and missing inventory is never guessed as zero", async () => {
+  const previousPath = process.env.PATH;
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-tool-evidence-"));
+  try {
+    process.env.PATH = `${folder}:/bin:/usr/bin`;
+    for (const [inventory, external, expected] of [[true, true, 1], [false, false, null]] as const) {
+      const events = [
+        ...(inventory ? [{ type: "system", subtype: "init", tools: ["StructuredOutput", "Bash"] }] : []),
+        ...(external ? [{ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "forbidden" } }] } }] : []),
+        { type: "result", structured_output: { action }, modelUsage: { "model-a": {} } },
+      ];
+      const executable = join(folder, "claude");
+      writeFileSync(executable, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo test; exit 0; fi\ncat <<'EVENTS'\n${events.map((event) => JSON.stringify(event)).join("\n")}\nEVENTS\n`);
+      chmodSync(executable, 0o755);
+      const adapter = new ClaudeCodeAdapter({ provider: "claude", model: "model-a", name: "test" });
+      const reply = await adapter.act(observation, control());
+      assert.equal(reply.toolCalls, expected);
+      await adapter.shutdown();
+    }
+  } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
 });

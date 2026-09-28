@@ -19,7 +19,7 @@ export function HangmanDuelArena({ match, replayPly = null }: { match: PublicMat
       const latest = replayPly === null ? turns.at(-1) : turns.filter((turn) => turn.valid).slice(0, score.actionsTaken).at(-1);
       return <section key={player.id} className={`duel-player ${active ? "duel-thinking" : ""} ${result?.winnerId === player.id ? "duel-winner" : ""}`}>
         <span className="eyebrow">{player.label} · {result ? result.kind === "draw" ? "DRAW" : result.winnerId === player.id ? "WINNER" : "FINISHED" : replayPly !== null ? "REPLAY" : active ? "THINKING" : match.status === "running" ? "WAITING" : match.status.toUpperCase()}</span>
-        <h3 title={player.agent.model}>{name(player.id)}</h3><span className="duel-provider">{player.agent.provider === "claude" ? "Claude Code" : player.agent.provider === "codex" ? "Codex" : "OpenCode"} · {player.agent.reasoning === "none" ? "no extended thinking" : `${player.agent.reasoning || "default"} effort`}</span><strong className="duel-points">{score.points} <small>points</small></strong>
+        <h3 title={player.agent.model}>{name(player.id)}</h3><span className="duel-provider">{player.agent.provider === "claude" ? "Claude Code" : player.agent.provider === "codex" ? "Codex" : "OpenCode"} · {player.agent.reasoning === "none" ? "none requested" : `${player.agent.reasoning || "default"} effort`}</span><strong className="duel-points">{score.points} <small>points</small></strong>
         <p>{score.revealedLetters} letters revealed · {score.actionsTaken} actions · {score.misses} misses</p>
         <p>Last action: {latest?.actionLabel ?? "None yet"}{latest ? ` · ${latest.latencyMs === null ? "time unknown" : `${(latest.latencyMs / 1000).toFixed(1)}s`}` : ""}</p>
       </section>;
@@ -36,7 +36,7 @@ export function HangmanDuelArena({ match, replayPly = null }: { match: PublicMat
         {view.misses >= 6 && <path d="M105 95 L125 125" />}
         {view.misses >= 7 && <path d="M98 36 L103 42 M103 36 L98 42 M108 36 L113 42 M113 36 L108 42" />}
       </svg>
-      <div className={`word-pattern ${view.terminal ? "word-revealed" : ""}`} aria-label={`Shared word pattern: ${view.pattern}`}>{view.terminal ? view.word : view.pattern}</div>
+      <div className={`word-pattern ${view.terminal ? "word-revealed" : ""}`} aria-label={`Shared word pattern: ${view.terminal ? view.word : view.pattern}`}>{view.terminal ? view.word : view.pattern}</div>
       <p>{view.wordLength} letters · Guessed by either player: {view.guessedLetters.join(" · ") || "None yet"}</p>
       {last && <p className="duel-effect"><strong>{name(last.playerId)}</strong> {last.action.type === "guess_letter" ? `guessed ${last.action.payload.letter}` : last.action.type === "solve" ? "submitted a solution" : "forfeited"}: {last.points > 0 ? "+" : ""}{last.points} points. {last.correct ? "The shared board advanced." : "No letters revealed."}</p>}
 

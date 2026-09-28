@@ -43,7 +43,7 @@ test("fixture agents complete ten durable slots with event-time Hangman masking 
     act: async (observation): Promise<AgentReply> => {
       const match = matches.find((item) => item.id === observation.matchId)!;
       const word = (match.gameState as { word?: string }).word;
-      return { action: observation.gameId === "chess" ? { type: "resign", payload: {} } : { type: "solve", payload: { word } },
+      return { action: observation.gameId === "chess" ? (observation.playerId === "white" ? { type: "move", payload: { move: "e2e4" } } : { type: "resign", payload: {} }) : { type: "solve", payload: { word } },
         latencyMs: 1, responseExcerpt: "private fixture", stderrExcerpt: "", toolCalls: 0, resolvedModel: config.model,
         usage: { inputTokens: 10, outputTokens: 2, costUsd: null, coverage: "partial" } };
     } }));
@@ -85,7 +85,7 @@ test("failed slot pauses, reloads, and retries the same challenge without erasin
     act: async (observation): Promise<AgentReply> => {
       if (failFirst) { failFirst = false; throw new AgentExecutionError("fixture provider outage"); }
       const match = matches.find((item) => item.id === observation.matchId)!;
-      return { action: observation.gameId === "chess" ? { type: "resign", payload: {} } : { type: "solve", payload: { word: (match.gameState as { word: string }).word } },
+      return { action: observation.gameId === "chess" ? (observation.playerId === "white" ? { type: "move", payload: { move: "e2e4" } } : { type: "resign", payload: {} }) : { type: "solve", payload: { word: (match.gameState as { word: string }).word } },
         latencyMs: 1, responseExcerpt: "", stderrExcerpt: "", toolCalls: 0, resolvedModel: config.model,
         usage: { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" } };
     } }));

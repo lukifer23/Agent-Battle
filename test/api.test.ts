@@ -74,6 +74,16 @@ test("the API exposes a unified snapshot and rejects untrusted hosts and origins
     assert.equal(snapshot.activeMatchId, null);
     assert.ok(Array.isArray(snapshot.recentMatches));
 
+    for (const gameId of ["chess", "hangman", "battleship"]) {
+      const ids = gameId === "chess" ? ["white", "black"] : ["player1", "player2"];
+      for (const model of ["", "CLI configured default", "same-model"]) {
+        const players = Object.fromEntries(ids.map((id) => [id, { provider: "claude", model }]));
+        const rejected = await probe(port, { method: "POST", path: "/api/matches", headers: { "content-type": "application/json" }, body: JSON.stringify({ gameId, players }) });
+        assert.equal(rejected.status, 400, `${gameId} must reject ambiguous or mirrored competitors`);
+        assert.match(rejected.body, /explicit, different model IDs/);
+      }
+    }
+
     const unknown = await probe(port, { path: "/api/not-a-route" });
     assert.equal(unknown.status, 404);
     assert.equal((JSON.parse(unknown.body) as { code?: string }).code, "not_found");

@@ -298,8 +298,8 @@ app.post("/api/matches", asyncRoute(async (request, response) => {
   const rawPlayers = body.players ?? (gameId === "chess" ? { white: body.white, black: body.black } : undefined);
   if (!rawPlayers || typeof rawPlayers !== "object" || Object.keys(rawPlayers).sort().join() !== [...game.playerIds].sort().join()) throw new Error("Player roles do not match the game.");
   const players = Object.fromEntries(game.playerIds.map((id) => [id, parsePlayer((rawPlayers as Record<string, unknown>)[id])]));
-  if (gameId === "hangman" && !distinctExplicitModels(players[game.playerIds[0]], players[game.playerIds[1]])) {
-    throw new Error("Hangman comparison requires two explicit, different model IDs. CLI defaults and mirror models cannot establish distinct competitors.");
+  if (!distinctExplicitModels(players[game.playerIds[0]], players[game.playerIds[1]])) {
+    throw new Error("A comparison requires two explicit, different model IDs. CLI defaults and mirror models cannot establish distinct competitors.");
   }
   const created = await controller.create({
     gameId, gameVersion: game.version,

@@ -1,4 +1,5 @@
-import { modelDisplayName } from "./client/modelPresentation.js";
+import { ExecutionEvidence } from "./components/ExecutionEvidence.js";
+import { modelChoices, modelDisplayName } from "./client/modelPresentation.js";
 import "./hangman.css";
 import { acceptSnapshot, type SnapshotCursor } from "./client/snapshotOrder.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -8,7 +9,7 @@ import { highlightSquares, positionSummary } from "./client/chessView.js";
 import { aggregateUsage } from "./domain/usage.js";
 import { remainingMatchMs } from "./domain/matchTime.js";
 import { ArrowUpRight, BoardMark, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, FlipVertical, RefreshCw, Trophy } from "./components/icons.js";
-import { competitorId, competitorLabel, distinctExplicitModels, verifiedDistinctModels } from "./shared.js";
+import { competitorId, competitorLabel, distinctExplicitModels, explicitModelId } from "./shared.js";
 import type { AppState, ChessSnapshot, MatchEvent, PublicMatchDetail, PublicSeries, Provider, SeriesPlan } from "./shared.js";
 
 const initialFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -45,7 +46,8 @@ function loadView(): string {
 function loadPreferences(game = "chess"): Partial<Preferences> {
   try {
     const raw = window.localStorage.getItem(`${PREFERENCES_KEY}.${game}`) ?? (game === "chess" ? window.localStorage.getItem(PREFERENCES_KEY) : null);
-    return raw ? JSON.parse(raw) as Partial<Preferences> : {};
+    const saved = raw ? JSON.parse(raw) as Partial<Preferences> : {};
+    return { ...saved, whiteModel: typeof saved.whiteModel === "string" && explicitModelId(saved.whiteModel) ? saved.whiteModel : "", blackModel: typeof saved.blackModel === "string" && explicitModelId(saved.blackModel) ? saved.blackModel : "" };
   } catch { return {}; }
 }
 
@@ -129,7 +131,7 @@ function App() {
   const [providersChecked, setProvidersChecked] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(() => window.localStorage.getItem("agent-battle.selected"));
   const [whiteProvider, setWhiteProvider] = useState<Provider>(preferences.whiteProvider ?? "codex");
-  const [blackProvider, setBlackProvider] = useState<Provider>(preferences.blackProvider ?? "codex");
+  const [blackProvider, setBlackProvider] = useState<Provider>(preferences.blackProvider ?? "claude");
   const [whiteModel, setWhiteModel] = useState(preferences.whiteModel ?? "");
   const [blackModel, setBlackModel] = useState(preferences.blackModel ?? "");
   const [whiteReasoning, setWhiteReasoning] = useState(preferences.whiteReasoning ?? "");
@@ -165,12 +167,12 @@ function App() {
 
   const chooseWhiteProvider = (provider: Provider) => {
     setWhiteProvider(provider);
-    setWhiteModel(state?.recentMatches.flatMap((match) => match.players).find((player) => player.agent.provider === provider)?.agent.model ?? state?.providers.find((entry) => entry.provider === provider)?.defaultModel ?? "");
+    setWhiteModel(state?.recentMatches.flatMap((match) => match.players).find((player) => player.agent.provider === provider && explicitModelId(player.agent.model))?.agent.model ?? "");
     if (!reasoningOptions[provider].includes(whiteReasoning.toLowerCase())) setWhiteReasoning("");
   };
   const chooseBlackProvider = (provider: Provider) => {
     setBlackProvider(provider);
-    setBlackModel(state?.recentMatches.flatMap((match) => match.players).find((player) => player.agent.provider === provider)?.agent.model ?? state?.providers.find((entry) => entry.provider === provider)?.defaultModel ?? "");
+    setBlackModel(state?.recentMatches.flatMap((match) => match.players).find((player) => player.agent.provider === provider && explicitModelId(player.agent.model))?.agent.model ?? "");
     if (!reasoningOptions[provider].includes(blackReasoning.toLowerCase())) setBlackReasoning("");
   };
 
@@ -279,7 +281,7 @@ function App() {
     if (next === "series") return;
     setGameId(next);
     const saved = loadPreferences(next);
-    setWhiteProvider(saved.whiteProvider ?? "codex"); setBlackProvider(saved.blackProvider ?? "codex");
+    setWhiteProvider(saved.whiteProvider ?? "codex"); setBlackProvider(saved.blackProvider ?? "claude");
     setWhiteModel(saved.whiteModel ?? ""); setBlackModel(saved.blackModel ?? "");
     setWhiteReasoning(saved.whiteReasoning ?? ""); setBlackReasoning(saved.blackReasoning ?? "");
     setTimeoutSeconds(saved.timeoutSeconds ?? 120);
@@ -331,7 +333,7 @@ function App() {
       if (match.seriesId) continue;
       if (match.gameId !== (selectedMatch?.gameId ?? gameId)) continue;
       if (match.gameId === "hangman" && match.gameVersion !== (selectedMatch?.gameVersion ?? chosenGame?.version)) continue;
-      if (!verifiedDistinctModels(match.players[0].agent, match.players[1].agent)) continue;
+      if (!match.comparison?.eligible) continue;
       if (!match.result || !["finished", "forfeit"].includes(match.status)) continue;
       for (const player of match.players) {
         const side = player.id;
@@ -362,13 +364,12 @@ function App() {
   const canCreate = !storageBlocked && (!state?.activeMatch || !["ready", "running", "paused", "interrupted"].includes(state.activeMatch.status));
   const activeSeries = seriesList.find((series) => ["ready", "running", "paused"].includes(series.status));
   const distinctModels = distinctExplicitModels({ model: whiteModel }, { model: blackModel });
-  const unqualifiedMatch = Boolean(selectedMatch && !verifiedDistinctModels(selectedMatch.players[0].agent, selectedMatch.players[1].agent));
   const startBlocker = storageBlocked ? "Saved history is unavailable. Restore storage before starting."
     : !providersChecked || !chosenGame ? "Checking games and local agent CLIs…"
     : !installed(whiteProvider) || !installed(blackProvider) ? "Install the selected agent CLI and sign in to use it."
-    : !canCreate && state?.activeMatch ? `A ${state.activeMatch.gameId} match is ${state.activeMatch.status}. Finish or stop it before starting ${gameId}.`
+    : !canCreate && state?.activeMatch ? `A ${state.activeMatch.gameId} match is ${state.activeMatch.status}. Finish or stop it before starting another match.`
     : activeSeries ? `A battle series is ${activeSeries.status}. Finish or stop it before starting another match.`
-    : gameId === "hangman" && !distinctModels ? "Enter two explicit, different model IDs. Two CLI defaults or the same model in both seats cannot establish distinct competitors."
+    : !distinctModels ? "Enter two explicit, different model IDs. Two CLI defaults or the same model in both seats cannot establish distinct competitors."
     : null;
   const seriesBlocker = startBlocker ?? (!distinctModels ? "Enter two different explicit model IDs." : whiteProvider === "codex" || blackProvider === "codex" ? "Codex tool isolation is not qualified for scored series trials. Choose a qualified no-tools CLI." : null);
 
@@ -590,7 +591,7 @@ function App() {
               <span className="live-dot" />
               <span>{selectedMatch?.players.map((player) => modelDisplayName(player.agent.model)).join(" vs ")}</span>
               <span className="active-setup-status">{selectedMatch?.result ? `${selectedMatch.result.notation} · ${selectedMatch.result.reason}` : selectedMatch?.status === "error" ? "Stopped · review match log" : selectedMatch?.currentPlayerId ? `${selectedMatch.players.find((player) => player.id === selectedMatch.currentPlayerId)?.label} to move` : "Resume when ready"}</span>
-              {terminalMatchSelected && !selectedMatch?.series && <button className="active-setup-new primary-button" onClick={() => { setGameId(selectedMatch!.gameId); const [a, b] = selectedMatch!.players; setWhiteProvider(a.agent.provider); setWhiteModel(a.agent.model); setWhiteReasoning(a.agent.reasoning ?? ""); setBlackProvider(b.agent.provider); setBlackModel(b.agent.model); setBlackReasoning(b.agent.reasoning ?? ""); setNewMatchOpen(true); }}>New match <ArrowUpRight className="inline-icon" /></button>}
+              {terminalMatchSelected && !selectedMatch?.series && <button className="active-setup-new primary-button" onClick={() => { setGameId(selectedMatch!.gameId); setNewMatchOpen(true); }}>New match <ArrowUpRight className="inline-icon" /></button>}
             </div> : <>
               {viewMode === "series" && <div className="series-plan-setup"><div className="time-presets" role="group" aria-label="Series preset">
                 {(["quick", "standard", "custom"] as const).map((preset) => <button key={preset} type="button" aria-pressed={seriesPreset === preset} onClick={() => setSeriesPreset(preset)}>{preset.toUpperCase()}</button>)}
@@ -598,10 +599,10 @@ function App() {
               {seriesPreset === "custom" && <><label className="timeout-setting">MODE <select value={seriesMode} onChange={(event) => setSeriesMode(event.target.value as "strict" | "exploratory")}><option value="exploratory">Exploratory</option><option value="strict">Strict</option></select></label><div className="series-counts">{games.filter((game) => game.series).map((game) => <label className="timeout-setting" key={game.id}>{game.label.toUpperCase()} <input type="number" min={0} max={100} value={seriesCounts[game.id] ?? 0} onChange={(event) => setSeriesCounts((current) => ({ ...current, [game.id]: Math.max(0, Math.min(100, Number(event.target.value) || 0)) }))} /></label>)}</div></>}
               </div>}
               <div className="players-grid">
-                <PlayerPicker key={`white-${whiteProvider}`} title={(viewMode === "series" ? "AGENT A" : chosenGame?.playerLabels[0] ?? "White").toUpperCase()} color="white" provider={whiteProvider} model={whiteModel} reasoning={whiteReasoning} providers={providers} recentModels={[...new Set((state?.recentMatches ?? []).flatMap((match) => match.players).filter((player) => player.agent.provider === whiteProvider).map((player) => player.agent.model).filter(Boolean))]} loading={!providersChecked} requiredModel={viewMode === "series" || viewMode === "hangman"}
+                <PlayerPicker key={`white-${whiteProvider}`} title={(viewMode === "series" ? "AGENT A" : chosenGame?.playerLabels[0] ?? "White").toUpperCase()} color="white" provider={whiteProvider} model={whiteModel} reasoning={whiteReasoning} providers={providers} recentModels={[...new Set((state?.recentMatches ?? []).flatMap((match) => match.players).filter((player) => player.agent.provider === whiteProvider).map((player) => player.agent.model).filter(explicitModelId))]} loading={!providersChecked} requiredModel
                   onProvider={chooseWhiteProvider} onModel={setWhiteModel} onReasoning={setWhiteReasoning} />
                 <div className="versus"><span>VS</span></div>
-                <PlayerPicker key={`black-${blackProvider}`} title={(viewMode === "series" ? "AGENT B" : chosenGame?.playerLabels[1] ?? "Black").toUpperCase()} color="black" provider={blackProvider} model={blackModel} reasoning={blackReasoning} providers={providers} recentModels={[...new Set((state?.recentMatches ?? []).flatMap((match) => match.players).filter((player) => player.agent.provider === blackProvider).map((player) => player.agent.model).filter(Boolean))]} loading={!providersChecked} requiredModel={viewMode === "series" || viewMode === "hangman"}
+                <PlayerPicker key={`black-${blackProvider}`} title={(viewMode === "series" ? "AGENT B" : chosenGame?.playerLabels[1] ?? "Black").toUpperCase()} color="black" provider={blackProvider} model={blackModel} reasoning={blackReasoning} providers={providers} recentModels={[...new Set((state?.recentMatches ?? []).flatMap((match) => match.players).filter((player) => player.agent.provider === blackProvider).map((player) => player.agent.model).filter(explicitModelId))]} loading={!providersChecked} requiredModel
                   onProvider={chooseBlackProvider} onModel={setBlackModel} onReasoning={setBlackReasoning} />
               </div>
               <details className="advanced-settings"><summary>Time and resource limits <span>{maxWallMinutes} min active · {timeoutSeconds} sec per request</span></summary>
@@ -632,7 +633,7 @@ function App() {
               {providersChecked && providers.some((entry) => !entry.installed) && <div className="inline-note">Install a supported CLI and sign in before choosing it. Agent Battle uses its existing login.</div>}
               </details>
               <div className="launch-strip">
-                <div><strong>{viewMode === "series" ? "Run a recorded battle series" : "Ready when you are"}</strong><p>{viewMode === "series" ? "Choose the games and trial counts below. Each result, role, request, and model identity is recorded." : viewMode === "hangman" ? "A fresh word. Two separate agent sessions. Saved automatically." : viewMode === "battleship" ? "Each agent places a private fleet, then they alternate shots. Fleets reveal after the battle." : "The agents play from the standard starting position. Moves and results are saved automatically."}</p></div>
+                <div><strong>{viewMode === "series" ? "Run a recorded battle series" : startBlocker ? "Complete setup to play" : "Ready when you are"}</strong><p>{viewMode === "series" ? "Choose the games and trial counts below. Each result, role, request, and model identity is recorded." : viewMode === "hangman" ? "A fresh word. Two separate agent sessions. Saved automatically." : viewMode === "battleship" ? "Each agent places a private fleet, then they alternate shots. Fleets reveal after the battle." : "The agents play from the standard starting position. Moves and results are saved automatically."}</p></div>
                 {viewMode === "series" ? <button className="primary-button launch-button" onClick={() => void createSeries()} disabled={pendingCommand !== null || seriesBlocker !== null}>{pendingCommand === "create" ? "STARTING…" : "START BATTLE SERIES"} <ArrowUpRight className="inline-icon" /></button>
                   : <button className="primary-button launch-button" onClick={() => void startMatch()} disabled={busy || pendingCommand !== null || startBlocker !== null}>{pendingCommand === "start" ? "STARTING…" : `Start ${chosenGame?.label ?? viewMode} match`} <ArrowUpRight className="inline-icon" /></button>}
               </div>
@@ -649,7 +650,7 @@ function App() {
               <div className="series-card-head"><strong>{series.agents.map((agent) => competitorLabel(agent)).join(" vs ")}</strong><span>{series.status.toUpperCase()}</span></div>
               <p className="series-progress">{series.slots.filter((slot) => slot.status === "scored").length} / {series.slots.length} scored · {series.slots.filter((slot) => slot.status === "unscored").length} unscored</p>
               {series.error && <p role="alert">{series.error}</p>}
-              {(() => { const slot = series.slots.find((item) => item.status === "running" || item.status === "unscored") ?? series.slots.find((item) => item.status === "pending"); return slot ? <div className="series-current"><span>Slot {slot.ordinal + 1} · {slot.gameId} · {slot.status}</span>{slot.matchIds.length > 0 && <button className="quiet-button" onClick={() => chooseView(slot.gameId as "chess" | "hangman", slot.matchIds.at(-1))}>VIEW MATCH</button>}</div> : null; })()}
+              {(() => { const slot = series.slots.find((item) => item.status === "running" || item.status === "unscored") ?? series.slots.find((item) => item.status === "pending"); return slot ? <div className="series-current"><span>Slot {slot.ordinal + 1} · {slot.gameId} · {slot.status}</span>{slot.unscoredReasons?.map((reason) => <p key={reason}>{reason}</p>)}{slot.matchIds.length > 0 && <button className="quiet-button" onClick={() => chooseView(slot.gameId as "chess" | "hangman", slot.matchIds.at(-1))}>VIEW MATCH</button>}</div> : null; })()}
               <div className="series-actions">
                 {series.status === "paused" && !series.slots.some((slot) => slot.status === "unscored") && <button className="quiet-button" onClick={() => void seriesCommand(series.id, "start")}>RESUME</button>}
                 {series.status === "paused" && series.slots.some((slot) => slot.status === "unscored") && <button className="quiet-button" onClick={() => void seriesCommand(series.id, "retry")}>RETRY SLOT</button>}
@@ -660,7 +661,7 @@ function App() {
                 {series.status === "completed" && series.version === "battle-series-2" && <button className="quiet-button" onClick={() => void rerunSeries(series.id)} disabled={pendingCommand !== null}>RERUN EXACT CONFIGURATION</button>}
               </div>
               <details className="series-detail"><summary>Trial schedule</summary><div className="series-slots">{series.slots.map((slot) => <div key={slot.id}><span>{slot.ordinal + 1}. {slot.gameId} · {slot.challengeId.slice(0, 12)}</span><span>{slot.status}{slot.result ? ` · ${slot.result.notation}` : ""}{slot.matchIds.length > 0 && <button className="link-button" onClick={() => chooseView(slot.gameId as "chess" | "hangman", slot.matchIds.at(-1))}>Open</button>}</span></div>)}</div></details>
-              <details className="series-detail"><summary>Scores and usage</summary><div className="series-results"><p>Win = 1, draw = ½, loss = 0. Each game's performance is points / scored trials; overall is the mean across scored game families. Unscored trials remain visible.</p>{Object.entries(series.aggregate).map(([key, row]) => <p key={key}><b>{key.split(":")[0]} · {series.agents[Number(key.split(":")[1])]?.model}</b> {row.wins}W {row.draws}D {row.losses}L · {row.scored} scored{row.unscored ? ` · ${row.unscored} unscored` : ""} · {row.points}/{row.possiblePoints} points ({row.normalizedPerformance === null ? "n/a" : `${(row.normalizedPerformance * 100).toFixed(1)}%`}) · roles {Object.entries(row.roleCounts).map(([role, count]) => `${role}:${count}`).join(", ")} · {row.requests} requests · {row.inputTokens + row.outputTokens} reported tokens ({row.coverage.inputTokens.reported}/{row.coverage.inputTokens.total} input, {row.coverage.outputTokens.reported}/{row.coverage.outputTokens.total} output) · ${row.costUsd.toFixed(4)} reported ({row.coverage.costUsd.reported}/{row.coverage.costUsd.total} cost) · {(row.latencyMs / 1000).toFixed(1)}s ({row.coverage.latencyMs.reported}/{row.coverage.latencyMs.total} latency)</p>)}</div></details>
+              <details className="series-detail"><summary>Scores and usage</summary><div className="series-results"><p>Win = 1, draw = ½, loss = 0. Each game's performance is points / scored trials; overall is shown only when every planned trial is qualified and scored. Unscored trials remain visible.</p>{Object.entries(series.aggregate).map(([key, row]) => <p key={key}><b>{key.split(":")[0]} · {series.agents[Number(key.split(":")[1])]?.model}</b> {row.wins}W {row.draws}D {row.losses}L · {row.scored} scored{row.unscored ? ` · ${row.unscored} unscored` : ""} · {row.points}/{row.possiblePoints} points ({row.normalizedPerformance === null ? "n/a" : `${(row.normalizedPerformance * 100).toFixed(1)}%`}) · roles {Object.entries(row.roleCounts).map(([role, count]) => `${role}:${count}`).join(", ")} · {row.requests} requests · {row.inputTokens + row.outputTokens} reported tokens ({row.coverage.inputTokens.reported}/{row.coverage.inputTokens.total} input, {row.coverage.outputTokens.reported}/{row.coverage.outputTokens.total} output) · ${row.costUsd.toFixed(4)} reported ({row.coverage.costUsd.reported}/{row.coverage.costUsd.total} cost) · {(row.latencyMs / 1000).toFixed(1)}s ({row.coverage.latencyMs.reported}/{row.coverage.latencyMs.total} latency)</p>)}</div></details>
             </div>)}
           </section>}
 
@@ -673,6 +674,11 @@ function App() {
               </div>
             </div>
             {viewMode === "hangman" && !terminalMatchSelected && <div className="hangman-controls">{matchControls}</div>}
+            {selectedMatch?.gameId === "chess" && selectedMatch.result && (replayPly === null || replayPly === totalPlies) && <div className="match-outcome-banner" role="status">
+              <span className="eyebrow">MATCH COMPLETE</span>
+              <h2>{selectedMatch.result.kind === "draw" ? "Draw" : `${modelDisplayName(selectedMatch.players.find((player) => player.id === selectedMatch.result?.winnerId)?.agent.model ?? selectedMatch.result.winnerId ?? "Winner")} wins`}</h2>
+              <p>{selectedMatch.result.reason}</p>
+            </div>}
             {selectedMatch?.gameId === "chess" && <div className="player-strip">
               {selectedMatch.players.map((player) => {
                 const playerTurns = selectedMatch.history.filter((turn) => turn.playerId === player.id);
@@ -699,7 +705,7 @@ function App() {
               {viewMode !== "hangman" && matchControls}
             </div>
             {selectedMatch?.result && replayPly !== null && <div className="replay-note">Viewing a historical position. Final result: {selectedMatch.result.notation} · {selectedMatch.result.reason}.</div>}
-            {unqualifiedMatch && <details className="identity-note"><summary>Unranked match · model identity not fully reported</summary><p>Names show requested models. {selectedMatch?.players.filter((player) => !player.agent.resolvedModel).map((player) => pretty[player.agent.provider]).join(", ") || "A CLI"} did not confirm the exact requested model. The game result is recorded, but excluded from comparative standings.</p>{selectedMatch?.players.map((player) => <p key={player.id}>{player.label}: {player.agent.model} · reported: {player.agent.resolvedModel ?? "not provided"}</p>)}</details>}
+            {selectedMatch && <ExecutionEvidence match={selectedMatch} />}
             {selectedMatch && <div className="export-bar">
               <span className="export-totals">{matchTotals ? `MATCH ${matchTotals.requests} req · ${matchTotals.inputTokens + matchTotals.outputTokens} tok${coverageMark(matchTotals.coverage)} · ${!matchTotals.costKnown ? "cost unknown" : `$${matchTotals.costUsd.toFixed(4)} reported`}` : ""}</span>
               {selectedMatch.gameId === "chess" && <button className="quiet-button" onClick={() => void copyText(boardFen, "FEN")}><Copy className="button-icon" /> FEN</button>}
@@ -740,7 +746,7 @@ function App() {
                 onClick={() => chooseView(match.gameId as "chess" | "hangman", match.id)}>
                 <span className="history-date">{new Date(match.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
                 <span className="history-players"><b>{modelDisplayName(match.players[0].agent.model)}</b><small>vs</small><b>{modelDisplayName(match.players[1].agent.model)}</b></span>
-                <span className={`history-result ${match.result ? "" : "muted"}`}>{match.result && !verifiedDistinctModels(match.players[0].agent, match.players[1].agent) ? `${match.result.notation} · unranked` : match.result?.notation ?? match.status}</span>
+                <span className={`history-result ${match.result ? "" : "muted"}`}>{match.result && !match.comparison?.eligible ? `${match.result.notation} · unranked` : match.result?.notation ?? match.status}</span>
                 <span className="history-moves">{match.actionCount} actions · {match.gameId}</span>
               </button>)}
             </div>
@@ -839,13 +845,13 @@ function PlayerPicker(props: {
   const providerInfo = props.providers.find((item) => item.provider === props.provider);
   const options = reasoningOptions[props.provider];
   const [customModel, setCustomModel] = useState(false);
-  const models = [...new Set([...props.recentModels, ...(props.model ? [props.model] : [])])];
+  const models = modelChoices(props.provider, props.recentModels, props.model);
   return <div className={`player-card player-${props.color}`}>
     <div className="player-card-top"><span className={`piece-disc piece-disc-${props.color}`} aria-hidden="true" /><span>{cardTitle}</span><span className={`agent-presence ${props.loading ? "checking" : providerInfo?.installed ? "available" : ""}`} title={props.loading ? "Checking CLI" : providerInfo?.installed ? "CLI found on PATH; authentication is not verified" : "CLI not found"} /></div>
     <label className="field-label" htmlFor={`${props.color}-provider`}>AGENT CLI</label>
     <div className="provider-field">
       <span className={`provider-mark provider-${props.provider}`} aria-hidden="true">{marks[props.provider]}</span>
-      <select id={`${props.color}-provider`} value={props.provider} onChange={(event) => props.onProvider(event.target.value as Provider)}>
+      <select id={`${props.color}-provider`} value={props.provider} onChange={(event) => { setCustomModel(false); props.onProvider(event.target.value as Provider); }}>
         {(["codex", "claude", "opencode"] as Provider[]).map((provider) => {
           const info = props.providers.find((item) => item.provider === provider);
           return <option value={provider} key={provider}>{pretty[provider]}{!props.loading && info && !info.installed ? " · not installed" : ""}</option>;
@@ -862,7 +868,7 @@ function PlayerPicker(props: {
     {customModel && <><label className="field-label" htmlFor={`${props.color}-model`}>Custom model ID</label><input id={`${props.color}-model`} className="model-input" value={props.model} onChange={(event) => props.onModel(event.target.value)} placeholder="Exact model ID supported by this CLI" autoComplete="off" spellCheck={false} /></>}
     <label className="field-label" htmlFor={`${props.color}-reasoning`}>Thinking effort</label>
     {options.length ? <select id={`${props.color}-reasoning`} className="model-input" value={props.reasoning} onChange={(event) => props.onReasoning(event.target.value)}><option value="">Game default</option>{[...new Set([...options, ...(props.reasoning ? [props.reasoning] : [])])].map((option) => <option key={option} value={option}>{option === "none" ? "None" : option[0].toUpperCase() + option.slice(1)}</option>)}</select> : <input id={`${props.color}-reasoning`} className="model-input" value={props.reasoning} onChange={(event) => props.onReasoning(event.target.value)} placeholder="Provider default" />}
-    <div className="model-hint">{props.loading ? "Checking local CLI…" : providerInfo?.installed ? "CLI installed · uses your existing sign-in" : "Not found on PATH"}</div>
+    <div className="model-hint">{props.loading ? "Checking local CLI…" : providerInfo?.installed ? "CLI installed · model access depends on your sign-in" : "Not found on PATH"}</div>
   </div>;
 }
 

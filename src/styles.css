@@ -313,7 +313,7 @@ h2 { margin-top: 5px; font: 600 18px var(--display); letter-spacing: -.025em; }
 .intro.is-condensed { min-height: 92px; }
 .intro.is-condensed .intro-mark { width: 90px; height: 90px; top: 0; }
 .intro.is-condensed h1 { margin-top: 5px; font-size: clamp(28px, 4vw, 38px); }
-.arena-main.has-match .board-panel { order: -1; }
+.arena-main.has-match .match-setup { order: -1; }
 .arena-layout.series-layout { grid-template-columns: minmax(0, 1fr); }
 .series-layout .arena-main { display: flex; flex-direction: column; }
 .series-layout.has-series .series-panel { order: -1; }
@@ -394,3 +394,15 @@ h2 { margin-top: 5px; font: 600 18px var(--display); letter-spacing: -.025em; }
 .duel-effect { padding: 12px; background: #b7d96c10; border-radius: 6px; }
 .duel-requests { margin-top: 16px; }
 @media (max-width:650px) { .duel-players { grid-template-columns: 1fr; } }
+
+.match-outcome-banner {
+  margin: 0 0 20px;
+  padding: 20px;
+  border: 1px solid var(--accent, #c5e579);
+  border-radius: 10px;
+  background: rgba(197, 229, 121, 0.08);
+  text-align: center;
+}
+.match-outcome-banner h2 { margin: 8px 0; overflow-wrap: anywhere; }
+.match-outcome-banner p { margin: 0; }
+.identity-note code { overflow-wrap: anywhere; }

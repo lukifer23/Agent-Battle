@@ -76,6 +76,7 @@ function validateAttempt(raw: unknown): ValidationResult<AgentAttempt> {
       ...(isFiniteNumber(raw.latencyMs) ? { latencyMs: raw.latencyMs } : {}),
       ...(isFiniteNumber(raw.accountedMs) && raw.accountedMs >= 0 ? { accountedMs: raw.accountedMs } : {}),
       ...(isString(raw.resolvedModel) ? { resolvedModel: raw.resolvedModel } : {}),
+      ...(isString(raw.sessionId) ? { sessionId: raw.sessionId } : {}),
       status: status as AgentAttempt["status"],
       ...(["initialization", "provider", "protocol", "controller", "storage", "qualification"].includes(String(raw.phase)) ? { phase: raw.phase as AgentAttempt["phase"] } : {}),
       ...(isString(raw.error) ? { error: raw.error } : {}),
@@ -98,7 +99,8 @@ function validateEnvironment(raw: unknown): MatchEnvironment | undefined {
       if (isString(version)) cliVersions[provider] = version;
     }
   }
-  return { adapterVersion: raw.adapterVersion, promptVersion: raw.promptVersion, toolSchemaVersion: raw.toolSchemaVersion, cliVersions };
+  return { adapterVersion: raw.adapterVersion, promptVersion: raw.promptVersion, toolSchemaVersion: raw.toolSchemaVersion, cliVersions,
+    ...(Array.isArray(raw.noToolsPlayerIds) ? { noToolsPlayerIds: raw.noToolsPlayerIds.filter(isString) } : {}) };
 }
 
 function validatePendingTurn(raw: unknown): ValidationResult<PendingTurn> {

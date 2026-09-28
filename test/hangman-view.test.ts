@@ -1,3 +1,4 @@
+import { modelChoices } from "../src/client/modelPresentation.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
@@ -52,4 +53,12 @@ test("unfinished Hangman lanes show the match lifecycle rather than ACTIVE after
     assert.match(html, new RegExp(`>${status.toUpperCase()}<`));
     assert.doesNotMatch(html, />ACTIVE<|>THINKING<|>WAITING</);
   }
+});
+
+
+test("Claude model choices include Opus without prior matches and retain custom IDs", () => {
+  assert.ok(modelChoices("claude", [], "").includes("claude-opus-5-5"));
+  assert.ok(modelChoices("claude", ["private-model"], "custom-model").includes("custom-model"));
+  assert.equal(modelChoices("claude", ["CLI configured default", "claude-opus-5-5"], "").filter((id) => id === "claude-opus-5-5").length, 1);
+  assert.ok(!modelChoices("codex", [], "").some((id) => id.startsWith("claude-")));
 });

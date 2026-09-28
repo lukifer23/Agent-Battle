@@ -55,6 +55,12 @@ The development UI runs on `127.0.0.1:5173` and proxies `/api` to the API port. 
 
 Chess, Hangman, Battleship, and battle series are supported. Human players, Stockfish analysis, and remote agents are not implemented.
 
+## Comparing two agents
+
+All three games require two distinct explicit model IDs. Claude setup suggests Opus 5.5, Sonnet 5, and Haiku 4.5 alongside previously used models; custom IDs remain available. Suggestions are not a claim of account access. Choosing the same CLI is valid when it runs different models: every request starts a fresh process in a separate temporary directory. The execution-evidence panel shows requested/reported model IDs, invocation IDs, provider session IDs when available, and observed external tool calls.
+
+A winner describes the game outcome. Comparative standings additionally require both players to have responded, exact model evidence on every request, recorded no-tools policies, zero observed external tool calls, and no shared session between players. Older records without this evidence remain playable as replays and retain their results, but are unranked. Codex games remain casual/unranked because its current CLI does not establish no-tools parity. Provider reasoning settings are requests, not proof of equal internal compute.
+
 ## Billing, limits and provenance
 
 Fresh matches default to 250 accepted actions, 500 requests and 30 active minutes. Every match has configurable limits: maximum plies, maximum requests, game minutes, and an optional best-effort reported-cost threshold. New matches offer 5, 10, 30, 60-minute and custom game-time controls. Their game clock counts accumulated running time, pauses while paused, and survives restart; an unclosed running segment is conservatively charged through restart. The controller checks request, time, and reported-cost thresholds before each invocation and cancels an in-flight request when its game clock expires. Older saved matches without a timer ledger retain their original creation-age semantics. A budget stop is a non-game outcome rather than a fabricated win or draw. A durable reservation counts each invocation conservatively across crashes; provider-reported cost is not a hard billing cap. Keep the per-move timeout separate from the game-time control.

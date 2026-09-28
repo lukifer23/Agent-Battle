@@ -1,3 +1,4 @@
+import { modelDisplayName } from "../client/modelPresentation.js";
 import type { PublicMatchDetail } from "../shared.js";
 
 type Shot = { playerId: string; coordinate: string; hit: boolean; sunk?: string };
@@ -17,7 +18,9 @@ function shipCells(status: FleetStatus): Set<string> {
 export function BattleshipArena({ match, replayPly }: { match: PublicMatchDetail; replayPly: number | null }) {
   const frame = replayPly !== null && match.replay?.[replayPly] ? match.replay[replayPly] : match.gameState;
   const state = frame as PublicState;
+  const winner = match.players.find((seat) => seat.id === match.result?.winnerId);
   return <div className="battleship-arena">
+    {match.result && (replayPly === null || replayPly === (match.replay?.length ?? 1) - 1) && <div className="match-outcome-banner" role="status"><span className="eyebrow">MATCH COMPLETE</span><h2>{winner ? `${modelDisplayName(winner.agent.model)} wins` : "Draw"}</h2><p>{match.result.reason}</p></div>}
     <p className="battleship-status" role="status">{state.phase === "placement" ? "Fleet placement" : state.terminal ? "Battle complete · fleets revealed" : `${match.players.find((seat) => seat.id === state.next)?.label ?? state.next} to fire`}</p>
     <div className="battleship-boards">{match.players.map((seat) => {
       const status = state.fleets[seat.id];
@@ -25,7 +28,7 @@ export function BattleshipArena({ match, replayPly }: { match: PublicMatchDetail
       const ownCells = shipCells(status);
       const metrics = state.metrics[seat.id];
       return <section className="battleship-board-panel" key={seat.id} aria-label={`${seat.label} fleet and incoming shots`}>
-        <div className="battleship-board-head"><h3>{seat.label}</h3><span>{status.placed ? `${status.sunk.length}/5 sunk` : "Placing fleet"}</span></div>
+        <div className="battleship-board-head"><h3>{modelDisplayName(seat.agent.model)} <small>· {seat.label}</small></h3><span>{status.placed ? `${status.sunk.length}/5 sunk` : "Placing fleet"}</span></div>
         <div className="battleship-grid" role="grid" aria-label={`${seat.label} board`}>
           <span aria-hidden="true" />{[...files].map((file) => <b key={file} aria-hidden="true">{file.toUpperCase()}</b>)}
           {Array.from({ length: 10 }, (_, row) => <div className="battleship-grid-row" role="row" key={row}>

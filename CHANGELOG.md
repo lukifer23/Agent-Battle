@@ -5,6 +5,14 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+- Keep new-match setup above the board in every game and preserve the user's model choices when reopening it; show model-named Chess and Battleship winners.
+- Include current Claude Opus, Sonnet, and Haiku suggestions even with empty match history; preserve custom IDs and reset custom-entry mode when switching CLIs.
+- Require distinct explicit models for every game; reject CLI-default display placeholders and expose per-request execution evidence in the arena.
+- Read Claude tool inventory, external tool events, exact model identity and session IDs from its stream. Preserve usage and identity on structured nonzero exits without retaining raw assistant streams.
+- Fix reproduced Claude chess output-envelope retries and Battleship strict-validator failures caused by missing coordinate string types.
+- Qualify protocol failures before series scoring and pause unqualified terminal slots for retry/skip; keep incomplete or unqualified suites out of overall performance. Export all projected series events and match provenance.
+- Retain historical results while excluding records without complete per-request comparison evidence from comparative standings.
+
 - Added shared-board competitive Hangman with alternating guesses, per-position points, completion bonuses and shared misses; preserved independent-lane records under their original ruleset.
 - Made game lookup version-aware across creation, restore, projection and series; shared-board series balance seats with the same word for each role-swapped pair.
 - Rebuilt Hangman setup and results with a light theme, model dropdowns and custom IDs, explicit thinking effort, visible new-match controls, and expandable diagnostics. Changing CLI replaces the previous CLI's model.

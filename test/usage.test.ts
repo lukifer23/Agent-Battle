@@ -48,3 +48,10 @@ test("competitor identity includes reasoning and a resolved model, and is stable
   assert.equal(competitorId({ provider: "claude", model: "opus", name: "x", reasoning: "High" }), "claude::opus::high");
   assert.equal(competitorId({ provider: "codex", model: "", name: "x", resolvedModel: "gpt-5-2026" }), "codex::gpt-5-2026::default");
 });
+
+test("display placeholders and mirror models cannot identify two competitors", async () => {
+  const { distinctExplicitModels } = await import("../src/shared.js");
+  assert.equal(distinctExplicitModels({ model: "CLI configured default" }, { model: "actual-model" }), false);
+  assert.equal(distinctExplicitModels({ model: "MODEL-A" }, { model: "model-a" }), false);
+  assert.equal(distinctExplicitModels({ model: "model-a" }, { model: "model-b" }), true);
+});

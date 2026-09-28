@@ -92,3 +92,20 @@ test("each observation contains own fleet but no untouched opponent placement", 
   assert.equal(JSON.stringify(second).includes('"start":"a2"'), false);
   assert.equal(JSON.stringify(second).includes("provenance"), false);
 });
+
+test("Battleship output schemas declare types for strict provider validators in both phases", () => {
+  const state = game.createState();
+  const inspect = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    const node = value as Record<string, unknown>;
+    if ("pattern" in node) assert.equal(node.type, "string", "pattern requires an explicit string type in Claude's strict validator");
+    for (const child of Object.values(node)) inspect(child);
+  };
+  const observe = () => game.observe(state, { matchId: "schema", turnId: "t", player: { id: "player1", label: "Player 1", agent: { provider: "claude", model: "schema-test", name: "schema-test" } }, ply: 1, turnIndex: 1, turnTimeoutMs: 1000 });
+  inspect(observe().actionSchema);
+  game.applyAction(state, "player1", place());
+  game.applyAction(state, "player2", place());
+  inspect(observe().actionSchema);
+  assert.equal(game.validateAction(state, "player1", fire("j10")).valid, true);
+  assert.equal(game.validateAction(state, "player1", fire(10 as unknown as string)).valid, false);
+});

@@ -24,19 +24,21 @@ interface InterpreterResult {
   providerError?: string;
   protocolError?: string;
   resolvedModel?: string;
+  sessionId?: string;
 }
 
 interface ProcessResult {
   stdout: string;
   stderr: string;
   latencyMs: number;
+  exitCode?: number | null;
 }
 
 const commandName: Record<Provider, string> = { codex: "codex", claude: "claude", opencode: "opencode" };
 const commandDefault: Record<Provider, string> = {
-  codex: "CLI configured default",
-  claude: "CLI configured default",
-  opencode: "CLI configured default",
+  codex: "",
+  claude: "",
+  opencode: "",
 };
 
 function locate(command: string): string | undefined {
@@ -158,27 +160,37 @@ function interpretCodex(root: { stdout: string; responseText: string }): Interpr
 }
 
 function interpretClaude(root: { stdout: string; responseText: string }): InterpreterResult {
-  let envelope: Record<string, unknown>;
-  try { envelope = JSON.parse(root.responseText) as Record<string, unknown>; }
-  catch { return { usage: emptyUsage(), toolCalls: null, protocolError: "Claude output was not one JSON envelope." }; }
-  const usage = claudeUsage(envelope);
+  const events: Record<string, unknown>[] = [];
+  for (const line of root.responseText.split(/\r?\n/)) {
+    try { const event: unknown = JSON.parse(line); if (isRecord(event)) events.push(event); }
+    catch { /* A missing complete envelope remains a protocol failure. */ }
+  }
+  const envelope = [...events].reverse().find((event) => event.type === "result") ?? (events.length === 1 ? events[0] : undefined);
+  if (!envelope) return { usage: emptyUsage(), toolCalls: null, protocolError: "Claude output contained no complete result envelope." };
+  const init = events.find((event) => event.type === "system" && event.subtype === "init");
+  // StructuredOutput is the schema response channel, not an external information tool.
+  const inventoryKnown = Array.isArray(init?.tools) && init.tools.every((tool) => tool === "StructuredOutput");
+  let externalCalls = 0;
+  for (const event of events) {
+    if (event.type !== "assistant" || !isRecord(event.message) || !Array.isArray(event.message.content)) continue;
+    for (const item of event.message.content) if (isRecord(item) && item.type === "tool_use" && item.name !== "StructuredOutput") externalCalls++;
+  }
+  const modelUsage = isRecord(envelope.modelUsage) ? Object.keys(envelope.modelUsage) : [];
+  const resolvedModel = modelUsage.length === 1 ? modelUsage[0] : typeof envelope.model === "string" ? envelope.model : undefined;
+  const sessionId = typeof envelope.session_id === "string" ? envelope.session_id : undefined;
+  const metadata = { usage: claudeUsage(envelope), toolCalls: externalCalls > 0 ? externalCalls : inventoryKnown && envelope.type === "result" ? 0 : null,
+    ...(resolvedModel ? { resolvedModel } : {}), ...(sessionId ? { sessionId } : {}) };
   const subtype = typeof envelope.subtype === "string" ? envelope.subtype : undefined;
   if (envelope.is_error === true || (subtype !== undefined && /error/i.test(subtype))) {
-    const detail = typeof envelope.result === "string" && envelope.result ? `: ${excerpt(envelope.result, 300)}` : "";
-    return { usage, toolCalls: null, providerError: `Claude reported ${subtype ?? "an error"}${detail}` };
+    const reportedErrors = Array.isArray(envelope.errors) ? envelope.errors.filter((item) => typeof item === "string").join("; ") : "";
+    const detail = typeof envelope.result === "string" && envelope.result ? `: ${excerpt(envelope.result, 300)}` : reportedErrors ? `: ${excerpt(reportedErrors, 500)}` : "";
+    return { ...metadata, providerError: `Claude reported ${subtype ?? "an error"}${detail}` };
   }
-  const candidate = envelope.structured_output ?? envelope.result;
-  const action = tryParseAction(candidate);
-  const modelUsage = isRecord(envelope.modelUsage) ? Object.keys(envelope.modelUsage) : [];
-  const resolvedModel = typeof envelope.model === "string" ? envelope.model : modelUsage.length === 1 ? modelUsage[0] : undefined;
-  return {
-    action,
-    usage,
-    // The invocation uses safe mode, disabled hooks, --tools "", and --strict-mcp-config.
-    toolCalls: 0,
-    ...(resolvedModel ? { resolvedModel } : {}),
-    ...(action ? {} : { protocolError: "Claude returned no structured action; expected a structured_output or JSON result field." }),
-  };
+  // Claude tool input uses a dedicated transport envelope to avoid root action-field
+  // collisions. Unwrap only this exact shape; never repair malformed game actions.
+  const structured = envelope.structured_output;
+  const action = tryParseAction(isRecord(structured) && Object.keys(structured).length === 1 && "action" in structured ? structured.action : structured ?? envelope.result);
+  return { ...metadata, action, ...(action ? {} : { protocolError: "Claude returned no structured action; expected a structured_output or JSON result field." }) };
 }
 
 function interpretOpenCode(root: { stdout: string }): InterpreterResult {
@@ -233,7 +245,7 @@ function buildPrompt(observation: GameObservation): string {
   return [
     "You are an agent playing a turn-based game. The controller is authoritative and validates every action.",
     "Use only the observation below. It is complete for this turn; do not assume memory from earlier turns.",
-    "Return exactly one JSON object matching action_schema. Do not include prose or markdown.",
+    "Return exactly one JSON object matching observation.actionSchema, with type and payload at the top level. The payload contains only the fields for that action, never another action envelope. Do not include prose or markdown.",
     JSON.stringify({ observation }),
   ].join("\n\n");
 }
@@ -266,6 +278,7 @@ abstract class CliAgentAdapter implements AgentAdapter {
         cwd: workingDirectory,
         timeoutMs: observation.clock.turnTimeoutMs,
         signal: control.signal,
+        returnNonzeroExit: true,
         onChild: (child) => {
           if (child) this.activeChildren.add(child);
           else for (const active of this.activeChildren) if (active.exitCode !== null || active.signalCode !== null) this.activeChildren.delete(active);
@@ -273,17 +286,22 @@ abstract class CliAgentAdapter implements AgentAdapter {
       });
       const responseText = invocation.readResponse(response.stdout);
       const interpreted = invocation.interpret({ stdout: response.stdout, responseText });
-      if (interpreted.providerError) {
-        throw new AgentExecutionError(interpreted.providerError, false, excerpt(responseText), excerpt(response.stderr), response.latencyMs);
+      if (interpreted.providerError || response.exitCode !== undefined && response.exitCode !== 0) {
+        const message = interpreted.providerError ?? `CLI exited with ${response.exitCode}. ${excerpt(response.stderr, 500)}`.trim();
+        throw new AgentExecutionError(message, false, excerpt(message), excerpt(response.stderr), response.latencyMs, {
+          usage: interpreted.usage, toolCalls: interpreted.toolCalls, resolvedModel: interpreted.resolvedModel, sessionId: interpreted.sessionId,
+        });
       }
       if (!interpreted.action) {
         throw new AgentProtocolError(
           interpreted.protocolError ?? "Agent response was not one structured action JSON object.",
-          excerpt(responseText),
+          excerpt(interpreted.protocolError ?? "Invalid structured response"),
           response.latencyMs,
           excerpt(response.stderr),
           interpreted.toolCalls,
           interpreted.usage,
+          interpreted.resolvedModel,
+          interpreted.sessionId,
         );
       }
       return {
@@ -294,9 +312,16 @@ abstract class CliAgentAdapter implements AgentAdapter {
         toolCalls: interpreted.toolCalls,
         usage: interpreted.usage,
         ...(interpreted.resolvedModel ? { resolvedModel: interpreted.resolvedModel } : {}),
+        ...(interpreted.sessionId ? { sessionId: interpreted.sessionId } : {}),
       };
     } catch (error) {
-      if (error instanceof AgentExecutionError || error instanceof AgentProtocolError) throw error;
+      if (error instanceof AgentExecutionError) {
+        if (error.evidence) throw error;
+        // Timeouts/cancellation/output limits may stop halfway through an assistant
+        // stream. Keep the failure and timing, never persist partial reasoning text.
+        throw new AgentExecutionError(error.message, error.timedOut, "Partial CLI stream withheld.", error.stderrExcerpt, error.latencyMs);
+      }
+      if (error instanceof AgentProtocolError) throw error;
       throw new AgentExecutionError(error instanceof Error ? error.message : "Unexpected adapter error.");
     } finally {
       for (const child of this.activeChildren) if (child.exitCode !== null || child.signalCode !== null) this.activeChildren.delete(child);
@@ -350,11 +375,11 @@ export class ClaudeCodeAdapter extends CliAgentAdapter {
     const effortArgs = reasoning && ["low", "medium", "high", "xhigh", "max"].includes(reasoning) ? ["--effort", reasoning] : [];
     return {
       args: [
-        "--print", "--output-format", "json", "--json-schema", JSON.stringify(actionOutputSchema(observation.actionSchema)),
+        "--print", "--output-format", "stream-json", "--verbose", "--json-schema", JSON.stringify({ type: "object", additionalProperties: false, required: ["action"], properties: { action: actionOutputSchema(observation.actionSchema) } }),
         "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "",
         "--safe-mode", "--strict-mcp-config", "--setting-sources", "", "--settings", JSON.stringify({ disableAllHooks: true, autoMemoryEnabled: false }),
         "--disable-slash-commands", "--no-session-persistence",
-        ...(observation.schemaVersion === "hangman-shared-observation-v2" ? ["--system-prompt", "You are a competitive Hangman player. Use the supplied shared board, scores, rules, and history. Choose one legal action to maximize your score against the opponent. Return only the requested structured action."] : []),
+        "--system-prompt", "You are a game-playing agent. Follow the supplied rules and observation. Maximize your game objective. Submit the requested action in the action field of StructuredOutput.",
         ...effortArgs,
         ...(this.config.model.trim() ? ["--model", this.config.model.trim()] : []),
         buildPrompt(observation),
