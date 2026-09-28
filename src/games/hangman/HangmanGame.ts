@@ -64,10 +64,7 @@ export class HangmanGame implements GameDefinition<HangmanState> {
       },
       history: state.entries.filter((entry) => entry.playerId === role).map((entry) => structuredClone(entry.action)),
       legalActions: [..."abcdefghijklmnopqrstuvwxyz"].filter((letter) => !lane.guessedLetters.includes(letter)).map((letter) => ({ type: "guess_letter", payload: { letter } })),
-      actionSchema: { type: "object", oneOf: [
-        { type: "object", additionalProperties: false, required: ["type", "payload"], properties: { type: { const: "guess_letter" }, payload: { type: "object", additionalProperties: false, required: ["letter"], properties: { letter: { type: "string", pattern: "^[a-z]$" } } } } },
-        { type: "object", additionalProperties: false, required: ["type", "payload"], properties: { type: { const: "solve" }, payload: { type: "object", additionalProperties: false, required: ["word"], properties: { word: { type: "string", pattern: `^[a-z]{${state.word.length}}$` } } } } },
-      ] },
+      actionSchema: hangmanActionSchema(state.word.length),
       clock: { turnTimeoutMs: context.turnTimeoutMs }, status: "active",
       ...(context.feedback ? { feedback: context.feedback } : {}),
     };
@@ -193,4 +190,11 @@ export class HangmanGame implements GameDefinition<HangmanState> {
   }
   actionLabel(action: GameAction): string { return action.type === "guess_letter" ? `Guess ${this.publicAction(action).payload.letter ?? "letter"}` : action.type === "solve" ? "Solution submitted" : "Invalid action"; }
   eventProjection(state: HangmanState): Record<string, unknown> { return { publicState: this.publicState(state) }; }
+}
+
+export function hangmanActionSchema(wordLength: number): GameObservation["actionSchema"] {
+  return { type: "object", oneOf: [
+        { type: "object", additionalProperties: false, required: ["type", "payload"], properties: { type: { const: "guess_letter" }, payload: { type: "object", additionalProperties: false, required: ["letter"], properties: { letter: { type: "string", pattern: "^[a-z]$" } } } } },
+        { type: "object", additionalProperties: false, required: ["type", "payload"], properties: { type: { const: "solve" }, payload: { type: "object", additionalProperties: false, required: ["word"], properties: { word: { type: "string", pattern: `^[a-z]{${wordLength}}$` } } } } },
+      ] };
 }

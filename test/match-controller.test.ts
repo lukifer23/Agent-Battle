@@ -600,7 +600,7 @@ test("new matches capture requested budgets and environment provenance", async (
     budgets: { maxPlies: 42, maxRequests: 7, maxWallMinutes: 5, maxReportedCostUsd: 1.5 },
   });
   assert.deepEqual(match.settings.budgets, { maxPlies: 42, maxRequests: 7, maxWallMinutes: 5, maxReportedCostUsd: 1.5 });
-  assert.equal(match.environment?.adapterVersion, "agent-battle/adapter-v3");
+  assert.equal(match.environment?.adapterVersion, "agent-battle/adapter-v4");
   assert.equal(match.environment?.cliVersions.codex, "test");
   assert.deepEqual(match.timeAccounting, { mode: "active-runtime-v1", elapsedMs: 0 });
 });

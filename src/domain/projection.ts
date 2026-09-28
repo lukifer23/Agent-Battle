@@ -58,7 +58,7 @@ function projectPending(pending: PendingTurn): PendingTurn {
  * detail and attempts endpoints, which read the durable record.
  */
 export function projectRecord(record: MatchRecord, eventLimit = 40, registry = defaultGames): PublicMatchDetail {
-  const game = registry.get(record.gameId);
+  const game = registry.get(record.gameId, record.gameVersion);
   const hidden = game.hiddenInformation;
   const turn = (value: TurnTelemetry): TurnTelemetry => {
     const safe = projectTurn(value);
@@ -89,7 +89,7 @@ export function projectRecord(record: MatchRecord, eventLimit = 40, registry = d
 }
 
 export function projectEvent(record: MatchRecord, event: MatchEvent, registry = defaultGames): MatchEvent {
-  const game = registry.get(record.gameId);
+  const game = registry.get(record.gameId, record.gameVersion);
   if (!game.hiddenInformation) {
     const payload: Record<string, unknown> = {};
     for (const key of ["turnId", "turnIndex", "ply", "attempt", "retry", "retryCount", "latencyMs", "legalActionCount", "fenBefore", "fen", "pgn", "move", "resignation", "action", "actionLabel", "nextPlayerId", "result", "kind", "winnerId", "reason", "status", "timeoutMs", "toolCalls", "inputTokens", "outputTokens", "usage"]) {

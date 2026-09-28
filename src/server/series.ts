@@ -27,7 +27,7 @@ export function makeSeries(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeco
 
 export const standardSeriesPlan: SeriesPlan = { mode: "strict", games: [
   { gameId: "chess", gameVersion: "standard-1", repetitions: 6, rolePolicy: "alternating", challengePolicy: "fixed" },
-  { gameId: "hangman", gameVersion: "independent-lanes-1", repetitions: 5, rolePolicy: "alternating", challengePolicy: "seeded" },
+  { gameId: "hangman", gameVersion: "shared-board-2", repetitions: 6, rolePolicy: "alternating", challengePolicy: "seeded" },
   { gameId: "battleship", gameVersion: "battleship-standard-1", repetitions: 6, rolePolicy: "alternating", challengePolicy: "fixed" },
 ] };
 
@@ -39,7 +39,7 @@ export function makeSeriesV2(agents: [PlayerConfig, PlayerConfig], turnTimeoutSe
     || new Set(plan.games.map((entry) => entry.gameId)).size !== plan.games.length) throw new Error("Series plan needs one to ten distinct registered games.");
   const slots: SeriesSlot[] = [];
   for (const entry of plan.games) {
-    const game = defaultGames.get(entry.gameId);
+    const game = defaultGames.get(entry.gameId, entry.gameVersion);
     if (!(["challengePolicy,gameId,gameVersion,repetitions,rolePolicy", "challengePolicy,gameId,gameVersion,repetitions,rolePolicy,weight"].includes(Object.keys(entry).sort().join()))
       || game.playerIds.length !== 2 || !game.series?.defaultSeriesEnabled || entry.gameVersion !== game.version || entry.rolePolicy !== "alternating"
       || entry.challengePolicy !== (game.series.supportsSeededChallenges ? "seeded" : "fixed") || !Number.isSafeInteger(entry.repetitions) || entry.repetitions < 1 || entry.repetitions > 100
@@ -47,7 +47,7 @@ export function makeSeriesV2(agents: [PlayerConfig, PlayerConfig], turnTimeoutSe
     if (plan.mode === "strict" && game.series.seatSensitive && entry.repetitions % 2 !== 0) throw new Error(`${entry.gameId} needs an even repetition count in strict mode.`);
     for (let index = 0; index < entry.repetitions; index++) {
       const first = index % 2 as 0 | 1;
-      const challengeSeed = game.series.supportsSeededChallenges ? createHmac("sha256", Buffer.from(seed, "hex")).update(`battle-series-2:${entry.gameId}:${index}`).digest("hex") : undefined;
+      const challengeSeed = game.series.supportsSeededChallenges ? createHmac("sha256", Buffer.from(seed, "hex")).update(`battle-series-2:${entry.gameId}:${game.series.seatSensitive ? Math.floor(index / 2) : index}`).digest("hex") : undefined;
       const challengeId = challengeSeed ? createHash("sha256").update(`${game.id}:${game.version}:${challengeSeed}`).digest("hex") : game.series.challengeId;
       slots.push({ id: randomUUID(), ordinal: slots.length, gameId: game.id, challengeId, ...(challengeSeed ? { challengeSeed } : {}),
         roles: { [game.playerIds[0]]: first, [game.playerIds[1]]: (1 - first) as 0 | 1 }, matchIds: [], skipped: false });
@@ -220,7 +220,7 @@ export class SeriesManager {
         }
         const players = Object.fromEntries(Object.entries(slot.roles).map(([role, agentIndex]) => [role, record.agents[agentIndex]]));
         const requested = record.settings.budgets;
-        match = await this.controller.create({ gameId: slot.gameId, players, turnTimeoutSeconds: record.settings.turnTimeoutSeconds, challengeSeed: slot.challengeSeed,
+        match = await this.controller.create({ gameId: slot.gameId, gameVersion: record.version === "battle-series-1" && slot.gameId === "hangman" ? "independent-lanes-1" : record.plan?.games.find((entry) => entry.gameId === slot.gameId)?.gameVersion, players, turnTimeoutSeconds: record.settings.turnTimeoutSeconds, challengeSeed: slot.challengeSeed,
           series: { id: record.id, slotId: slot.id, attempt: slot.matchIds.length + 1 }, budgets: {
             maxPlies: requested.maxPlies, maxRequests: requested.maxRequests * 2 + 2, maxWallMinutes: requested.maxWallMinutes * 2 + 5,
             maxReportedCostUsd: requested.maxReportedCostUsd, maxRequestsPerPlayer: requested.maxRequests, maxActiveMinutesPerPlayer: requested.maxWallMinutes,

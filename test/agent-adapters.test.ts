@@ -74,17 +74,27 @@ test("Claude no-tools invocation reports resolved model and policy evidence", as
   const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-claude-test-"));
   const executable = join(folder, "claude");
   const envelope = JSON.stringify({ structured_output: action, modelUsage: { "claude-test-model": { inputTokens: 1 } }, usage: { input_tokens: 7, output_tokens: 2 } });
-  writeFileSync(executable, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'claude test'; exit 0; fi\nprintf '%s\\n' "$@" > "${folder}/args.txt"\nprintf '%s\\n' '${envelope}'\n`);
+  writeFileSync(executable, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'claude test'; exit 0; fi\nprintf '%s\\n' "$@" > "${folder}/args.txt"\nprintf '%s\\n' "$CLAUDE_CODE_SIMPLE" > "${folder}/simple.txt"\nprintf '%s\\n' "$MAX_THINKING_TOKENS" > "${folder}/thinking.txt"\nprintf '%s\\n' '${envelope}'\n`);
   chmodSync(executable, 0o755);
   process.env.PATH = `${folder}:/bin:/usr/bin`;
   try {
-    const adapter = new ClaudeCodeAdapter({ provider: "claude", model: "claude-test-model", name: "test" });
+    const adapter = new ClaudeCodeAdapter({ provider: "claude", model: "claude-test-model", reasoning: "none", name: "test" });
     await adapter.initialize();
     const reply = await adapter.act(observation, control());
     assert.equal(reply.resolvedModel, "claude-test-model");
     assert.equal(reply.toolCalls, 0);
     assert.equal(adapter.isolationQualified, true);
-    assert.match(readFileSync(join(folder, "args.txt"), "utf8"), /--bare/);
+    const args = readFileSync(join(folder, "args.txt"), "utf8").split("\n");
+    assert.ok(!args.includes("--bare"), "bare mode disables OAuth/keychain authentication");
+    assert.equal(args[args.indexOf("--tools") + 1], "");
+    assert.equal(args[args.indexOf("--setting-sources") + 1], "");
+    assert.deepEqual(JSON.parse(args[args.indexOf("--settings") + 1]), { disableAllHooks: true, autoMemoryEnabled: false });
+    assert.ok(args.includes("--safe-mode"));
+    assert.equal(readFileSync(join(folder, "thinking.txt"), "utf8").trim(), "0");
+    assert.ok(!args.includes("--effort"), "none is implemented by disabling thinking, not an unsupported effort enum");
+    assert.equal(readFileSync(join(folder, "simple.txt"), "utf8").trim(), "0", "inherited simple mode must not disable OAuth");
+    assert.ok(args.includes("--strict-mcp-config"));
+    assert.ok(args.includes("--no-session-persistence"));
     await adapter.shutdown();
   } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
 });

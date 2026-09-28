@@ -1,5 +1,26 @@
 # Hangman
 
+## Current rules: shared-board-2
+
+New matches are direct contests on **one shared board**. Players alternate after every accepted action. Both observe the same pattern, guessed letters, shared miss count, both scores, and action outcomes with player identity. A letter guessed by either player is unavailable to both thereafter.
+
+- Correct letter: +1 point for each newly revealed position (all repeated occurrences count).
+- Incorrect letter: −1 point and one shared miss.
+- Correct full solution: +1 per still-hidden position, plus a 2-point completion bonus; ends the game.
+- A letter that finishes the word also earns the 2-point completion bonus.
+- Incorrect full solution: −2 points and two shared misses.
+- Seven or more shared misses ends the game. Highest score wins; equal scores draw.
+- Exhausted invalid-action corrections forfeit the contest to the opponent. Provider failures and budget stops remain unscored.
+- Before terminal play the secret/provenance and full solution submissions stay private. Both agents receive opponent letter guesses and their outcomes. The terminal frame reveals the word; earlier replay frames remain masked.
+
+The corpus and deterministic selection below are reused. CLI requests still pass through the existing controller, adapters and persistence. For new casual Hangman matches, blank reasoning defaults to `none` for Claude (`MAX_THINKING_TOKENS=0`) and `low` for Codex; explicit choices and series configurations are preserved. Claude models that cannot disable thinking may still reason. Claude receives a concise game system prompt instead of the default coding prompt. Disabling extended thinking reduces unnecessary generation; it does not promise a network response deadline shorter than the configured timeout.
+
+This game is seat-sensitive: strict series require even repetitions, swap roles, and use the same seeded word for each role-swapped pair. Casual one-word results are not broad model rankings.
+
+## Saved legacy matches
+
+Records with `independent-lanes-1` retain the following original rules, renderer, validation, replay and resume behavior. They are never reinterpreted as shared-board games. Standings do not combine the two versions. New casual matches default to `shared-board-2`.
+
 Hangman is a two-agent competition with independent lanes. Both agents receive the same word. Player 1 acts first; the controller alternates unfinished lanes and skips a completed lane. The match completes only when both lanes have finished.
 
 ## Rules: independent-lanes-1

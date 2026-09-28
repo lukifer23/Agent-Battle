@@ -52,22 +52,25 @@ export interface GameDefinition<State> {
 
 export class GameRegistry {
   private readonly games = new Map<string, GameDefinition<unknown>>();
+  private readonly versions = new Map<string, GameDefinition<unknown>>();
 
-  register<State>(game: GameDefinition<State>): this {
-    if (this.games.has(game.id)) throw new Error(`A game named ${game.id} is already registered.`);
-    this.games.set(game.id, game as unknown as GameDefinition<unknown>);
+  register<State>(game: GameDefinition<State>, current = true): this {
+    const key = `${game.id}:${game.version}`;
+    if (this.versions.has(key)) throw new Error(`Game version ${key} is already registered.`);
+    this.versions.set(key, game as unknown as GameDefinition<unknown>);
+    if (current) this.games.set(game.id, game as unknown as GameDefinition<unknown>);
     return this;
   }
 
-  get(gameId: string): GameDefinition<unknown> {
-    const game = this.games.get(gameId);
+  get(gameId: string, version?: string): GameDefinition<unknown> {
+    const game = version ? this.versions.get(`${gameId}:${version}`) : this.games.get(gameId);
     if (!game) throw new Error(`Game "${gameId}" is not registered.`);
     return game;
   }
 
   validateRecord(record: MatchRecord): string | undefined {
     try {
-      const game = this.get(record.gameId);
+      const game = this.get(record.gameId, record.gameVersion);
       if (game.version !== record.gameVersion) return "Unsupported game version";
       if (record.players.map((p) => p.id).join() !== game.playerIds.join()) return "Invalid player roles";
       const state = game.deserialize(record.gameState);

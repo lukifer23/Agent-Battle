@@ -13,3 +13,13 @@ Reviewed on 2026-09-27 against each upstream default-branch commit and GitHub li
 | [hannahrobot/amongus-tutorial](https://github.com/hannahrobot/amongus-tutorial) | `557210f8c1be61e0fcec41d50b6a5cc9d92fe512` | MIT | Reference only | Literal movement is outside the planned social deduction benchmark. |
 
 The Agent Battle Battleship implementation differs from typical recreational versions in its explicit structured action schema, one-call complete fleet placement, no extra turn on a hit, no random fleet placement, event-time masked replay, and strict series model/tool qualification. Source status should be rechecked before any future material port.
+
+
+## Hangman shared-board update (2026-09-28 UTC)
+
+| Candidate | Exact version | License / language | Maturity, tests, architecture | Reuse decision and risk |
+| --- | --- | --- | --- | --- |
+| [safe-word-list](https://github.com/nkzw-tech/safe-word-list) | npm `@nkzw/safe-word-list@3.1.2` (existing pinned dependency) | MIT / JS data | Existing corpus filter, hash and deterministic-selection tests in Agent Battle | **A: depend now**, unchanged. Reuse corpus and existing selection; no new server or provider layer. |
+| [argonlaser/hangman-game](https://github.com/argonlaser/hangman-game/tree/2e6b35b7ce16e46b35ad4ed65cabc94710ad2bdf) | `2e6b35b7ce16e46b35ad4ed65cabc94710ad2bdf`, package 1.0.6 | MIT (LICENSE at pinned commit verified) / JavaScript | Last repository push 2017-10-04; Mocha/Chai tests and CI config present (not run). CLI UI, Hangman class, local high-score store, word data; legacy dependency versions. | **C: reference only.** Letter/mask rules are available, but it is single-player and does not supply shared-score adversarial rules, private projections or durable versioned replay. Importing its CLI/high-score authority would overlap the arena. No code, tests or word assets copied. |
+
+The smallest useful units already in Agent Battle are reused: the pinned corpus, deterministic generator, structured action envelope/schema, redaction/labels, controller, adapters, replay contract and store. The new code is the shared-board scoring/observation rule variant and its renderer. No outside app stack or new dependency was imported. Expected integration scope: a ruleset adapter plus version-aware lookup and UI, not a second match framework. Primary risk is replay/series compatibility; legacy versions stay explicitly addressable and new tests cover shared observations, scoring, forged state, old-version lookup and role balance.

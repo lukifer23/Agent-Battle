@@ -171,13 +171,13 @@ test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess c
     await waitForListening(child, port);
     const player = { provider: "codex", model: "fixture" };
     const secondPlayer = { provider: "codex", model: "fixture-b" };
-    const mirror = await probe(port, { path: "/api/matches", method: "POST", body: JSON.stringify({ gameId: "hangman", players: { player1: player, player2: player }, turnTimeoutSeconds: 30 }), headers: { "content-type": "application/json" } });
+    const mirror = await probe(port, { path: "/api/matches", method: "POST", body: JSON.stringify({ gameId: "hangman", gameVersion: "independent-lanes-1", players: { player1: player, player2: player }, turnTimeoutSeconds: 30 }), headers: { "content-type": "application/json" } });
     assert.equal(mirror.status, 400);
     assert.match(mirror.body, /two explicit, different model IDs/);
     let created;
     let word = "";
     for (let candidate = 0; candidate < 50; candidate++) {
-      created = await request("/api/matches", { gameId: "hangman", players: { player1: player, player2: secondPlayer }, turnTimeoutSeconds: 30 });
+      created = await request("/api/matches", { gameId: "hangman", gameVersion: "independent-lanes-1", players: { player1: player, player2: secondPlayer }, turnTimeoutSeconds: 30 });
       const privateStore = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
       word = privateStore.matches[0].gameState.word;
       // A distinctive canary avoids matching ordinary JSON keys such as status.
@@ -312,4 +312,46 @@ test("Battleship HTTP, SSE, events, attempts and replay hide fleets until termin
     const privateStore = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
     assert.equal(privateStore.matches[0].gameState.fleets.player1[0].start, "a1");
   } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("new Hangman uses distinct CLI subprocesses and shares opponent effects through HTTP and replay", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-duel-api-"));
+  const { mkdirSync, chmodSync } = await import("node:fs");
+  const bin = join(folder, "bin"); mkdirSync(bin);
+  for (const cli of ["codex", "claude"]) {
+    const fixture = join(bin, cli);
+    writeFileSync(fixture, `#!${process.execPath}\n${readFileSync(join(projectRoot, "test/fixtures/hangman-cli.cjs"), "utf8")}`); chmodSync(fixture, 0o700);
+  }
+  const port = 6100 + Math.floor(Math.random() * 200);
+  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], { cwd: projectRoot, env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
+  const request = async (path: string, body?: unknown) => {
+    const result = await probe(port, { path, ...(body ? { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } } : {}) });
+    assert.ok(result.status < 300, result.body); return JSON.parse(result.body);
+  };
+  try {
+    await waitForListening(child, port);
+    const { match } = await request("/api/matches", { gameId: "hangman", players: { player1: { provider: "codex", model: "fixture-a" }, player2: { provider: "claude", model: "fixture-b" } }, turnTimeoutSeconds: 30 });
+    assert.equal(match.gameVersion, "shared-board-2");
+    assert.deepEqual(match.players.map((p: { agent: { reasoning: string } }) => p.agent.reasoning), ["low", "none"]);
+    const word = JSON.parse(readFileSync(join(folder,"matches.json"),"utf8")).matches[0].gameState.word as string;
+    writeFileSync(join(bin,"fixture-config.json"),JSON.stringify({word,delayMs:200}));
+    await request(`/api/matches/${match.id}/start`, {});
+    let done;
+    for (let i=0;i<80;i++) {
+      done = (await request(`/api/matches/${match.id}`)).match;
+      if (done.status === "finished") break;
+      await new Promise((resolve)=>setTimeout(resolve,50));
+    }
+    assert.equal(done.status,"finished"); assert.equal(done.actionCount,2);
+    const observed = readFileSync(join(bin,"observations.jsonl"),"utf8").trim().split("\n").map((line)=>JSON.parse(line));
+    assert.deepEqual(observed.map((row)=>[row.executable,row.observation.playerId]), [["codex","player1"],["claude","player2"]]);
+    assert.deepEqual(observed[1].observation.state.guessedLetters,[word[0]]);
+    assert.equal(observed[1].observation.history[0].playerId,"player1");
+    assert.equal(observed[1].observation.legalActions.some((a: {payload:{letter:string}})=>a.payload.letter===word[0]),false);
+    assert.equal(done.gameState.word,word);
+    assert.equal("word" in done.replay[0],false); assert.equal("word" in done.replay[1],false);
+    assert.equal("provenance" in done.gameState,false);
+    assert.equal(JSON.stringify(done).includes("responseExcerpt"),false);
+    assert.deepEqual(done.history.map((t: {provider:string})=>t.provider),["codex","claude"]);
+  } finally { await stopServer(child); rmSync(folder,{recursive:true,force:true}); }
 });

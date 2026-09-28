@@ -10,6 +10,7 @@ export function HangmanArena({ match, replayPly = null }: { match: PublicMatchDe
   const result = view.terminal ? view.result ?? match.result : undefined;
   const comparable = verifiedDistinctModels(match.players[0].agent, match.players[1].agent);
   return <div className="hangman-arena">
+    <p className="inline-note">Legacy match · independent-lanes-1. New matches use one shared board and points.</p>
     <div className="hangman-match-summary" role="status">
       {result ? <><strong>{result.kind === "draw" ? "Draw" : `${match.players.find((player) => player.id === result?.winnerId)?.label ?? "Winner"} wins`}</strong><span>{result.reason} · {result.notation}{!comparable ? " · model identity unverified" : ""}</span></>
         : <><strong>Same word, separate lanes</strong><span>Seven misses each. The word stays hidden until both lanes finish.</span></>}
@@ -17,6 +18,9 @@ export function HangmanArena({ match, replayPly = null }: { match: PublicMatchDe
     <div className="hangman-lanes">{match.players.map((player) => {
       const lane = view.lanes[player.id];
       const pendingAttempts = step === null && match.pendingTurn?.playerId === player.id ? match.pendingTurn.attempts : [];
+      const laneStatus = lane.status === "active" && step === null
+        ? match.status === "running" ? match.currentPlayerId === player.id ? "THINKING" : "WAITING" : match.status.toUpperCase()
+        : lane.status.toUpperCase();
       const playerTurns = match.history.filter((turn) => turn.playerId === player.id);
       const turns = step === null ? playerTurns : playerTurns.filter((turn) => turn.valid).slice(0, lane.actionsTaken);
       if (step !== null && lane.status === "forfeit") {
@@ -24,7 +28,7 @@ export function HangmanArena({ match, replayPly = null }: { match: PublicMatchDe
         if (forfeited) turns.push(forfeited);
       }
       return <section className={`hangman-lane ${step === null && match.status === "running" && match.currentPlayerId === player.id ? "lane-active" : ""}`} key={player.id}>
-        <header><div><h3>{player.label}</h3><small>{competitorLabel(player.agent)}</small></div><span>{step === null && match.status === "running" && lane.status === "active" ? match.currentPlayerId === player.id ? "THINKING" : "WAITING" : lane.status.toUpperCase()}</span></header>
+        <header><div><h3>{player.label}</h3><small>{competitorLabel(player.agent)}</small></div><span>{laneStatus}</span></header>
         <svg viewBox="0 0 160 150" role="img" aria-label={`${lane.misses} misses out of seven`}>
           <path d="M15 140 H145 M40 140 V10 H105 V25" />
           {lane.misses >= 1 && <circle cx="105" cy="40" r="15" />}

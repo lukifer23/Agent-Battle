@@ -39,6 +39,7 @@ class WallTimeExceededError extends Error {}
 
 export interface CreateMatchRequest {
   gameId: string;
+  gameVersion?: string;
   players: Record<string, PlayerConfig>;
   turnTimeoutSeconds: number;
   budgets?: Partial<MatchBudgets>;
@@ -47,7 +48,7 @@ export interface CreateMatchRequest {
 }
 
 const DEFAULT_BUDGETS: MatchBudgets = { maxPlies: 150, maxRequests: 200, maxWallMinutes: 30, maxReportedCostUsd: null };
-const ADAPTER_VERSION = "agent-battle/adapter-v3";
+const ADAPTER_VERSION = "agent-battle/adapter-v4";
 
 function clampBudget(value: unknown, fallback: number, maximum: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
@@ -78,7 +79,7 @@ export class MatchController {
     let migrated = false;
     for (const match of this.records) {
       try {
-        const game = this.games.get(match.gameId);
+        const game = this.games.get(match.gameId, match.gameVersion);
         const state = game.deserialize(match.gameState);
         if (match.status === "finished" && match.result) {
           const derived = game.isTerminal(state) ? game.result(state) : undefined;
@@ -170,7 +171,7 @@ export class MatchController {
   }
 
   private async createMatch(request: CreateMatchRequest): Promise<MatchRecord> {
-    const game = this.games.get(request.gameId);
+    const game = this.games.get(request.gameId, request.gameVersion);
     if (Object.keys(request.players).sort().join() !== [...game.playerIds].sort().join()) throw new Error("Player roles do not match the game.");
     if (game.playerIds.length !== 2) throw new Error("The current match controller requires exactly two players.");
     if (!Number.isInteger(request.turnTimeoutSeconds) || request.turnTimeoutSeconds < 30 || request.turnTimeoutSeconds > 600) {
@@ -187,11 +188,11 @@ export class MatchController {
         throw new Error(`${config.provider} CLI is not installed or not available in PATH.`);
       }
       const model = config.model.trim();
-      const reasoning = config.reasoning?.trim() ?? "";
+      const reasoning = config.reasoning?.trim() || (game.id === "hangman" && game.version === "shared-board-2" && !request.series && config.provider !== "opencode" ? config.provider === "claude" ? "none" : "low" : "");
       if (model.length > 140 || reasoning.length > 40 || /[\r\n\0]/.test(model + reasoning)) throw new Error("Model and reasoning settings are invalid.");
       const reasoningOptions: Record<string, string[]> = {
         codex: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
-        claude: ["low", "medium", "high", "xhigh", "max"],
+        claude: ["none", "low", "medium", "high", "xhigh", "max"],
         opencode: [],
       };
       if (reasoning && reasoningOptions[config.provider].length && !reasoningOptions[config.provider].includes(reasoning.toLowerCase())) {
@@ -268,7 +269,7 @@ export class MatchController {
     if (!["ready", "paused", "interrupted"].includes(match.status)) throw new Error("Only a ready, paused or interrupted match can be started or resumed.");
     const otherActive = this.records.find((candidate) => candidate.id !== id && ACTIVE_STATUSES.includes(candidate.status));
     if (otherActive) throw new Error("Another match is already active. Stop or finish it before resuming this match.");
-    const game = this.games.get(match.gameId);
+    const game = this.games.get(match.gameId, match.gameVersion);
     if (!this.runtime.has(id)) this.runtime.set(id, game.deserialize(match.gameState));
     const generation = (match.runGeneration ?? 0) + 1;
     match.runGeneration = generation;

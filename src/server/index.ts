@@ -293,7 +293,7 @@ app.post("/api/matches", asyncRoute(async (request, response) => {
   const rawBudgets = (body.budgets && typeof body.budgets === "object" ? body.budgets : {}) as Record<string, unknown>;
   const costLimit = rawBudgets.maxReportedCostUsd;
   const gameId = typeof body.gameId === "string" ? body.gameId : "chess";
-  const game = games.get(gameId);
+  const game = games.get(gameId, typeof body.gameVersion === "string" ? body.gameVersion : undefined);
   if (body.players && (body.white || body.black)) throw new Error("Do not mix player formats.");
   const rawPlayers = body.players ?? (gameId === "chess" ? { white: body.white, black: body.black } : undefined);
   if (!rawPlayers || typeof rawPlayers !== "object" || Object.keys(rawPlayers).sort().join() !== [...game.playerIds].sort().join()) throw new Error("Player roles do not match the game.");
@@ -302,7 +302,7 @@ app.post("/api/matches", asyncRoute(async (request, response) => {
     throw new Error("Hangman comparison requires two explicit, different model IDs. CLI defaults and mirror models cannot establish distinct competitors.");
   }
   const created = await controller.create({
-    gameId,
+    gameId, gameVersion: game.version,
     players,
     turnTimeoutSeconds: Number(body.turnTimeoutSeconds ?? 120),
     budgets: {

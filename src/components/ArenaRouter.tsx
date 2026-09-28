@@ -1,9 +1,11 @@
 import { Chessboard } from "react-chessboard";
 import type { CSSProperties } from "react";
 import type { PublicMatchDetail } from "../shared.js";
+import { HangmanDuelArena } from "./HangmanDuelArena.js";
 import { HangmanArena } from "./HangmanArena.js";
 import { BattleshipArena } from "./BattleshipArena.js";
 export function ArenaRouter({ match, chess, replayPly }: { match: PublicMatchDetail | null; replayPly?: number | null; chess: { boardFen: string; boardOrientation: "white" | "black"; squareStyles: Record<string, CSSProperties>; summary: string } }) {
+  if (match?.gameId === "hangman" && match.gameVersion === "shared-board-2") return <HangmanDuelArena key={match.id} match={match} replayPly={replayPly ?? null} />;
   if (match?.gameId === "hangman") return <HangmanArena key={match.id} match={match} replayPly={replayPly ?? null} />;
   if (match?.gameId === "battleship") return <BattleshipArena key={match.id} match={match} replayPly={replayPly ?? null} />;
   if (match && match.gameId !== "chess") return <p>Unsupported game view.</p>;

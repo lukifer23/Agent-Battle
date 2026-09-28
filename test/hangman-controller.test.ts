@@ -24,7 +24,7 @@ function harness(response: (o: GameObservation) => GameAction, maxRequests = 200
     if (!event) saved = structuredClone(records);
     else { publicPayloads.push(event); if (!(record.gameState as HangmanState).lanes || !game.isTerminal(record.gameState as HangmanState)) publicPayloads.push(projectRecord(record)); }
   });
-  return { controller, observations, publicPayloads, create: () => controller.create({ gameId: "hangman", players: { player1: config, player2: config }, turnTimeoutSeconds: 30, budgets: { maxRequests } }) };
+  return { controller, observations, publicPayloads, create: () => controller.create({ gameId: "hangman", gameVersion: "independent-lanes-1", players: { player1: config, player2: config }, turnTimeoutSeconds: 30, budgets: { maxRequests } }) };
 }
 async function finish(controller: MatchController, id: string) {
   const deadline = Date.now() + 3000;

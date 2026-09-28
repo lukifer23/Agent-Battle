@@ -174,7 +174,7 @@ function interpretClaude(root: { stdout: string; responseText: string }): Interp
   return {
     action,
     usage,
-    // The invocation uses --bare, --tools "", and --strict-mcp-config.
+    // The invocation uses safe mode, disabled hooks, --tools "", and --strict-mcp-config.
     toolCalls: 0,
     ...(resolvedModel ? { resolvedModel } : {}),
     ...(action ? {} : { protocolError: "Claude returned no structured action; expected a structured_output or JSON result field." }),
@@ -344,7 +344,7 @@ export class CodexCLIAdapter extends CliAgentAdapter {
 
 export class ClaudeCodeAdapter extends CliAgentAdapter {
   override readonly isolationQualified = true;
-  override readonly restrictions = "Claude Code print mode with tools disabled, strict MCP config, no slash commands and no session persistence; user hooks/plugins are not proven disabled.";
+  override readonly restrictions = "Claude Code print/safe mode with tools, hooks, discovered settings, MCP and slash commands disabled; no session persistence. OAuth/keychain authentication remains available; this is not OS isolation.";
   protected invocation(observation: GameObservation): Invocation {
     const reasoning = this.config.reasoning?.trim().toLowerCase();
     const effortArgs = reasoning && ["low", "medium", "high", "xhigh", "max"].includes(reasoning) ? ["--effort", reasoning] : [];
@@ -352,12 +352,16 @@ export class ClaudeCodeAdapter extends CliAgentAdapter {
       args: [
         "--print", "--output-format", "json", "--json-schema", JSON.stringify(actionOutputSchema(observation.actionSchema)),
         "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "",
-        "--strict-mcp-config", "--bare", "--disable-slash-commands", "--no-session-persistence",
+        "--safe-mode", "--strict-mcp-config", "--setting-sources", "", "--settings", JSON.stringify({ disableAllHooks: true, autoMemoryEnabled: false }),
+        "--disable-slash-commands", "--no-session-persistence",
+        ...(observation.schemaVersion === "hangman-shared-observation-v2" ? ["--system-prompt", "You are a competitive Hangman player. Use the supplied shared board, scores, rules, and history. Choose one legal action to maximize your score against the opponent. Return only the requested structured action."] : []),
         ...effortArgs,
         ...(this.config.model.trim() ? ["--model", this.config.model.trim()] : []),
         buildPrompt(observation),
       ],
-      env: safeEnvironment(),
+      // Both --bare and CLAUDE_CODE_SIMPLE suppress OAuth/keychain reads.
+      // Safe mode disables customizations while retaining authentication.
+      env: { ...safeEnvironment(), CLAUDE_CODE_SIMPLE: "0", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1", ...(reasoning === "none" ? { MAX_THINKING_TOKENS: "0" } : {}), ...(effortArgs.length ? { CLAUDE_CODE_EFFORT_LEVEL: reasoning } : {}) },
       readResponse: (stdout) => stdout,
       interpret: interpretClaude,
     };
