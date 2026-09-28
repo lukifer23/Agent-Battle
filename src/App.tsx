@@ -6,8 +6,8 @@ import { highlightSquares, positionSummary } from "./client/chessView.js";
 import { aggregateUsage } from "./domain/usage.js";
 import { remainingMatchMs } from "./domain/matchTime.js";
 import { ArrowUpRight, BoardMark, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, FlipVertical, RefreshCw, Trophy } from "./components/icons.js";
-import { competitorId, competitorLabel } from "./shared.js";
-import type { AppState, ChessSnapshot, MatchEvent, PublicMatchDetail, PublicSeries, Provider } from "./shared.js";
+import { competitorId, competitorLabel, distinctExplicitModels, verifiedDistinctModels } from "./shared.js";
+import type { AppState, ChessSnapshot, MatchEvent, PublicMatchDetail, PublicSeries, Provider, SeriesPlan } from "./shared.js";
 
 const initialFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const pretty: Record<Provider, string> = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode" };
@@ -33,10 +33,10 @@ interface Preferences {
 const PREFERENCES_KEY = "agent-battle.preferences";
 const VIEW_KEY = "agent-battle.view";
 
-function loadView(): "chess" | "hangman" | "series" {
+function loadView(): string {
   try {
     const saved = window.localStorage.getItem(VIEW_KEY);
-    return saved === "hangman" || saved === "series" ? saved : "chess";
+    return saved || "chess";
   } catch { return "chess"; }
 }
 
@@ -122,7 +122,7 @@ function eventLabel(match: PublicMatchDetail, event: MatchEvent): string {
 }
 
 function App() {
-  const preferences = useMemo(() => loadPreferences(loadView() === "hangman" ? "hangman" : "chess"), []);
+  const preferences = useMemo(() => loadPreferences(loadView()), []);
   const [state, setState] = useState<AppState | null>(null);
   const [providersChecked, setProvidersChecked] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(() => window.localStorage.getItem("agent-battle.selected"));
@@ -133,9 +133,9 @@ function App() {
   const [whiteReasoning, setWhiteReasoning] = useState(preferences.whiteReasoning ?? "");
   const [blackReasoning, setBlackReasoning] = useState(preferences.blackReasoning ?? "");
   const [timeoutSeconds, setTimeoutSeconds] = useState(preferences.timeoutSeconds ?? 120);
-  const [gameId, setGameId] = useState(() => loadView() === "hangman" ? "hangman" : "chess");
-  const [viewMode, setViewMode] = useState<"chess" | "hangman" | "series">(loadView);
-  const [games, setGames] = useState<Array<{ id: string; label: string; playerIds: string[]; playerLabels: string[] }>>([]);
+  const [gameId, setGameId] = useState(() => loadView() === "series" ? "chess" : loadView());
+  const [viewMode, setViewMode] = useState<string>(loadView);
+  const [games, setGames] = useState<Array<{ id: string; label: string; version: string; playerIds: string[]; playerLabels: string[]; series?: { supportsSeededChallenges: boolean; recommendedRepetitions: number; seatSensitive: boolean } }>>([]);
   const [maxPlies, setMaxPlies] = useState(150);
   const [maxRequests, setMaxRequests] = useState(200);
   const [timePreset, setTimePreset] = useState<number | "custom">(30);
@@ -154,6 +154,9 @@ function App() {
   const [pendingCommand, setPendingCommand] = useState<null | "create" | "start" | "pause" | "stop">(null);
   const [detailById, setDetailById] = useState<Map<string, PublicMatchDetail>>(() => new Map());
   const [seriesList, setSeriesList] = useState<PublicSeries[]>([]);
+  const [seriesPreset, setSeriesPreset] = useState<"quick" | "standard" | "custom">("quick");
+  const [seriesCounts, setSeriesCounts] = useState<Record<string, number>>({ chess: 2, hangman: 2, battleship: 2 });
+  const [seriesMode, setSeriesMode] = useState<"exploratory" | "strict">("exploratory");
   const lastSnapshot = useRef<SnapshotCursor>({ version: -1, retired: new Set() });
   const revisions = useRef<Map<string, number>>(new Map());
   const moveListRef = useRef<HTMLDivElement | null>(null);
@@ -264,7 +267,7 @@ function App() {
     return null;
   }, [state, selectedId, detailById]);
 
-  const chooseView = (next: "chess" | "hangman" | "series", matchId?: string) => {
+  const chooseView = (next: string, matchId?: string) => {
     setViewMode(next);
     setReplayPly(null);
     setReplayOpen(false);
@@ -293,8 +296,9 @@ function App() {
 
   const selectedSnapshot = selectedMatch?.gameId === "chess" ? selectedMatch.gameState as ChessSnapshot : undefined;
   const hangmanLanes = selectedMatch?.gameId === "hangman" ? (selectedMatch.gameState as { lanes: Record<string, { status: string; misses: number; actionsTaken: number; correctLetters: number }> }).lanes : null;
-  const totalPlies = selectedSnapshot?.moves?.length ?? 0;
+  const totalPlies = selectedMatch?.gameId === "chess" ? selectedSnapshot?.moves?.length ?? 0 : Math.max(0, (selectedMatch?.replay?.length ?? 1) - 1);
   const viewingPly = replayPly ?? totalPlies;
+  const replayUnit = selectedMatch?.gameId === "chess" ? "Ply" : "Action";
   const displayedMove = viewingPly > 0 ? selectedSnapshot?.moves[viewingPly - 1] : undefined;
 
   const boardFen = useMemo(() => {
@@ -321,6 +325,7 @@ function App() {
     for (const match of state?.recentMatches ?? []) {
       if (match.seriesId) continue;
       if (match.gameId !== (selectedMatch?.gameId ?? gameId)) continue;
+      if (match.gameId === "hangman" && !verifiedDistinctModels(match.players[0].agent, match.players[1].agent)) continue;
       if (!match.result || !["finished", "forfeit"].includes(match.status)) continue;
       for (const player of match.players) {
         const side = player.id;
@@ -350,13 +355,16 @@ function App() {
   const canStart = Boolean(!storageBlocked && selectedMatch && ["ready", "paused", "interrupted"].includes(selectedMatch.status) && state?.activeMatch?.id === selectedMatch.id);
   const canCreate = !storageBlocked && (!state?.activeMatch || !["ready", "running", "paused", "interrupted"].includes(state.activeMatch.status));
   const activeSeries = seriesList.find((series) => ["ready", "running", "paused"].includes(series.status));
+  const distinctModels = distinctExplicitModels({ model: whiteModel }, { model: blackModel });
+  const unqualifiedMatch = Boolean(selectedMatch?.gameId === "hangman" && !verifiedDistinctModels(selectedMatch.players[0].agent, selectedMatch.players[1].agent));
   const startBlocker = storageBlocked ? "Saved history is unavailable. Restore storage before starting."
     : !providersChecked || !chosenGame ? "Checking games and local agent CLIs…"
     : !installed(whiteProvider) || !installed(blackProvider) ? "Install the selected agent CLI and sign in to use it."
     : !canCreate && state?.activeMatch ? `A ${state.activeMatch.gameId} match is ${state.activeMatch.status}. Finish or stop it before starting ${gameId}.`
     : activeSeries ? `A battle series is ${activeSeries.status}. Finish or stop it before starting another match.`
+    : gameId === "hangman" && !distinctModels ? "Enter two explicit, different model IDs. Two CLI defaults or the same model in both lanes cannot establish distinct competitors."
     : null;
-  const seriesBlocker = startBlocker ?? (!whiteModel.trim() || !blackModel.trim() ? "Enter an explicit model ID for each agent." : whiteProvider === "codex" || blackProvider === "codex" ? "Codex tool isolation is not qualified for scored series trials. Choose a qualified no-tools CLI." : null);
+  const seriesBlocker = startBlocker ?? (!distinctModels ? "Enter two different explicit model IDs." : whiteProvider === "codex" || blackProvider === "codex" ? "Codex tool isolation is not qualified for scored series trials. Choose a qualified no-tools CLI." : null);
 
   useEffect(() => {
     if (!currentIsRunning) return;
@@ -401,18 +409,29 @@ function App() {
     } finally { setPendingCommand(null); }
   };
 
-  const createSeries = async () => {
+  const createSeries = async (rerun?: { masterSeed: string; plan: SeriesPlan; agents: PublicSeries["agents"]; settings: PublicSeries["settings"] }) => {
     setPendingCommand("create"); setError("");
     try {
+      const counts = seriesPreset === "quick" ? { chess: 2, hangman: 2, battleship: 2 } : seriesPreset === "standard" ? { chess: 6, hangman: 5, battleship: 6 } : seriesCounts;
+      const plan: SeriesPlan = rerun?.plan ?? { mode: seriesPreset === "quick" ? "exploratory" : seriesPreset === "standard" ? "strict" : seriesMode,
+        games: games.filter((game) => game.series && (counts[game.id] ?? 0) > 0).map((game) => ({ gameId: game.id, gameVersion: game.version, repetitions: counts[game.id], rolePolicy: "alternating", challengePolicy: game.series!.supportsSeededChallenges ? "seeded" : "fixed" })) };
       const created = await api<{ series: PublicSeries }>("/api/series", { method: "POST", body: JSON.stringify({
-        agents: [{ provider: whiteProvider, model: whiteModel, reasoning: whiteReasoning }, { provider: blackProvider, model: blackModel, reasoning: blackReasoning }],
-        turnTimeoutSeconds: timeoutSeconds,
-        budgets: { maxPlies, maxRequests, maxWallMinutes, maxReportedCostUsd: maxCost.trim() ? Number(maxCost) : null },
+        agents: rerun?.agents ?? [{ provider: whiteProvider, model: whiteModel, reasoning: whiteReasoning }, { provider: blackProvider, model: blackModel, reasoning: blackReasoning }],
+        turnTimeoutSeconds: rerun?.settings.turnTimeoutSeconds ?? timeoutSeconds,
+        budgets: rerun?.settings.budgets ?? { maxPlies, maxRequests, maxWallMinutes, maxReportedCostUsd: maxCost.trim() ? Number(maxCost) : null },
+        plan, ...(rerun ? { masterSeed: rerun.masterSeed } : {}),
       }) });
       await api(`/api/series/${created.series.id}/start`, { method: "POST", body: "{}" });
       await refreshSeries(); await refresh();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not create the series."); }
     finally { setPendingCommand(null); }
+  };
+  const rerunSeries = async (id: string) => {
+    try {
+      const exportData = await api<{ reproducibility?: { masterSeed: string; plan: SeriesPlan; agents: PublicSeries["agents"]; settings: PublicSeries["settings"] } }>(`/api/series/${id}/export`);
+      if (!exportData.reproducibility) throw new Error("This series has no completed v2 reproducibility manifest.");
+      await createSeries(exportData.reproducibility);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not rerun the series."); }
   };
 
   const seriesCommand = async (id: string, command: "start" | "pause" | "stop" | "retry" | "skip") => {
@@ -524,7 +543,7 @@ function App() {
       </header>
 
       <nav className="mode-nav" aria-label="Arena view">
-        {games.map((game) => { const count = (state?.recentMatches ?? []).filter((match) => match.gameId === game.id).length; return <button key={game.id} type="button" aria-pressed={viewMode === game.id} onClick={() => chooseView(game.id as "chess" | "hangman")}>{game.label}<span>{count} {count === 1 ? "match" : "matches"}</span></button>; })}
+        {games.map((game) => { const count = (state?.recentMatches ?? []).filter((match) => match.gameId === game.id).length; return <button key={game.id} type="button" aria-pressed={viewMode === game.id} onClick={() => chooseView(game.id)}>{game.label}<span>{count} {count === 1 ? "match" : "matches"}</span></button>; })}
         <button type="button" aria-pressed={viewMode === "series"} onClick={() => chooseView("series")}>Battle series<span>{seriesList.length} recorded</span></button>
       </nav>
 
@@ -536,18 +555,18 @@ function App() {
       <section className="intro is-condensed" id="top">
         <div>
           <div className="eyebrow"><span className="eyebrow-line" /> {viewMode === "series" ? "REPRODUCIBLE TRIALS" : `${viewMode.toUpperCase()} ARENA`}</div>
-          <h1>{viewMode === "series" ? <>Battle <em>series.</em></> : viewMode === "hangman" ? <>Play <em>Hangman.</em></> : <>Play <em>Chess.</em></>}</h1>
-          <p>{viewMode === "series" ? "Balanced roles, matched challenges, recorded results." : viewMode === "hangman" ? "Two private lanes. One shared secret word." : "Two agents. One board. Every decision is theirs."}</p>
+          <h1>{viewMode === "series" ? <>Battle <em>series.</em></> : <>Play <em>{games.find((game) => game.id === viewMode)?.label ?? viewMode}.</em></>}</h1>
+          <p>{viewMode === "series" ? "Balanced roles, matched challenges, recorded results." : viewMode === "hangman" ? "Two private lanes. One shared secret word." : viewMode === "battleship" ? "Two hidden fleets. One shot per turn." : "Two agents. One board. Every decision is theirs."}</p>
         </div>
         <BoardMark className="intro-mark" />
       </section>
 
-      <section className={`arena-layout ${viewMode === "series" ? "series-layout" : ""}`}>
+      <section className={`arena-layout ${viewMode === "series" ? `series-layout ${seriesList.length ? "has-series" : ""}` : ""}`}>
         <div className={`arena-main ${selectedMatch && viewMode !== "series" ? "has-match" : ""}`}>
           <section className={`match-setup panel ${condenseSetup ? "is-condensed" : ""}`}>
             <div className="section-heading">
               <div><span className="eyebrow">{viewMode === "series" ? "BENCHMARK SETUP" : "MATCH SETUP"}</span><h2>{viewMode === "series" ? "Choose series agents" : condenseSetup ? "Match settings" : "Choose your players"}</h2></div>
-              <span className="setup-tag">{viewMode === "series" ? "5 CHESS · 5 HANGMAN" : condenseSetup ? selectedMatch?.status.toUpperCase() : gameId.toUpperCase()}</span>
+              <span className="setup-tag">{viewMode === "series" ? "CONFIGURABLE TRIALS" : condenseSetup ? selectedMatch?.status.toUpperCase() : gameId.toUpperCase()}</span>
             </div>
             {condenseSetup && viewMode !== "series" ? <div className="active-setup-note">
               <span className="live-dot" />
@@ -556,11 +575,16 @@ function App() {
               {terminalMatchSelected && !selectedMatch?.series && <button className="active-setup-new" onClick={() => { setGameId(selectedMatch!.gameId); const [a, b] = selectedMatch!.players; setWhiteProvider(a.agent.provider); setWhiteModel(a.agent.model); setWhiteReasoning(a.agent.reasoning ?? ""); setBlackProvider(b.agent.provider); setBlackModel(b.agent.model); setBlackReasoning(b.agent.reasoning ?? ""); setNewMatchOpen(true); }}>PLAY AGAIN <ArrowUpRight className="inline-icon" /></button>}
             </div> : <>
               <div className="launch-strip">
-                <div><strong>{viewMode === "series" ? "Run a recorded battle series" : viewMode === "hangman" ? "Ready to play Hangman?" : "Ready to play Chess?"}</strong><p>{viewMode === "series" ? "Five Chess trials and five matched Hangman words, with balanced roles and saved results." : viewMode === "hangman" ? "Both agents get the same hidden word and play separate lanes. Results and actions are saved automatically." : "The agents play from the standard starting position. Moves and results are saved automatically."}</p></div>
-                {viewMode === "series" ? <button className="primary-button launch-button" onClick={() => void createSeries()} disabled={pendingCommand !== null || seriesBlocker !== null}>{pendingCommand === "create" ? "STARTING…" : "RUN 10-TRIAL SERIES"} <ArrowUpRight className="inline-icon" /></button>
+                <div><strong>{viewMode === "series" ? "Run a recorded battle series" : `Ready to play ${chosenGame?.label ?? viewMode}?`}</strong><p>{viewMode === "series" ? "Choose the games and trial counts below. Each result, role, request, and model identity is recorded." : viewMode === "hangman" ? "Both agents get the same hidden word and play separate lanes. Results and actions are saved automatically." : viewMode === "battleship" ? "Each agent places a private fleet, then they alternate shots. Fleets reveal after the battle." : "The agents play from the standard starting position. Moves and results are saved automatically."}</p></div>
+                {viewMode === "series" ? <button className="primary-button launch-button" onClick={() => void createSeries()} disabled={pendingCommand !== null || seriesBlocker !== null}>{pendingCommand === "create" ? "STARTING…" : "START BATTLE SERIES"} <ArrowUpRight className="inline-icon" /></button>
                   : <button className="primary-button launch-button" onClick={() => void startMatch()} disabled={busy || pendingCommand !== null || startBlocker !== null}>{pendingCommand === "start" ? "STARTING…" : `START ${viewMode.toUpperCase()} MATCH`} <ArrowUpRight className="inline-icon" /></button>}
               </div>
               {viewMode === "hangman" && <p className="game-rules-brief">Seven misses per lane. A solve beats a failed lane; then fewer misses, fewer actions, or more correct letters decide the result. The word is revealed after both lanes finish.</p>}
+              {viewMode === "series" && <div className="series-plan-setup"><div className="time-presets" role="group" aria-label="Series preset">
+                {(["quick", "standard", "custom"] as const).map((preset) => <button key={preset} type="button" aria-pressed={seriesPreset === preset} onClick={() => setSeriesPreset(preset)}>{preset.toUpperCase()}</button>)}
+              </div><p>{seriesPreset === "quick" ? "Exploratory · 2 Chess, 2 Hangman, 2 Battleship" : seriesPreset === "standard" ? "Strict · 6 Chess, 5 matched Hangman words, 6 Battleship" : "Choose repetitions for each game. Strict mode requires even counts for seat-sensitive games."}</p>
+              {seriesPreset === "custom" && <><label className="timeout-setting">MODE <select value={seriesMode} onChange={(event) => setSeriesMode(event.target.value as "strict" | "exploratory")}><option value="exploratory">Exploratory</option><option value="strict">Strict</option></select></label><div className="series-counts">{games.filter((game) => game.series).map((game) => <label className="timeout-setting" key={game.id}>{game.label.toUpperCase()} <input type="number" min={0} max={100} value={seriesCounts[game.id] ?? 0} onChange={(event) => setSeriesCounts((current) => ({ ...current, [game.id]: Math.max(0, Math.min(100, Number(event.target.value) || 0)) }))} /></label>)}</div></>}
+              </div>}
               {(viewMode === "series" ? seriesBlocker : startBlocker) && <div className="launch-blocker" role="status"><strong>Cannot start yet.</strong> {viewMode === "series" ? seriesBlocker : startBlocker}{state?.activeMatch && !canCreate ? <button className="link-button" onClick={() => chooseView(state.activeMatch!.gameId as "chess" | "hangman", state.activeMatch!.id)}>Open active match</button> : activeSeries && viewMode !== "series" ? <button className="link-button" onClick={() => chooseView("series")}>Open battle series</button> : null}</div>}
               {error && <div className="error-banner" role="alert">{error}</div>}
               <div className="players-grid">
@@ -603,8 +627,8 @@ function App() {
           </section>
 
           {viewMode === "series" && <section className="history-panel panel series-panel" aria-label="Battle series">
-            <div className="section-heading compact-heading"><div><span className="eyebrow">REPEATED TRIALS</span><h2>Battle series</h2></div><span className="setup-tag">5 CHESS · 5 HANGMAN</span></div>
-            {seriesList.length === 0 ? <p className="inline-note">Enter explicit model IDs below to run ten recorded trials with alternating roles and five fixed Hangman challenges.</p> : seriesList.map((series) => <div className="series-card" key={series.id}>
+            <div className="section-heading compact-heading"><div><span className="eyebrow">REPEATED TRIALS</span><h2>Battle series</h2></div><span className="setup-tag">CHESS · HANGMAN · BATTLESHIP</span></div>
+            {seriesList.length === 0 ? <p className="inline-note">Choose two explicit models, then start a quick, standard, or custom experiment.</p> : seriesList.map((series) => <div className="series-card" key={series.id}>
               <div className="series-card-head"><strong>{series.agents.map((agent) => competitorLabel(agent)).join(" vs ")}</strong><span>{series.status.toUpperCase()}</span></div>
               <p className="series-progress">{series.slots.filter((slot) => slot.status === "scored").length} / {series.slots.length} scored · {series.slots.filter((slot) => slot.status === "unscored").length} unscored</p>
               {series.error && <p role="alert">{series.error}</p>}
@@ -616,15 +640,16 @@ function App() {
                 {series.status === "running" && <button className="quiet-button" onClick={() => void seriesCommand(series.id, "pause")}>PAUSE SERIES</button>}
                 {["ready", "running", "paused"].includes(series.status) && <button className="stop-button" onClick={() => void seriesCommand(series.id, "stop")}>STOP SERIES</button>}
                 <button className="quiet-button" onClick={() => void downloadSeries(series.id)}><Download className="button-icon" /> JSON</button>
+                {series.status === "completed" && series.version === "battle-series-2" && <button className="quiet-button" onClick={() => void rerunSeries(series.id)} disabled={pendingCommand !== null}>RERUN EXACT CONFIGURATION</button>}
               </div>
               <details className="series-detail"><summary>Trial schedule</summary><div className="series-slots">{series.slots.map((slot) => <div key={slot.id}><span>{slot.ordinal + 1}. {slot.gameId} · {slot.challengeId.slice(0, 12)}</span><span>{slot.status}{slot.result ? ` · ${slot.result.notation}` : ""}{slot.matchIds.length > 0 && <button className="link-button" onClick={() => chooseView(slot.gameId as "chess" | "hangman", slot.matchIds.at(-1))}>Open</button>}</span></div>)}</div></details>
-              <details className="series-detail"><summary>Scores and usage</summary><div className="series-results">{Object.entries(series.aggregate).map(([key, row]) => <p key={key}><b>{key.split(":")[0]} · {series.agents[Number(key.split(":")[1])]?.model}</b> {row.wins}W {row.draws}D {row.losses}L{row.unscored ? ` · ${row.unscored} unscored` : ""} · {row.requests} requests · {row.inputTokens + row.outputTokens} reported tokens ({row.coverage.inputTokens.reported}/{row.coverage.inputTokens.total} input, {row.coverage.outputTokens.reported}/{row.coverage.outputTokens.total} output) · ${row.costUsd.toFixed(4)} reported ({row.coverage.costUsd.reported}/{row.coverage.costUsd.total} cost) · {(row.latencyMs / 1000).toFixed(1)}s ({row.coverage.latencyMs.reported}/{row.coverage.latencyMs.total} latency)</p>)}</div></details>
+              <details className="series-detail"><summary>Scores and usage</summary><div className="series-results"><p>Win = 1, draw = ½, loss = 0. Each game's performance is points / scored trials; overall is the mean across scored game families. Unscored trials remain visible.</p>{Object.entries(series.aggregate).map(([key, row]) => <p key={key}><b>{key.split(":")[0]} · {series.agents[Number(key.split(":")[1])]?.model}</b> {row.wins}W {row.draws}D {row.losses}L · {row.scored} scored{row.unscored ? ` · ${row.unscored} unscored` : ""} · {row.points}/{row.possiblePoints} points ({row.normalizedPerformance === null ? "n/a" : `${(row.normalizedPerformance * 100).toFixed(1)}%`}) · roles {Object.entries(row.roleCounts).map(([role, count]) => `${role}:${count}`).join(", ")} · {row.requests} requests · {row.inputTokens + row.outputTokens} reported tokens ({row.coverage.inputTokens.reported}/{row.coverage.inputTokens.total} input, {row.coverage.outputTokens.reported}/{row.coverage.outputTokens.total} output) · ${row.costUsd.toFixed(4)} reported ({row.coverage.costUsd.reported}/{row.coverage.costUsd.total} cost) · {(row.latencyMs / 1000).toFixed(1)}s ({row.coverage.latencyMs.reported}/{row.coverage.latencyMs.total} latency)</p>)}</div></details>
             </div>)}
           </section>}
 
           {viewMode !== "series" && <section className="board-panel panel">
             <div className="board-heading">
-              <div><span className="eyebrow">THE ARENA</span><h2>{isReplayMatch ? "Match replay" : viewMode === "hangman" ? "Hangman arena" : "Chess board"}</h2></div>
+              <div><span className="eyebrow">THE ARENA</span><h2>{isReplayMatch ? "Match replay" : `${chosenGame?.label ?? viewMode} arena`}</h2></div>
               {selectedMatch && <span className="game-time-badge">{selectedMatch.settings.budgets.maxWallMinutes} MIN · {selectedMatch.timeAccounting ? "ACTIVE" : "LEGACY WALL"}</span>}
               <div className={`match-state ${currentIsRunning ? "is-live" : ""}`}>
                 <span className="state-dot" />{selectedMatch ? selectedMatch.status.toUpperCase() : "WAITING"}
@@ -649,9 +674,10 @@ function App() {
             {selectedMatch?.status === "error" && selectedMatch.error && <div className="error-banner match-error" role="alert">
               <strong>Agent request failed</strong><p>{selectedMatch.error}</p>
             </div>}
-            {viewMode === "hangman" && !selectedMatch ? <div className="empty-arena">Start a Hangman match to watch two private lanes solve the same word.</div> : <ArenaRouter match={selectedMatch} chess={{ boardFen, boardOrientation, squareStyles, summary: selectedMatch ? positionSummary(boardFen, displayedMove?.san) : "Starting position. Select or start a match." }} />}
+            {unqualifiedMatch && <div className="launch-blocker" role="status"><strong>Unverified comparison.</strong> This match lacks proof that two distinct requested models actually ran. Its game result remains in history, but it does not count toward comparative standings.</div>}
+            {!selectedMatch && viewMode !== "chess" ? <div className="empty-arena">Start a {viewMode} match to watch the agents play.</div> : <ArenaRouter match={selectedMatch} replayPly={replayPly} chess={{ boardFen, boardOrientation, squareStyles, summary: selectedMatch ? positionSummary(boardFen, displayedMove?.san) : "Starting position. Select or start a match." }} />}
             <div className="board-caption">
-              <span>{selectedMatch ? (replayPly !== null ? `Reviewing ply ${replayPly} of ${totalPlies}` : resultLine(selectedMatch)) : viewMode === "hangman" ? "No Hangman match selected." : "The board is ready for its first match."}</span>
+              <span>{selectedMatch ? (replayPly !== null ? `Reviewing ${replayUnit.toLowerCase()} ${replayPly} of ${totalPlies}` : resultLine(selectedMatch)) : viewMode === "hangman" ? "No Hangman match selected." : "The board is ready for its first match."}</span>
               {selectedMatch && (
                 <div className="match-actions">
                   {selectedMatch.gameId === "chess" && <button className="quiet-button" onClick={() => setBoardOrientation((value) => value === "white" ? "black" : "white")} aria-label="Flip board orientation"><FlipVertical className="button-icon" /> FLIP</button>}
@@ -665,7 +691,7 @@ function App() {
             {selectedMatch && <div className="export-bar">
               <span className="export-totals">{matchTotals ? `MATCH ${matchTotals.requests} req · ${matchTotals.inputTokens + matchTotals.outputTokens} tok${coverageMark(matchTotals.coverage)} · ${!matchTotals.costKnown ? "cost unknown" : `$${matchTotals.costUsd.toFixed(4)} reported`}` : ""}</span>
               {selectedMatch.gameId === "chess" && <button className="quiet-button" onClick={() => void copyText(boardFen, "FEN")}><Copy className="button-icon" /> FEN</button>}
-              {selectedMatch?.gameId !== "hangman" && <button className="quiet-button" onClick={downloadPgn} disabled={!totalPlies}><Download className="button-icon" /> PGN</button>}
+              {selectedMatch?.gameId === "chess" && <button className="quiet-button" onClick={downloadPgn} disabled={!totalPlies}><Download className="button-icon" /> PGN</button>}
               <button className="quiet-button" onClick={() => void downloadJson()}><Download className="button-icon" /> JSON</button>
             </div>}
             {notice && <div className="notice" role="status">{notice}</div>}
@@ -677,11 +703,11 @@ function App() {
             {canReplay && <div className="replay-control">
               <div className="replay-header">
                 <span className="eyebrow">REPLAY</span>
-                <span className="replay-step" role="status">Ply {viewingPly} of {totalPlies}</span>
-                <button className="quiet-button" onClick={() => { setReplayOpen((open) => !open); setReplayPly(null); }}>{replayOpen ? "Hide and return to current" : "Review moves"}</button>
+                <span className="replay-step" role="status">{replayUnit} {viewingPly} of {totalPlies}</span>
+                <button className="quiet-button" onClick={() => { setReplayOpen((open) => !open); setReplayPly(null); }}>{replayOpen ? "Hide and return to current" : "Review actions"}</button>
               </div>
               {replayOpen && <>
-                <input type="range" aria-label="Replay position" aria-valuetext={`Ply ${viewingPly} of ${totalPlies}`} min={0} max={totalPlies} value={viewingPly}
+                <input type="range" aria-label="Replay position" aria-valuetext={`${replayUnit} ${viewingPly} of ${totalPlies}`} min={0} max={totalPlies} value={viewingPly}
                   onChange={(event) => moveToPly(Number(event.target.value))} />
                 <div className="replay-buttons">
                   <button className="quiet-button" onClick={() => moveToPly(0)} aria-label="First position"><ChevronLeft className="button-icon" /><ChevronLeft className="button-icon" /></button>
@@ -702,7 +728,7 @@ function App() {
                 onClick={() => chooseView(match.gameId as "chess" | "hangman", match.id)}>
                 <span className="history-date">{new Date(match.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
                 <span className="history-players"><b>{competitorLabel(match.players[0].agent)}</b><small>vs</small><b>{competitorLabel(match.players[1].agent)}</b></span>
-                <span className={`history-result ${match.result ? "" : "muted"}`}>{match.result?.notation ?? match.status}</span>
+                <span className={`history-result ${match.result ? "" : "muted"}`}>{match.gameId === "hangman" && !verifiedDistinctModels(match.players[0].agent, match.players[1].agent) ? "unverified" : match.result?.notation ?? match.status}</span>
                 <span className="history-moves">{match.actionCount} actions · {match.gameId}</span>
               </button>)}
             </div>
@@ -733,13 +759,13 @@ function App() {
 
           <section className="moves-panel panel">
             <div className="section-heading">
-              <div><span className="eyebrow">MOVE BY MOVE</span><h2>{viewMode === "hangman" ? "Actions" : "Notation"}</h2></div>
+              <div><span className="eyebrow">MOVE BY MOVE</span><h2>{viewMode === "chess" ? "Notation" : "Actions"}</h2></div>
               <div className="notation-actions">
                 {viewMode === "chess" && <button className="quiet-button" onClick={downloadPgn} disabled={!totalPlies}><Download className="button-icon" /> PGN</button>}
                 <button className="quiet-button" onClick={() => void downloadJson()} disabled={!selectedMatch}><Download className="button-icon" /> JSON</button>
               </div>
             </div>
-            {viewMode === "hangman" ? <div className="event-list">{!selectedMatch || selectedMatch.history.length === 0 ? <p>Accepted actions and corrections appear here.</p> : selectedMatch.history.map((turn, index) => <div className="event-row" key={turn.turnId}><span>{index + 1}.</span><span>{turn.playerLabel}: {turn.actionLabel ?? "Lane forfeit or request failure"}<small> · {turn.attempts.length} request(s)</small></span></div>)}</div> : !selectedSnapshot?.moves?.length ? <div className="score-empty">Moves will appear here as the agents play.</div> : <div className="move-list" ref={moveListRef}>
+            {viewMode !== "chess" ? <div className="event-list">{!selectedMatch || selectedMatch.history.length === 0 ? <p>Accepted actions and corrections appear here.</p> : selectedMatch.history.map((turn, index) => <div className="event-row" key={turn.turnId}><span>{index + 1}.</span><span>{turn.playerLabel}: {turn.actionLabel ?? "Request failed"}<small> · {turn.attempts.length} request(s)</small></span></div>)}</div> : !selectedSnapshot?.moves?.length ? <div className="score-empty">Moves will appear here as the agents play.</div> : <div className="move-list" ref={moveListRef}>
               {Array.from({ length: Math.ceil(selectedSnapshot.moves.length / 2) }, (_, index) => {
                 const white = selectedSnapshot.moves[index * 2];
                 const black = selectedSnapshot.moves[index * 2 + 1];
@@ -770,7 +796,7 @@ function App() {
           <div className="footnote"><BoardMark className="footnote-mark" /> THE AGENTS PLAY. THE ENGINE KEEPS SCORE.</div>
         </aside>}
       </section>
-      <footer className="page-footer"><span>AGENT BATTLE <b>·</b> v{__APP_VERSION__}</span><span>LOCAL FIRST · CHESS + HANGMAN</span></footer>
+      <footer className="page-footer"><span>AGENT BATTLE <b>·</b> v{__APP_VERSION__}</span><span>LOCAL FIRST · CHESS + HANGMAN + BATTLESHIP</span></footer>
     </main>
   );
 }

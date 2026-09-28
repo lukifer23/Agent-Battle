@@ -5,7 +5,7 @@ import type { MatchRecord, SeriesRecord } from "../shared.js";
 import { defaultGames } from "../domain/defaultGames.js";
 import { validateMatchRecord, validateSeriesRecord, validateStoreEnvelope } from "./schema.js";
 
-export const STORE_VERSION = 5;
+export const STORE_VERSION = 6;
 
 export interface LoadResult {
   matches: MatchRecord[];

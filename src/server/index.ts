@@ -3,7 +3,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
-import { PROVIDERS, type MatchRecord, type PlayerConfig, type Provider, type SeriesRecord } from "../shared.js";
+import { PROVIDERS, distinctExplicitModels, type MatchRecord, type PlayerConfig, type Provider, type SeriesRecord } from "../shared.js";
 import { AgentRegistry } from "../domain/agent.js";
 import { MatchController } from "../domain/MatchController.js";
 import { defaultGames } from "../domain/defaultGames.js";
@@ -258,7 +258,9 @@ app.post("/api/series", asyncRoute(async (request, response) => {
   const raw = body.budgets && typeof body.budgets === "object" ? body.budgets as Record<string, unknown> : {};
   const budgets = { maxPlies: Number(raw.maxPlies ?? 150), maxRequests: Number(raw.maxRequests ?? 200), maxWallMinutes: Number(raw.maxWallMinutes ?? 30),
     maxReportedCostUsd: raw.maxReportedCostUsd === undefined || raw.maxReportedCostUsd === null || raw.maxReportedCostUsd === "" ? null : Number(raw.maxReportedCostUsd) };
-  const created = seriesManager!.create(parsed as [PlayerConfig, PlayerConfig], Number(body.turnTimeoutSeconds ?? 120), budgets);
+  const plan = body.plan as import("../shared.js").SeriesPlan | undefined;
+  const seed = typeof body.masterSeed === "string" ? body.masterSeed : undefined;
+  const created = seriesManager!.create(parsed as [PlayerConfig, PlayerConfig], Number(body.turnTimeoutSeconds ?? 120), budgets, plan, seed);
   response.status(201).json({ series: publicSeries(created, storedMatches) });
 }));
 for (const command of ["start", "pause", "stop", "retry", "skip"] as const) {
@@ -296,6 +298,9 @@ app.post("/api/matches", asyncRoute(async (request, response) => {
   const rawPlayers = body.players ?? (gameId === "chess" ? { white: body.white, black: body.black } : undefined);
   if (!rawPlayers || typeof rawPlayers !== "object" || Object.keys(rawPlayers).sort().join() !== [...game.playerIds].sort().join()) throw new Error("Player roles do not match the game.");
   const players = Object.fromEntries(game.playerIds.map((id) => [id, parsePlayer((rawPlayers as Record<string, unknown>)[id])]));
+  if (gameId === "hangman" && !distinctExplicitModels(players[game.playerIds[0]], players[game.playerIds[1]])) {
+    throw new Error("Hangman comparison requires two explicit, different model IDs. CLI defaults and mirror models cannot establish distinct competitors.");
+  }
   const created = await controller.create({
     gameId,
     players,

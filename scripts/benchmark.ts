@@ -1,6 +1,8 @@
 import { buildSnapshot } from "../src/domain/snapshot.js";
 import { projectRecord } from "../src/domain/projection.js";
 import { MatchStore } from "../src/server/store.js";
+import { BattleshipGame } from "../src/games/battleship/BattleshipGame.js";
+import { makeSeriesV2 } from "../src/server/series.js";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import { join } from "node:path";
@@ -71,6 +73,21 @@ function synthetic(index: number, turns: number, events: number): MatchRecord {
   };
 }
 
+function syntheticBattleship(index: number): MatchRecord {
+  const game = new BattleshipGame();
+  const state = game.createState();
+  const ships = ["carrier", "battleship", "cruiser", "submarine", "destroyer"].map((ship, row) => ({ ship, start: `a${row + 1}`, orientation: "horizontal" }));
+  game.applyAction(state, "player1", { type: "place_fleet", payload: { ships } });
+  game.applyAction(state, "player2", { type: "place_fleet", payload: { ships } });
+  for (let shot = 0; shot < 60; shot++) game.applyAction(state, game.currentPlayer(state)!, { type: "fire", payload: { coordinate: `${String.fromCharCode(101 + Math.floor(shot / 10))}${shot % 10 + 1}` } });
+  const base = synthetic(index, 0, 0);
+  return { ...base, gameId: game.id, gameVersion: game.version,
+    players: [{ id: "player1", label: "Player 1", agent: base.players[0].agent }, { id: "player2", label: "Player 2", agent: base.players[1].agent }],
+    gameState: game.serialize(state),
+    history: state.entries.map((entry, turnIndex) => ({ ...turn(index, turnIndex), playerId: entry.playerId, playerLabel: game.playerLabel(entry.playerId), action: entry.action, actionLabel: game.actionLabel(entry.action), attempts: [{ ...attempt(1), action: entry.action }] })),
+    events: state.entries.map((entry, turnIndex) => ({ at: "2026-01-01T00:00:00.000Z", type: "move.applied", text: game.actionLabel(entry.action), sequence: turnIndex + 1 })) };
+}
+
 function bytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value));
 }
@@ -92,21 +109,30 @@ results.push({ longGameTurns: 150, detailBytes: bytes(projected), projectMs: Num
 const activeSnapshot = buildSnapshot([{ ...longGame, status: "running" }], []);
 results.push({ activeDetailBytes: bytes(activeSnapshot), activeBuildMs: 0 });
 
+const battle = syntheticBattleship(0);
+const battleStart = performance.now();
+const battlePublic = projectRecord(battle);
+results.push({ battleshipTurns: battle.history.length, battleshipPrivateBytes: bytes(battle), battleshipPublicBytes: bytes(battlePublic), battleshipProjectionMs: Number((performance.now() - battleStart).toFixed(2)) });
+
 const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-persistence-benchmark-"));
 try {
   const store = new MatchStore(join(folder, "matches.json"));
-  for (const count of [10, 50, 100]) {
-    const records = Array.from({ length: count }, (_value, index) => synthetic(index, 80, 500));
+  const series = makeSeriesV2([{ provider: "codex", model: "fixture-a", name: "A" }, { provider: "claude", model: "fixture-b", name: "B" }], 120,
+    { maxPlies: 150, maxRequests: 200, maxWallMinutes: 30, maxReportedCostUsd: null },
+    { mode: "exploratory", games: [{ gameId: "battleship", gameVersion: "battleship-standard-1", repetitions: 2, rolePolicy: "alternating", challengePolicy: "fixed" }] }, "11".repeat(32));
+  for (const count of (process.argv.includes("--large") ? [10, 50, 100, 500, 1000] : [10, 50, 100])) {
+    const records = Array.from({ length: count }, (_value, index) => index % 4 === 0 ? syntheticBattleship(index) : synthetic(index, 80, 500));
     const timings: number[] = [];
-    for (let repeat = 0; repeat < 3; repeat++) {
+    for (let repeat = 0; repeat < 5; repeat++) {
       const start = performance.now();
-      store.save(records);
+      store.save(records, [series]);
       timings.push(performance.now() - start);
     }
     const readStart = performance.now();
     JSON.parse(readFileSync(store.storePath, "utf8"));
-    results.push({ persistedMatches: count, bytes: statSync(store.storePath).size,
-      writeMedianMs: Number(timings.sort((a, b) => a - b)[1].toFixed(2)), parseMs: Number((performance.now() - readStart).toFixed(2)) });
+    timings.sort((a, b) => a - b);
+    results.push({ persistedMatches: count, battleshipMatches: records.filter((record) => record.gameId === "battleship").length, seriesRecords: 1, bytes: statSync(store.storePath).size,
+      writeMedianMs: Number(timings[2].toFixed(2)), writeP95Ms: Number(timings[4].toFixed(2)), parseMs: Number((performance.now() - readStart).toFixed(2)) });
   }
 } finally { rmSync(folder, { recursive: true, force: true }); }
 

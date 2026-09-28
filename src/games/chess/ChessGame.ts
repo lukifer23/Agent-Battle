@@ -52,6 +52,7 @@ export class ChessGame implements GameDefinition<ChessRuntimeState> {
   readonly actionSchemaVersion = "game-action-v1";
   readonly playerIds = ["white", "black"] as const;
   readonly hiddenInformation = false;
+  readonly series = { seatSensitive: true, supportsSeededChallenges: false, recommendedRepetitions: 6, defaultSeriesEnabled: true, challengeId: "standard-start-v1" };
   cloneState(state: ChessRuntimeState): ChessRuntimeState { return this.deserialize(this.serialize(state)); }
   publicAction(action: GameAction): GameAction { return structuredClone(action); }
 

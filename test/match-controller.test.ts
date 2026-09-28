@@ -600,7 +600,7 @@ test("new matches capture requested budgets and environment provenance", async (
     budgets: { maxPlies: 42, maxRequests: 7, maxWallMinutes: 5, maxReportedCostUsd: 1.5 },
   });
   assert.deepEqual(match.settings.budgets, { maxPlies: 42, maxRequests: 7, maxWallMinutes: 5, maxReportedCostUsd: 1.5 });
-  assert.equal(match.environment?.adapterVersion, "agent-battle/adapter-v2");
+  assert.equal(match.environment?.adapterVersion, "agent-battle/adapter-v3");
   assert.equal(match.environment?.cliVersions.codex, "test");
   assert.deepEqual(match.timeAccounting, { mode: "active-runtime-v1", elapsedMs: 0 });
 });
@@ -704,4 +704,23 @@ test("restart conservatively closes an unclosed active segment", () => {
   assert.equal(restored.status, "interrupted");
   assert.equal(restored.timeAccounting?.runningSince, undefined);
   assert.ok((restored.timeAccounting?.elapsedMs ?? 0) >= 21_000);
+});
+
+test("restart charges an interrupted provider reservation to its player's active budget", async () => {
+  const record = legacyRecord("interrupted-player-budget");
+  record.status = "running";
+  record.settings.budgets.maxActiveMinutesPerPlayer = 1;
+  const startedAt = new Date(Date.now() - 5_000).toISOString();
+  record.pendingTurn = { turnId: "reserved-turn", turnIndex: 1, ply: 1, playerId: "white", startedAt,
+    attempts: [{ attempt: 1, invocationId: "reserved-invocation", startedAt, deadlineAt: new Date(Date.now() + 60_000).toISOString(), status: "started", phase: "provider", toolCalls: null,
+      usage: { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" } }] };
+  const { controller } = harness(async () => resign, [record]);
+  const restored = controller.get(record.id)!;
+  assert.equal(restored.pendingTurn?.attempts[0].status, "interrupted");
+  assert.ok((restored.pendingTurn?.attempts[0].accountedMs ?? 0) >= 60_000);
+  assert.equal(restored.pendingTurn?.attempts[0].latencyMs, undefined);
+  await controller.start(record.id);
+  const stopped = await waitFor(controller, record.id, ["stopped"]);
+  assert.equal(stopped.result, undefined);
+  assert.match(stopped.error ?? "", /player1|white|active provider time/i);
 });

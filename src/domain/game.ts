@@ -29,6 +29,7 @@ export interface GameDefinition<State> {
   /** A detached runtime copy used to stage an atomic controller transition. */
   cloneState(state: State): State;
   readonly hiddenInformation: boolean;
+  readonly series?: { seatSensitive: boolean; supportsSeededChallenges: boolean; recommendedRepetitions: number; defaultSeriesEnabled: boolean; challengeId: string };
   currentPlayer(state: State): string | null;
   /** Number of board plies already applied to the state. */
   plyCount(state: State): number;
@@ -92,7 +93,7 @@ export class GameRegistry {
     return undefined;
   }
 
-  list(): Array<{ id: string; version: string; label: string; playerIds: string[]; playerLabels: string[] }> {
-    return [...this.games.values()].map((game) => ({ id: game.id, version: game.version, label: game.id[0].toUpperCase() + game.id.slice(1), playerIds: [...game.playerIds], playerLabels: game.playerIds.map((id) => game.playerLabel(id)) }));
+  list(): Array<{ id: string; version: string; label: string; playerIds: string[]; playerLabels: string[]; participantCount: number; hiddenInformation: boolean; series?: GameDefinition<unknown>["series"] }> {
+    return [...this.games.values()].map((game) => ({ id: game.id, version: game.version, label: game.id[0].toUpperCase() + game.id.slice(1), playerIds: [...game.playerIds], playerLabels: game.playerIds.map((id) => game.playerLabel(id)), participantCount: game.playerIds.length, hiddenInformation: game.hiddenInformation, ...(game.series ? { series: game.series } : {}) }));
   }
 }

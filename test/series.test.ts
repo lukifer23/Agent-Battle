@@ -51,7 +51,7 @@ test("fixture agents complete ten durable slots with event-time Hangman masking 
     (match, event) => { if (!event) store.save(matches, records); else manager?.onMatchChange(match); });
   const manager = new SeriesManager(records, controller, () => store.save(matches, records));
   try {
-    const series = manager.create([...agents], 120, budgets);
+    const series = makeSeries([...agents], 120, budgets); records.push(series); store.save(matches, records);
     await manager.start(series.id);
     const deadline = Date.now() + 15_000;
     while (series.status !== "completed") {
@@ -72,7 +72,7 @@ test("fixture agents complete ten durable slots with event-time Hangman masking 
     const exported = seriesExport(series, matches);
     assert.equal(exported.matches.length, 10);
     assert.equal(exported.series.slots[5].challengeSeed, series.slots[5].challengeSeed);
-    assert.equal((JSON.parse(readFileSync(join(folder, "matches.json"), "utf8")) as { version: number }).version, 5);
+    assert.equal((JSON.parse(readFileSync(join(folder, "matches.json"), "utf8")) as { version: number }).version, 6);
   } finally { await controller.shutdown(); rmSync(folder, { recursive: true, force: true }); }
 });
 
@@ -96,7 +96,7 @@ test("failed slot pauses, reloads, and retries the same challenge without erasin
     (match, event) => { if (!event) store.save(matches, records); else manager?.onMatchChange(match); });
   manager = new SeriesManager(records, controller, () => store.save(matches, records));
   try {
-    const series = manager.create([...agents], 120, budgets);
+    const series = makeSeries([...agents], 120, budgets); records.push(series); store.save(matches, records);
     await manager.start(series.id);
     const deadline = Date.now() + 15_000;
     while (series.status !== "paused") {

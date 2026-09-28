@@ -30,7 +30,7 @@ The controller never reads the board from the UI. The React app cannot make a mo
 
 The game contract also exposes `eventProjection(state)`. Chess returns the latest move record, current FEN and PGN so the spectator can update the board and replay one ply at a time without receiving a full match snapshot after every event.
 
-The UI renders Chess and Hangman through `ArenaRouter`. Adding a game does not require changing the controller or adapter protocol, but it requires a safe view for that game's public snapshot.
+The UI renders Chess, Hangman, and Battleship through `ArenaRouter`. Adding a game does not require changing the controller or adapter protocol, but it requires a safe view for that game's public snapshot. `GameRegistry.list()` publishes lightweight descriptors including participant count, hidden-information capability, and optional series policy.
 
 ### `MatchController`
 
@@ -55,7 +55,7 @@ All agents receive a new complete observation every turn. No transcript is neede
 
 ## Persistence and telemetry
 
-`data/matches.json` (override the directory with `AGENT_BATTLE_DATA_DIR`) stores match and series records in a versioned envelope. The current store version is 5; bare JSON arrays and supported older envelopes are migrated on load with a pre-migration backup. The store is validated on load:
+`data/matches.json` (override the directory with `AGENT_BATTLE_DATA_DIR`) stores match and series records in a versioned envelope. The current store version is 6; bare JSON arrays and supported older envelopes are migrated on load with a pre-migration backup. The store is validated on load:
 
 - An unreadable, unsupported, or future-version root remains in place and prevents server startup.
 - Individual records that fail runtime validation are written to a quarantine file and excluded; valid records are retained.
@@ -94,9 +94,9 @@ The JSON file is local and created with owner-only permissions. Back it up befor
 
 ### Battle series
 
-`src/server/series.ts` creates ten fixed slots: five standard-start Chess games and five Hangman matches whose private seeds derive from a random 256-bit series root. Roles alternate with a recorded 3–2 split per game. The slot has an opaque public challenge ID, while its seed stays local until the series finishes. A series and its linked matches share the same versioned store and single-writer lock. The scheduler runs one match at a time. A restart pauses an active series, then reconciles slot links from match records to avoid duplicate challenges after an interrupted commit. Unscored provider, qualification, budget, or storage outcomes pause the series; retry retains the failed match and repeats the same challenge, while skip records an unscored slot.
+`src/server/series.ts` preserves `battle-series-1` validation for historical ten-slot records. New `battle-series-2` records carry a plan with registered game IDs, exact ruleset versions, repetitions, alternating roles, fixed/seeded challenge policy, optional family weights, and exploratory/strict mode. The registry's game policy supplies seat sensitivity, seeded-challenge support, recommended repetitions and a fixed challenge ID. The scheduler operates on slots without ordinal-based game branches. Hangman seeds derive from a random or supplied 256-bit series root through a versioned HMAC; public challenge IDs are hashes. Chess and Battleship have fixed challenge IDs and no hidden random challenge. A slot's private seed stays local until series completion. Strict mode requires even repetitions for seat-sensitive games; exploratory odd schedules expose their role split. A series and linked matches share the store and lock. Restart pauses an active series and reconciles links to avoid duplicate matches. Unscored outcomes pause the series; retry keeps failed evidence and repeats the same challenge, while skip records an unscored slot.
 
-Series results retain per-game and role records and show an overall raw win/draw/loss count. Request, token, cost, and latency totals include separate coverage counts. The public export contains projected match detail; raw diagnostics remain in the local store. No weighted intelligence score is computed.
+Series results retain per-game and role records and raw win/draw/loss counts. Win earns 1 point, draw ½, loss 0; each family reports points divided by scored possible points. Overall normalized performance is the mean of scored family values, weighted only by explicit positive plan weights. Unscored trials remain visible and are excluded from the scored denominator. Request, token, cost, and latency totals include separate coverage counts. Completed v2 exports include a reproducibility manifest with root seed, plan, agent configs and settings; earlier exports do not reveal private future seeds. Raw diagnostics remain local. This performance ratio is not an intelligence score.
 
 The API binds to `127.0.0.1:4173`; Vite serves the UI on `127.0.0.1:5173` during development and proxies `/api` requests. All routes live under `/api`; an unknown `/api` route returns a JSON 404 and never falls through to the SPA. Request bodies are JSON-only, malformed JSON returns a JSON 400, and errors use a stable `{ error, code }` envelope with meaningful 404/409/500/503 distinctions.
 
@@ -119,12 +119,12 @@ The event stream sends one full `snapshot` on connection and again for match cre
 
 ## Adding another game
 
-The game registry supplies role IDs, labels, hidden-information behavior, runtime cloning, public projection, and seeded challenge creation where applicable. The series scheduler consumes this contract for Chess and Hangman; a future game must add its own view and challenge policy.
+The game registry supplies role IDs, labels, hidden-information behavior, runtime cloning, public projection, and optional series capability. The series scheduler consumes this contract for Chess, Hangman, and Battleship; a future two-player game adds its own view and challenge policy.
 
 1. Implement `GameDefinition<State>` with a canonical state and a per-player observation. Keep hidden/private state inside the game; project only player-allowed facts into `observe()`.
 2. Define a generic action envelope and game-specific action schema. Validate the current player and all payload fields before applying.
 3. Implement terminal/result handling and a versioned serializer/deserializer, plus `plyCount(state)`.
-4. Add a safe public projection, game descriptor and UI view, then register the game in `src/server/index.ts`.
+4. Add a safe public projection, game descriptor and UI view, then register the game in `src/domain/defaultGames.ts`.
 5. Add domain tests for legal/illegal actions, wrong player, player-specific observations, terminal states and persistence reload.
 
 Match creation accepts a role-keyed `players` map. Legacy `white`/`black` request fields remain accepted for Chess only; mixed formats are rejected. `ArenaRouter` selects game views. Storage delegates game validity to the registry.
@@ -132,15 +132,15 @@ Match creation accepts a role-keyed `players` map. Legacy `white`/`black` reques
 ### Current boundaries / limits
 
 - Two participants per match are required by the controller, but player IDs and labels come from the game definition.
-- There is a per-move request timeout, not a chess clock.
+- There is a per-request timeout and an active-match runtime budget, not an official chess clock.
 - One match runs at a time in this single-user app.
-- Adapters start a fresh CLI request for each move. Model/provider accounts may bill according to their own plan; the app does not estimate or cap cost yet.
-- Stockfish analysis, human adapters, remote access and additional game views are future work.
+- Adapters start a fresh CLI request for each move. Model/provider accounts may bill according to their own plan; the optional threshold uses reported cost and cannot guarantee a billing cap when usage is missing.
+- Stockfish analysis, human adapters, and remote access are future work.
 
 ## Multi-game projection boundary
 
 `GameRegistry` validates game compatibility and authoritative saved state. The store validates the envelope and common match fields, then delegates game validity through its validator. Game definitions distinguish private `serialize`/`deserialize` from `publicState` and player-specific `observe`. Hangman additionally supplies public action redaction, public replay, and lane-forfeit handling.
 
-`MatchSummary` is an explicit list DTO. `PublicMatchDetail` contains only projected state and telemetry. `AppState.recentMatches` uses summaries. HTTP creation/start/detail, JSON downloads, SSE, attempts, and events use the same projection boundary. Hangman events are sanitized before durable storage as well as before transport. `ArenaRouter` selects the Chess or Hangman arena.
+`MatchSummary` is an explicit list DTO. `PublicMatchDetail` contains only projected state and telemetry. `AppState.recentMatches` uses summaries. HTTP creation/start/detail, JSON downloads, SSE, attempts, and events use the same projection boundary. Hangman and Battleship events are sanitized before durable storage as well as before transport. `ArenaRouter` selects the Chess, Hangman, or Battleship arena. Battleship placement coordinates stay private until the terminal public reveal, and earlier replay frames remain masked.
 
-Each new request has a durable invocation UUID and deadline before process invocation. Completion updates that reservation. A restarted unfinished invocation becomes interrupted with unknown usage. Historical attempts retain their original evidence without invented invocation identities. A failed write retains a private recovery candidate and stops requests; the server attempts to write that candidate to a separate private recovery file. If that write also fails, the candidate is memory-only until process exit. Snapshot epochs and state versions protect the browser against stale deliveries.
+Each new request has a durable invocation UUID and deadline before process invocation. Completion updates that reservation. A restarted unfinished invocation becomes interrupted with unknown provider latency/usage; its reserved interval is conservatively charged as controller-accounted player time. Qualification failures retain actual provider latency, usage, tool count and resolved-model evidence. Historical attempts retain their original evidence without invented invocation identities. A failed write retains a private recovery candidate and stops requests; the server attempts to write that candidate to a separate private recovery file. If that write also fails, the candidate is memory-only until process exit. Snapshot epochs and state versions protect the browser against stale deliveries.

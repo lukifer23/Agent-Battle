@@ -46,6 +46,17 @@ export function competitorId(config: PlayerConfig): string {
   return `${config.provider}::${model}::${reasoning}`;
 }
 
+/** A comparison needs two named models; CLI defaults cannot establish distinct identities. */
+export function distinctExplicitModels(a: Pick<PlayerConfig, "model">, b: Pick<PlayerConfig, "model">): boolean {
+  const first = a.model.trim().toLowerCase();
+  const second = b.model.trim().toLowerCase();
+  return first.length > 0 && second.length > 0 && first !== second;
+}
+
+export function verifiedDistinctModels(a: PlayerConfig, b: PlayerConfig): boolean {
+  return distinctExplicitModels(a, b) && a.resolvedModel === a.model && b.resolvedModel === b.model;
+}
+
 export function competitorLabel(config: PlayerConfig): string {
   const model = config.resolvedModel?.trim() || config.model.trim() || "CLI default";
   const reasoning = config.reasoning?.trim();
@@ -106,7 +117,10 @@ export interface AgentAttempt {
   completedAt?: string;
   latencyMs?: number;
   status: "started" | "interrupted" | "valid" | "invalid" | "timeout" | "error" | "cancelled";
-  phase?: "initialization" | "provider" | "protocol" | "controller" | "storage";
+  phase?: "initialization" | "provider" | "protocol" | "controller" | "storage" | "qualification";
+  resolvedModel?: string;
+  /** Controller-measured provider reservation time when provider latency is unknown. */
+  accountedMs?: number;
   action?: GameAction;
   error?: string;
   responseExcerpt?: string;
@@ -200,7 +214,7 @@ export interface MatchRecord {
 export interface SeriesSlot {
   id: string;
   ordinal: number;
-  gameId: "chess" | "hangman";
+  gameId: string;
   challengeId: string;
   /** Private until the entire series has completed. */
   challengeSeed?: string;
@@ -209,9 +223,21 @@ export interface SeriesSlot {
   skipped: boolean;
 }
 
+export interface SeriesPlanEntry {
+  gameId: string;
+  gameVersion: string;
+  repetitions: number;
+  rolePolicy: "alternating";
+  challengePolicy: "fixed" | "seeded";
+  weight?: number;
+}
+
+export interface SeriesPlan { mode: "exploratory" | "strict"; games: SeriesPlanEntry[] }
+
 export interface SeriesRecord {
   id: string;
-  version: "battle-series-1";
+  version: "battle-series-1" | "battle-series-2";
+  plan?: SeriesPlan;
   createdAt: string;
   updatedAt: string;
   status: "ready" | "running" | "paused" | "completed" | "stopped";
@@ -231,7 +257,7 @@ export interface PublicSeriesSlot extends Omit<SeriesSlot, "challengeSeed"> {
 
 export interface PublicSeries extends Omit<SeriesRecord, "masterSeed" | "slots"> {
   slots: PublicSeriesSlot[];
-  aggregate: Record<string, { wins: number; draws: number; losses: number; unscored: number; requests: number; inputTokens: number; outputTokens: number; costUsd: number; latencyMs: number;
+  aggregate: Record<string, { wins: number; draws: number; losses: number; unscored: number; scored: number; points: number; possiblePoints: number; normalizedPerformance: number | null; roleCounts: Record<string, number>; requests: number; inputTokens: number; outputTokens: number; costUsd: number; latencyMs: number;
     coverage: Record<"inputTokens" | "outputTokens" | "costUsd" | "latencyMs", { reported: number; total: number }> }>;
 }
 

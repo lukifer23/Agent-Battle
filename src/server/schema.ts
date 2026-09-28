@@ -1,4 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { makeSeriesV2 } from "./series.js";
 import { PROVIDERS, type AgentAttempt, type AgentUsage, type MatchEnvironment, type MatchRecord, type MatchStatus, type PendingTurn, type PlayerSeat, type Provider, type TurnTelemetry } from "../shared.js";
 import type { SeriesRecord } from "../shared.js";
 
@@ -63,7 +65,7 @@ function validateAttempt(raw: unknown): ValidationResult<AgentAttempt> {
   if (raw.deadlineAt !== undefined && !isIsoDate(raw.deadlineAt)) return { error: "invocation deadline is invalid" };
   const status = raw.status;
   if (!["started", "interrupted", "valid", "invalid", "timeout", "error", "cancelled"].includes(status as string)) return { error: "attempt status is unsupported" };
-  if (raw.phase !== undefined && !["initialization", "provider", "protocol", "controller", "storage"].includes(String(raw.phase))) return { error: "attempt phase is unsupported" };
+  if (raw.phase !== undefined && !["initialization", "provider", "protocol", "controller", "storage", "qualification"].includes(String(raw.phase))) return { error: "attempt phase is unsupported" };
   return {
     value: {
       attempt: raw.attempt as number,
@@ -72,8 +74,10 @@ function validateAttempt(raw: unknown): ValidationResult<AgentAttempt> {
       startedAt: raw.startedAt,
       ...(isIsoDate(raw.completedAt) ? { completedAt: raw.completedAt } : {}),
       ...(isFiniteNumber(raw.latencyMs) ? { latencyMs: raw.latencyMs } : {}),
+      ...(isFiniteNumber(raw.accountedMs) && raw.accountedMs >= 0 ? { accountedMs: raw.accountedMs } : {}),
+      ...(isString(raw.resolvedModel) ? { resolvedModel: raw.resolvedModel } : {}),
       status: status as AgentAttempt["status"],
-      ...(["initialization", "provider", "protocol", "controller", "storage"].includes(String(raw.phase)) ? { phase: raw.phase as AgentAttempt["phase"] } : {}),
+      ...(["initialization", "provider", "protocol", "controller", "storage", "qualification"].includes(String(raw.phase)) ? { phase: raw.phase as AgentAttempt["phase"] } : {}),
       ...(isString(raw.error) ? { error: raw.error } : {}),
       ...(isString(raw.responseExcerpt) ? { responseExcerpt: raw.responseExcerpt } : {}),
       ...(isString(raw.stderrExcerpt) ? { stderrExcerpt: raw.stderrExcerpt } : {}),
@@ -295,6 +299,7 @@ export function validateMatchRecord(raw: unknown): ValidationResult<MatchRecord>
 }
 
 export function validateSeriesRecord(raw: unknown): SeriesRecord {
+  if (isPlainObject(raw) && raw.version === "battle-series-2") return validateSeriesV2(raw);
   if (!isPlainObject(raw) || raw.version !== "battle-series-1" || !isString(raw.id) || !isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)
     || !["ready", "running", "paused", "completed", "stopped"].includes(String(raw.status))
     || !/^[0-9a-f]{64}$/.test(String(raw.masterSeed)) || !Array.isArray(raw.agents) || raw.agents.length !== 2
@@ -330,13 +335,45 @@ export function validateSeriesRecord(raw: unknown): SeriesRecord {
     masterSeed: raw.masterSeed as string, slots, ...(isString(raw.error) ? { error: raw.error } : {}) };
 }
 
+function validateSeriesV2(raw: Record<string, unknown>): SeriesRecord {
+  if (!isString(raw.id) || !isIsoDate(raw.createdAt) || !isIsoDate(raw.updatedAt)
+    || !["ready", "running", "paused", "completed", "stopped"].includes(String(raw.status))
+    || !/^[0-9a-f]{64}$/.test(String(raw.masterSeed)) || !Array.isArray(raw.agents) || raw.agents.length !== 2
+    || !isPlainObject(raw.settings) || !isPlainObject(raw.plan) || !Array.isArray(raw.plan.games)
+    || !Array.isArray(raw.slots)) throw new Error("Invalid battle-series-2 record.");
+  const agents = raw.agents.map((agent) => validatePlayer({ id: "seat", label: "Seat", agent }));
+  if (agents.some((agent) => !agent.value || agent.error || !agent.value.agent.model.trim())) throw new Error("Invalid series agent identity.");
+  const settings = raw.settings;
+  if (!Number.isSafeInteger(settings.turnTimeoutSeconds) || (settings.turnTimeoutSeconds as number) < 30 || (settings.turnTimeoutSeconds as number) > 600 || !isPlainObject(settings.budgets)) throw new Error("Invalid series settings.");
+  const budgets = settings.budgets;
+  if (!["maxPlies", "maxRequests", "maxWallMinutes"].every((key) => Number.isSafeInteger(budgets[key]) && (budgets[key] as number) > 0)
+    || !(budgets.maxReportedCostUsd === null || isFiniteNumber(budgets.maxReportedCostUsd) && budgets.maxReportedCostUsd >= 0)) throw new Error("Invalid series budgets.");
+  const plan = raw.plan as unknown as import("../shared.js").SeriesPlan;
+  const validatedAgents = agents.map((agent) => agent.value!.agent) as SeriesRecord["agents"];
+  const validatedBudgets = { maxPlies: budgets.maxPlies as number, maxRequests: budgets.maxRequests as number, maxWallMinutes: budgets.maxWallMinutes as number, maxReportedCostUsd: budgets.maxReportedCostUsd as number | null };
+  // Rebuild the entire deterministic schedule; only generated IDs and mutable links may differ.
+  const expected = makeSeriesV2(validatedAgents, settings.turnTimeoutSeconds as number, validatedBudgets, plan, raw.masterSeed as string);
+  if (expected.slots.length !== raw.slots.length) throw new Error("Series slot count differs from plan.");
+  const slots = raw.slots.map((slot, ordinal) => {
+    const reference = expected.slots[ordinal];
+    if (!isPlainObject(slot) || !isString(slot.id) || slot.ordinal !== ordinal || slot.gameId !== reference.gameId
+      || slot.challengeId !== reference.challengeId || slot.challengeSeed !== reference.challengeSeed
+      || !isDeepStrictEqual(slot.roles, reference.roles) || !Array.isArray(slot.matchIds) || !slot.matchIds.every(isString)
+      || typeof slot.skipped !== "boolean") throw new Error("Series slot differs from deterministic plan.");
+    return slot as unknown as SeriesRecord["slots"][number];
+  });
+  if (new Set(slots.map((slot) => slot.id)).size !== slots.length || new Set(slots.flatMap((slot) => slot.matchIds)).size !== slots.flatMap((slot) => slot.matchIds).length) throw new Error("Duplicate series identity.");
+  return { id: raw.id as string, version: "battle-series-2", plan, createdAt: raw.createdAt as string, updatedAt: raw.updatedAt as string, status: raw.status as SeriesRecord["status"], agents: validatedAgents,
+    settings: { turnTimeoutSeconds: settings.turnTimeoutSeconds as number, budgets: validatedBudgets }, masterSeed: raw.masterSeed as string, slots, ...(isString(raw.error) ? { error: raw.error } : {}) };
+}
+
 export function validateStoreEnvelope(root: unknown): { version: number; records: unknown[]; series: unknown[] } {
   if (Array.isArray(root)) return { version: 1, records: root, series: [] };
   if (isPlainObject(root) && Array.isArray(root.matches)) {
     const version = root.version;
-    if (!Number.isSafeInteger(version) || (version as number) < 2 || (version as number) > 5) throw new Error(`Unsupported store version ${String(version)}.`);
-    if (version === 5 && !Array.isArray(root.series)) throw new Error("Series array is missing.");
-    return { version: version as number, records: root.matches, series: version === 5 ? root.series as unknown[] : [] };
+    if (!Number.isSafeInteger(version) || (version as number) < 2 || (version as number) > 6) throw new Error(`Unsupported store version ${String(version)}.`);
+    if ((version as number) >= 5 && !Array.isArray(root.series)) throw new Error("Series array is missing.");
+    return { version: version as number, records: root.matches, series: (version as number) >= 5 ? root.series as unknown[] : [] };
   }
   throw new Error("Saved store must be an array of matches or a versioned envelope with a matches array.");
 }

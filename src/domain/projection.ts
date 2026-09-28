@@ -9,6 +9,8 @@ function projectAttempt(attempt: AgentAttempt): AgentAttempt {
     startedAt: attempt.startedAt,
     ...(attempt.completedAt ? { completedAt: attempt.completedAt } : {}),
     ...(attempt.latencyMs !== undefined ? { latencyMs: attempt.latencyMs } : {}),
+    ...(attempt.accountedMs !== undefined ? { accountedMs: attempt.accountedMs } : {}),
+    ...(attempt.resolvedModel ? { resolvedModel: attempt.resolvedModel } : {}),
     status: attempt.status,
     ...(attempt.phase ? { phase: attempt.phase } : {}),
     ...(attempt.action ? { action: attempt.action } : {}),
@@ -114,7 +116,7 @@ export function projectEvent(record: MatchRecord, event: MatchEvent, registry = 
 export function summaryOf(record: MatchRecord): MatchSummary {
   return { id: record.id, gameId: record.gameId, gameVersion: record.gameVersion, protocolVersion: record.protocolVersion,
     createdAt: record.createdAt, updatedAt: record.updatedAt, status: record.status,
-    players: record.players.map((p) => ({ id: p.id, label: p.label, agent: { provider: p.agent.provider, model: p.agent.model, name: p.agent.name, ...(p.agent.reasoning ? { reasoning: p.agent.reasoning } : {}) } })) as MatchRecord["players"],
+    players: record.players.map((p) => ({ id: p.id, label: p.label, agent: { provider: p.agent.provider, model: p.agent.model, name: p.agent.name, ...(p.agent.reasoning ? { reasoning: p.agent.reasoning } : {}), ...(p.agent.resolvedModel ? { resolvedModel: p.agent.resolvedModel } : {}) } })) as MatchRecord["players"],
     timeControl: { maxMinutes: record.settings.budgets.maxWallMinutes, turnSeconds: record.settings.turnTimeoutSeconds, mode: record.timeAccounting ? "active" : "legacy" },
     revision: record.revision, actionCount: record.history.filter((t) => t.valid).length,
     ...(record.result ? { result: { kind: record.result.kind, notation: record.result.notation, reason: record.result.reason, ...(record.result.winnerId ? { winnerId: record.result.winnerId } : {}) } } : {}),

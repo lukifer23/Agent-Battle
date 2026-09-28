@@ -31,6 +31,7 @@ export class HangmanGame implements GameDefinition<HangmanState> {
   readonly actionSchemaVersion = "game-action-v1";
   readonly playerIds = roles;
   readonly hiddenInformation = true;
+  readonly series = { seatSensitive: false, supportsSeededChallenges: true, recommendedRepetitions: 5, defaultSeriesEnabled: true, challengeId: "independent-lanes-1" };
   cloneState(state: HangmanState): HangmanState { return structuredClone(state); }
   playerLabel(id: string): string {
     if (!roles.includes(id as HangmanRole)) throw new Error("Unknown Hangman role.");

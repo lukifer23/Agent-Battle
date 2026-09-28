@@ -170,10 +170,14 @@ test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess c
   try {
     await waitForListening(child, port);
     const player = { provider: "codex", model: "fixture" };
+    const secondPlayer = { provider: "codex", model: "fixture-b" };
+    const mirror = await probe(port, { path: "/api/matches", method: "POST", body: JSON.stringify({ gameId: "hangman", players: { player1: player, player2: player }, turnTimeoutSeconds: 30 }), headers: { "content-type": "application/json" } });
+    assert.equal(mirror.status, 400);
+    assert.match(mirror.body, /two explicit, different model IDs/);
     let created;
     let word = "";
     for (let candidate = 0; candidate < 50; candidate++) {
-      created = await request("/api/matches", { gameId: "hangman", players: { player1: player, player2: player }, turnTimeoutSeconds: 30 });
+      created = await request("/api/matches", { gameId: "hangman", players: { player1: player, player2: secondPlayer }, turnTimeoutSeconds: 30 });
       const privateStore = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
       word = privateStore.matches[0].gameState.word;
       // A distinctive canary avoids matching ordinary JSON keys such as status.
@@ -219,7 +223,7 @@ test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess c
     }
     const raw = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
     assert.equal(raw.matches[0].gameState.word, word);
-    assert.equal(raw.version, 5);
+    assert.equal(raw.version, 6);
     for (const event of raw.matches[0].events) {
       if (JSON.stringify(event).includes(word)) assert.equal(event.payload?.publicState?.terminal, true);
     }
@@ -249,7 +253,7 @@ test("series API persists private challenges and blocks unqualified Codex scorin
     assert.equal(created.status, 201);
     const id = created.value.series.id as string;
     const store = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
-    const seed = store.series[0].slots[5].challengeSeed as string;
+    const seed = store.series[0].slots.find((slot: { gameId: string }) => slot.gameId === "hangman").challengeSeed as string;
     assert.equal(JSON.stringify(created.value).includes(seed), false);
     assert.equal((await request(`/api/series/${id}/start`, {})).status, 200);
     let detail;
@@ -262,5 +266,50 @@ test("series API persists private challenges and blocks unqualified Codex scorin
     assert.equal(detail.slots[0].status, "unscored");
     assert.equal(JSON.stringify((await request(`/api/series/${id}/export`)).value).includes(seed), false);
     assert.equal((await request(`/api/series/${id}/stop`, {})).status, 200);
+  } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("Battleship HTTP, SSE, events, attempts and replay hide fleets until terminal reveal", async () => {
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-battleship-api-"));
+  const { mkdirSync, chmodSync } = await import("node:fs");
+  const bin = join(folder, "bin"); mkdirSync(bin);
+  const fixture = join(bin, "codex");
+  writeFileSync(fixture, `#!${process.execPath}\n${readFileSync(join(projectRoot, "test/fixtures/battleship-cli.cjs"), "utf8")}`); chmodSync(fixture, 0o700);
+  const port = 5800 + Math.floor(Math.random() * 200);
+  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], { cwd: projectRoot,
+    env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
+  const request = async (path: string, body?: unknown) => {
+    const result = await probe(port, { path, ...(body ? { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } } : {}) });
+    assert.ok(result.status < 300, result.body);
+    return JSON.parse(result.body);
+  };
+  try {
+    await waitForListening(child, port);
+    const created = await request("/api/matches", { gameId: "battleship", players: { player1: { provider: "codex", model: "fixture-a" }, player2: { provider: "codex", model: "fixture-b" } }, turnTimeoutSeconds: 30 });
+    const id = created.match.id;
+    const hiddenPlacement = '"ship":"carrier","start":"a1"';
+    assert.equal(JSON.stringify(created).includes(hiddenPlacement), false);
+    await request(`/api/matches/${id}/start`, {});
+    for (const route of ["/api/state", "/api/matches", `/api/matches/${id}`, `/api/matches/${id}/events`, `/api/matches/${id}/attempts`]) {
+      assert.equal(JSON.stringify(await request(route)).includes(hiddenPlacement), false, route);
+    }
+    const stream = await fetch(`http://127.0.0.1:${port}/api/events`);
+    const reader = stream.body!.getReader(); const first = await reader.read(); await reader.cancel();
+    assert.equal(new TextDecoder().decode(first.value).includes(hiddenPlacement), false);
+    let finished;
+    for (let i = 0; i < 200; i++) {
+      finished = await request(`/api/matches/${id}`);
+      if (finished.match.status === "finished") break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(finished.match.status, "finished");
+    assert.equal(finished.match.result.winnerId, "player1");
+    assert.equal(JSON.stringify(finished.match.gameState).includes(hiddenPlacement), true);
+    assert.equal(JSON.stringify(finished.match.replay.slice(0, -1)).includes("placements"), false);
+    assert.equal(JSON.stringify(finished.match.history).includes(hiddenPlacement), false);
+    const events = (await request(`/api/matches/${id}/events`)).events as Array<{ payload?: { publicState?: { terminal?: boolean } } }>;
+    for (const event of events) if (event.payload?.publicState && !event.payload.publicState.terminal) assert.equal(JSON.stringify(event).includes("placements"), false);
+    const privateStore = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
+    assert.equal(privateStore.matches[0].gameState.fleets.player1[0].start, "a1");
   } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
 });

@@ -1,0 +1,5 @@
+# Third-party notices
+
+This package adds no copied Battleship code, tests, artwork, or assets. Its Battleship rules and implementation are original to Agent Battle and informed by conventional game mechanics. Reviewed external repositories, exact commits, verified license status, and reference-only decisions are recorded in [Game sources](docs/GAME_SOURCES.md).
+
+Runtime dependencies, including chess.js and react-chessboard, retain their own licenses in the npm dependency tree and package metadata. This file does not replace their notices.

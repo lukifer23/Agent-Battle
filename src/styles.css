@@ -316,7 +316,7 @@ h2 { margin-top: 5px; font: 600 18px var(--display); letter-spacing: -.025em; }
 .arena-main.has-match .board-panel { order: -1; }
 .arena-layout.series-layout { grid-template-columns: minmax(0, 1fr); }
 .series-layout .arena-main { display: flex; flex-direction: column; }
-.series-layout .series-panel { order: -1; }
+.series-layout.has-series .series-panel { order: -1; }
 .series-card-head { display: flex; justify-content: space-between; gap: 12px; }
 .series-card-head strong { color: #e9eee9; overflow-wrap: anywhere; }
 .series-card-head span { color: var(--lime); white-space: nowrap; }
@@ -355,3 +355,25 @@ h2 { margin-top: 5px; font: 600 18px var(--display); letter-spacing: -.025em; }
 @media (max-width: 650px) { .launch-strip { flex-direction: column; align-items: stretch; } .launch-strip .launch-button { width: 100%; } .hangman-match-summary { flex-direction: column; align-items: flex-start; } }
 .series-slots .link-button { margin-left: 8px; }
 @media (max-width: 650px) { .mode-nav button { flex-direction: column; align-items: flex-start; font-size: 12px; } .mode-nav button span { font-size: 8px; } }
+
+/* Battleship spectator board: only fired cells are shown until terminal reveal. */
+.battleship-arena { width: 100%; }
+.battleship-status { margin: 0 0 1rem; color: var(--accent, #c7e36a); font-weight: 700; }
+.battleship-boards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.battleship-board-panel { min-width: 0; padding: 1rem; border: 1px solid #34413b; border-radius: 12px; background: #111b17; }
+.battleship-board-head { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; margin-bottom: .75rem; }
+.battleship-board-head h3 { margin: 0; }
+.battleship-board-head span, .battleship-board-panel p, .battleship-legend { color: #b5c0b8; font-size: .82rem; }
+.battleship-grid { display: grid; grid-template-columns: 1.4rem repeat(10, minmax(0, 1fr)); gap: 2px; max-width: 520px; }
+.battleship-grid > b, .battleship-grid-row > b { display: grid; place-items: center; font-size: .68rem; color: #91a79b; }
+.battleship-grid-row { display: contents; }
+.battle-cell { aspect-ratio: 1; display: grid; place-items: center; background: #1d2d28; border: 1px solid #385047; border-radius: 2px; font-size: clamp(.75rem, 1.5vw, 1.3rem); font-weight: 800; color: #dcebdc; }
+.battle-cell.hit { background: #774832; border-color: #db8c61; }
+.battle-cell.miss { background: #294858; border-color: #6dabbc; }
+.battle-cell.ship { background: #53694b; border-color: #add17b; }
+.battleship-legend { display: flex; gap: 1rem; margin-top: .75rem; }
+.series-plan-setup { padding: .9rem 0; }
+.series-plan-setup p { margin: .5rem 0; color: #b5c0b8; }
+.series-counts { display: flex; flex-wrap: wrap; gap: .75rem; margin: .75rem 0; }
+.series-counts input { width: 4.5rem; }
+@media (max-width: 900px) { .battleship-boards { grid-template-columns: 1fr; } }

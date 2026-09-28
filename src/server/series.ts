@@ -1,14 +1,16 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import type { MatchController } from "../domain/MatchController.js";
 import { aggregateUsage } from "../domain/usage.js";
+import { defaultGames } from "../domain/defaultGames.js";
 import { projectRecord } from "../domain/projection.js";
-import type { MatchBudgets, MatchRecord, PlayerConfig, PublicSeries, PublicSeriesSlot, SeriesRecord, SeriesSlot } from "../shared.js";
+import { distinctExplicitModels, type MatchBudgets, type MatchRecord, type PlayerConfig, type PublicSeries, type PublicSeriesSlot, type SeriesPlan, type SeriesRecord, type SeriesSlot } from "../shared.js";
 
 const hexSeed = /^[0-9a-f]{64}$/;
 const terminal = new Set(["finished", "forfeit", "stopped", "error"]);
 
 export function makeSeries(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeconds: number, budgets: MatchBudgets, seed = randomBytes(32).toString("hex")): SeriesRecord {
   if (!hexSeed.test(seed) || agents.some((agent) => !agent.model.trim()) || !Number.isInteger(turnTimeoutSeconds) || turnTimeoutSeconds < 30 || turnTimeoutSeconds > 600) throw new Error("Series requires a valid seed, explicit models, and a 30–600 second turn timeout.");
+  if (!distinctExplicitModels(agents[0], agents[1])) throw new Error("Series comparison requires two different explicit model IDs.");
   if (![budgets.maxPlies, budgets.maxRequests, budgets.maxWallMinutes].every((value) => Number.isSafeInteger(value) && value > 0)
     || budgets.maxReportedCostUsd !== null && (!Number.isFinite(budgets.maxReportedCostUsd) || budgets.maxReportedCostUsd < 0)) throw new Error("Series budgets are invalid.");
   const now = new Date().toISOString();
@@ -23,6 +25,38 @@ export function makeSeries(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeco
   return { id: randomUUID(), version: "battle-series-1", createdAt: now, updatedAt: now, status: "ready", agents, settings: { turnTimeoutSeconds, budgets }, masterSeed: seed, slots };
 }
 
+export const standardSeriesPlan: SeriesPlan = { mode: "strict", games: [
+  { gameId: "chess", gameVersion: "standard-1", repetitions: 6, rolePolicy: "alternating", challengePolicy: "fixed" },
+  { gameId: "hangman", gameVersion: "independent-lanes-1", repetitions: 5, rolePolicy: "alternating", challengePolicy: "seeded" },
+  { gameId: "battleship", gameVersion: "battleship-standard-1", repetitions: 6, rolePolicy: "alternating", challengePolicy: "fixed" },
+] };
+
+export function makeSeriesV2(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeconds: number, budgets: MatchBudgets, plan: SeriesPlan = standardSeriesPlan, seed = randomBytes(32).toString("hex")): SeriesRecord {
+  if (!hexSeed.test(seed) || !distinctExplicitModels(agents[0], agents[1]) || !Number.isSafeInteger(turnTimeoutSeconds) || turnTimeoutSeconds < 30 || turnTimeoutSeconds > 600) throw new Error("Series requires a valid seed, distinct explicit models, and a 30–600 second turn timeout.");
+  if (![budgets.maxPlies, budgets.maxRequests, budgets.maxWallMinutes].every((value) => Number.isSafeInteger(value) && value > 0)
+    || budgets.maxReportedCostUsd !== null && (!Number.isFinite(budgets.maxReportedCostUsd) || budgets.maxReportedCostUsd < 0)) throw new Error("Series budgets are invalid.");
+  if (Object.keys(plan).sort().join() !== "games,mode" || !["strict", "exploratory"].includes(plan.mode) || !Array.isArray(plan.games) || plan.games.length < 1 || plan.games.length > 10
+    || new Set(plan.games.map((entry) => entry.gameId)).size !== plan.games.length) throw new Error("Series plan needs one to ten distinct registered games.");
+  const slots: SeriesSlot[] = [];
+  for (const entry of plan.games) {
+    const game = defaultGames.get(entry.gameId);
+    if (!(["challengePolicy,gameId,gameVersion,repetitions,rolePolicy", "challengePolicy,gameId,gameVersion,repetitions,rolePolicy,weight"].includes(Object.keys(entry).sort().join()))
+      || game.playerIds.length !== 2 || !game.series?.defaultSeriesEnabled || entry.gameVersion !== game.version || entry.rolePolicy !== "alternating"
+      || entry.challengePolicy !== (game.series.supportsSeededChallenges ? "seeded" : "fixed") || !Number.isSafeInteger(entry.repetitions) || entry.repetitions < 1 || entry.repetitions > 100
+      || entry.weight !== undefined && (!Number.isFinite(entry.weight) || entry.weight <= 0)) throw new Error(`Invalid series plan entry for ${entry.gameId}.`);
+    if (plan.mode === "strict" && game.series.seatSensitive && entry.repetitions % 2 !== 0) throw new Error(`${entry.gameId} needs an even repetition count in strict mode.`);
+    for (let index = 0; index < entry.repetitions; index++) {
+      const first = index % 2 as 0 | 1;
+      const challengeSeed = game.series.supportsSeededChallenges ? createHmac("sha256", Buffer.from(seed, "hex")).update(`battle-series-2:${entry.gameId}:${index}`).digest("hex") : undefined;
+      const challengeId = challengeSeed ? createHash("sha256").update(`${game.id}:${game.version}:${challengeSeed}`).digest("hex") : game.series.challengeId;
+      slots.push({ id: randomUUID(), ordinal: slots.length, gameId: game.id, challengeId, ...(challengeSeed ? { challengeSeed } : {}),
+        roles: { [game.playerIds[0]]: first, [game.playerIds[1]]: (1 - first) as 0 | 1 }, matchIds: [], skipped: false });
+    }
+  }
+  const now = new Date().toISOString();
+  return { id: randomUUID(), version: "battle-series-2", plan: structuredClone(plan), createdAt: now, updatedAt: now, status: "ready", agents, settings: { turnTimeoutSeconds, budgets }, masterSeed: seed, slots };
+}
+
 function linkedMatch(slot: SeriesSlot, matches: MatchRecord[]): MatchRecord | undefined {
   return matches.find((match) => match.id === slot.matchIds.at(-1));
 }
@@ -34,9 +68,10 @@ export function publicSeries(series: SeriesRecord, matches: MatchRecord[], inclu
     const status: PublicSeriesSlot["status"] = slot.skipped ? "skipped" : !match ? "pending" : match.status === "finished" || match.status === "forfeit" ? "scored" : terminal.has(match.status) ? "unscored" : "running";
     if (match) for (const [agentIndex] of series.agents.entries()) {
       const key = `${slot.gameId}:${agentIndex}`;
-      const row = aggregate[key] ?? { wins: 0, draws: 0, losses: 0, unscored: 0, requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, latencyMs: 0,
+      const row = aggregate[key] ?? { wins: 0, draws: 0, losses: 0, unscored: 0, scored: 0, points: 0, possiblePoints: 0, normalizedPerformance: null, roleCounts: {}, requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, latencyMs: 0,
         coverage: { inputTokens: { reported: 0, total: 0 }, outputTokens: { reported: 0, total: 0 }, costUsd: { reported: 0, total: 0 }, latencyMs: { reported: 0, total: 0 } } };
       const role = Object.entries(slot.roles).find(([, index]) => index === agentIndex)?.[0];
+      if (role) row.roleCounts[role] = (row.roleCounts[role] ?? 0) + 1;
       const pending = match.pendingTurn;
       const attempts = [...match.history.filter((turn) => turn.playerId === role).flatMap((turn) => turn.attempts), ...(pending && role && pending.playerId === role ? pending.attempts : [])];
       const usage = aggregateUsage(attempts);
@@ -50,24 +85,32 @@ export function publicSeries(series: SeriesRecord, matches: MatchRecord[], inclu
       row.coverage.latencyMs.reported += providerAttempts.filter((attempt) => attempt.latencyMs !== undefined).length;
       row.coverage.latencyMs.total += providerAttempts.length;
       if (status === "scored") {
+        row.scored++; row.possiblePoints++;
         if (match.result?.kind === "draw") row.draws++;
         else if (match.result?.winnerId === role) row.wins++;
         else row.losses++;
+        row.points = row.wins + row.draws * 0.5;
+        row.normalizedPerformance = row.points / row.possiblePoints;
       } else if (status === "unscored") row.unscored++;
       aggregate[key] = row;
     }
-    return { ...slot, ...(includeProvenance && series.status === "completed" && slot.challengeSeed ? { challengeSeed: slot.challengeSeed } : {}), status,
+    return { id: slot.id, ordinal: slot.ordinal, gameId: slot.gameId, challengeId: slot.challengeId, roles: structuredClone(slot.roles), matchIds: [...slot.matchIds], skipped: slot.skipped,
+      ...(includeProvenance && series.status === "completed" && slot.challengeSeed ? { challengeSeed: slot.challengeSeed } : {}), status,
       ...(status === "scored" && match?.result ? { result: match.result } : {}) };
   });
   for (const slot of slots) if (!includeProvenance || series.status !== "completed") delete slot.challengeSeed;
   for (const agentIndex of [0, 1]) {
-    const first = aggregate[`chess:${agentIndex}`];
-    const second = aggregate[`hangman:${agentIndex}`];
-    if (!first && !second) continue;
-    const rows = [first, second].filter((row): row is NonNullable<typeof row> => Boolean(row));
+    const gameRows = Object.entries(aggregate).filter(([key]) => key.endsWith(`:${agentIndex}`) && !key.startsWith("overall:"));
+    if (!gameRows.length) continue;
+    const rows = gameRows.map(([, row]) => row);
+    const scoredRows = gameRows.filter(([, row]) => row.normalizedPerformance !== null);
+    const weightOf = (key: string) => series.version === "battle-series-2" ? series.plan?.games.find((entry) => entry.gameId === key.split(":")[0])?.weight ?? 1 : 1;
     aggregate[`overall:${agentIndex}`] = {
       wins: rows.reduce((sum, row) => sum + row.wins, 0), draws: rows.reduce((sum, row) => sum + row.draws, 0),
       losses: rows.reduce((sum, row) => sum + row.losses, 0), unscored: rows.reduce((sum, row) => sum + row.unscored, 0),
+      scored: rows.reduce((sum, row) => sum + row.scored, 0), points: rows.reduce((sum, row) => sum + row.points, 0), possiblePoints: rows.reduce((sum, row) => sum + row.possiblePoints, 0),
+      normalizedPerformance: scoredRows.length ? scoredRows.reduce((sum, [key, row]) => sum + row.normalizedPerformance! * weightOf(key), 0) / scoredRows.reduce((sum, [key]) => sum + weightOf(key), 0) : null,
+      roleCounts: Object.fromEntries([...new Set(rows.flatMap((row) => Object.keys(row.roleCounts)))].map((role) => [role, rows.reduce((sum, row) => sum + (row.roleCounts[role] ?? 0), 0)])),
       requests: rows.reduce((sum, row) => sum + row.requests, 0), inputTokens: rows.reduce((sum, row) => sum + row.inputTokens, 0),
       outputTokens: rows.reduce((sum, row) => sum + row.outputTokens, 0), costUsd: rows.reduce((sum, row) => sum + row.costUsd, 0),
       latencyMs: rows.reduce((sum, row) => sum + row.latencyMs, 0),
@@ -76,13 +119,14 @@ export function publicSeries(series: SeriesRecord, matches: MatchRecord[], inclu
       }])) as PublicSeries["aggregate"][string]["coverage"],
     };
   }
-  return { id: series.id, version: series.version, createdAt: series.createdAt, updatedAt: series.updatedAt, status: series.status, agents: series.agents, settings: series.settings, slots, aggregate,
+  return { id: series.id, version: series.version, ...(series.plan ? { plan: series.plan } : {}), createdAt: series.createdAt, updatedAt: series.updatedAt, status: series.status, agents: series.agents, settings: series.settings, slots, aggregate,
     ...(series.error ? { error: series.error } : {}) };
 }
 
 export function seriesExport(series: SeriesRecord, matches: MatchRecord[]) {
   const includeProvenance = series.status === "completed";
-  return { schemaVersion: "battle-series-export-1", series: publicSeries(series, matches, includeProvenance),
+  return { schemaVersion: series.version === "battle-series-2" ? "battle-series-export-2" : "battle-series-export-1", series: publicSeries(series, matches, includeProvenance),
+    ...(includeProvenance && series.version === "battle-series-2" ? { reproducibility: { version: series.version, masterSeed: series.masterSeed, plan: series.plan, agents: series.agents, settings: series.settings } } : {}),
     matches: series.slots.flatMap((slot) => slot.matchIds.map((id) => matches.find((match) => match.id === id)).filter((match): match is MatchRecord => Boolean(match)).map((match) => {
       const detail = projectRecord(match, 500);
       const usage = Object.fromEntries(match.players.map((seat) => [seat.id, aggregateUsage([...match.history.filter((turn) => turn.playerId === seat.id).flatMap((turn) => turn.attempts), ...(match.pendingTurn?.playerId === seat.id ? match.pendingTurn.attempts : [])])]));
@@ -105,10 +149,10 @@ export class SeriesManager {
 
   list(): SeriesRecord[] { return [...this.series]; }
   get(id: string): SeriesRecord { const found = this.series.find((record) => record.id === id); if (!found) throw new Error("Series not found."); return found; }
-  create(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeconds: number, budgets: MatchBudgets): SeriesRecord {
+  create(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeconds: number, budgets: MatchBudgets, plan?: SeriesPlan, seed?: string): SeriesRecord {
     if (this.series.some((record) => ["ready", "running", "paused"].includes(record.status))) throw new Error("Finish or stop the current series first.");
     if (this.controller.active()) throw new Error("Stop or finish the current match before creating a series.");
-    const record = makeSeries(agents, turnTimeoutSeconds, budgets);
+    const record = makeSeriesV2(agents, turnTimeoutSeconds, budgets, plan, seed);
     this.series.unshift(record);
     try { this.save(); } catch (error) { this.series.shift(); throw error; }
     return record;

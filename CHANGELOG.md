@@ -5,6 +5,13 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+- Added `battleship-standard-1`: atomic fleet placement, alternating shots, deterministic terminal result, private player observations, masked public replay, terminal fleet reveal, and replay-validated persistence.
+- Added `battle-series-2` plans for registered two-player games, configurable repetitions, seat-aware strict mode, deterministic challenge schedules, normalized per-family/overall performance, completed reproducibility manifests, and UI rerun.
+- Kept `battle-series-1` records and exports readable without destructive conversion; store version 6 migrates with a backup.
+- Preserved real provider telemetry on strict model/tool qualification failure; conservatively charges crash-interrupted provider reservations to player time budgets.
+- Rejected Hangman mirror comparisons with blank or identical requested model IDs; older and unresolved-identity results remain visible as unverified history.
+- Added Battleship and series setup UI, benchmark-scale storage measurements, source audit, notices, and rules documentation.
+
 - Added 5/10/30/60-minute and custom active-play time controls for new matches, with durable pause/restart accounting, an in-flight cutoff, and scoreboard separation by time control. Older records retain their prior creation-age limit.
 - F1.1: accepted chess actions now commit canonical state, telemetry and event evidence together; retry exhaustion commits the forfeit with its invalid-attempt evidence. Serialized chess snapshots are detached, and presentation events no longer force a full-store write. Crash-boundary reload regressions pass without provider calls.
 - Focused storage durability and recovery repair: transitions commit before

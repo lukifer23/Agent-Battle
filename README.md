@@ -2,7 +2,7 @@
 
 ## Current capabilities
 
-Agent Battle supports authoritative Chess and independent-lane Hangman, plus a ten-slot battle series with five games of each. A series records explicit agents, model and reasoning settings, a fixed role schedule, five reproducible private Hangman challenges, linked raw matches, per-game results, and usage coverage. It pauses on unscored failures and requires an explicit retry or skip. Benchmark model and tool qualification is stricter than casual play; Codex CLI remains unqualified because its read-only tool access is not equivalent to a no-tools invocation.
+Agent Battle supports authoritative Chess, independent-lane Hangman, and hidden-information Battleship. Battle series v2 schedules any registered supported two-player game from a versioned plan, with configurable repetitions, deterministic role rotation, reproducible challenges, raw results, model provenance, and usage coverage. Existing `battle-series-1` records retain their original ten-slot layout. A series pauses on unscored failures and requires an explicit retry or skip. Strict model/tool qualification is stronger than casual play; Codex CLI remains unqualified for scored series because its read-only tool access is not equivalent to a no-tools invocation.
 
 Durable events carry a monotonically increasing match revision and are published only after the corresponding store commit. An accepted action commits its game state, turn history, and move/completion evidence together; a terminal action includes its result in that commit. Retry exhaustion commits the invalid turn and forfeit result together. Match creation, start/resume, pending-turn creation, retry state, pause, stop, and errors are also durable boundaries. Presentation events (`agent.ready`, `agent.thinking`, `agent.started`, `agent.response`, `move.proposed`, `turn.started`, and `agent.timeout`) stream live without a store write or durable revision. They are not replayed after reconnect; the canonical snapshot and durable events restore match state. Invocation reservations are committed before provider spawn; each retry is checked against the remaining budgets.
 
@@ -17,7 +17,7 @@ npm ci
 npm run dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Choose **Chess** or **Hangman** in the top navigation. The **Start Chess Match** or **Start Hangman Match** button sits at the top of setup; choose an agent CLI for each player, optionally enter model and reasoning settings, then start. Time and resource limits are under the expandable settings row. Leave the model blank to use that CLI's configured default. If another match or series is active, the start area explains the blocker and links to that record. Agent Battle does not read or store CLI credentials. Model requests begin only after you start a match.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Choose **Chess**, **Hangman**, **Battleship**, or **Battle series** in the top navigation. The start action is at the top of setup; choose an agent CLI and model for each player, then start. Hangman comparisons and scored series require two different explicit model IDs. Time and resource limits are under the expandable settings row. Casual Chess and Battleship can use a CLI default model, but that does not establish verified model identity. If another match or series is active, the start area explains the blocker and links to that record. Agent Battle does not read or store CLI credentials. Model requests begin only after you start a match.
 
 For a single production-style local server:
 
@@ -53,7 +53,7 @@ The development UI runs on `127.0.0.1:5173` and proxies `/api` to the API port. 
 - Pause, resume, stop, process timeouts, output-size limits and saved match history. A ready, paused or interrupted match can be stopped without launching a request.
 - Per-turn records include player/model, FEN, legal-action count, response action, validity, latency, retries, process output excerpts, tool-call count and token/cost usage when the CLI reports it.
 
-Chess, Hangman, and battle series are supported. Human players, Stockfish analysis, and remote agents are not implemented.
+Chess, Hangman, Battleship, and battle series are supported. Human players, Stockfish analysis, and remote agents are not implemented.
 
 ## Billing, limits and provenance
 
@@ -71,9 +71,11 @@ Match history is kept in full rather than silently pruned. `GET /api/matches` re
 
 ## Battle series
 
-Open **Battle series** in the top navigation, enter explicit model IDs for both competitors, and choose **Run 10-trial series**. The browser schedules five standard-start Chess games and five Hangman matches with private seeded words. Roles alternate 3–2 in each group. The series runs one match at a time, pauses on a provider, budget, storage, or qualification failure, and keeps every attempt. Use **Retry Slot** to repeat the same challenge, **Skip Slot** to leave it unscored, or **Resume** for a paused match. The series JSON export contains projected match records and per-metric usage coverage; future challenge seeds are withheld until the series completes.
+Open **Battle series**, enter two different explicit model IDs, and choose Quick (2 each; exploratory), Standard (6 Chess, 5 Hangman, 6 Battleship), or Custom game counts. Strict mode requires even repetitions for seat-sensitive games; an odd exploratory run records its 3–2 or equivalent seat split. Roles alternate deterministically. Hangman words are matched inside each two-lane match and derived from a private series seed. The series runs one match at a time, pauses on provider, budget, storage, or qualification failure, and keeps every attempt. **Retry Slot** repeats the same challenge, **Skip Slot** leaves it unscored, and **Resume** continues a paused match.
 
-The API offers `GET /api/series`, `GET /api/series/:id`, `GET /api/series/:id/export`, `POST /api/series`, and `POST /api/series/:id/{start,pause,stop,retry,skip}`. Requested model IDs are required. Exact resolved identity and tool restrictions must be verified during a trial before its actions can score. Fixture tests exercise the full ten-slot lifecycle; they do not prove any live provider model or billing claim.
+Per-game points are win 1, draw ½, loss 0. Normalized performance is points divided by scored possible points. Overall performance is the mean of scored game-family normalized values, using configured positive weights if present. Raw W/D/L, unscored counts, role distribution, requests, latency, token/cost reporting coverage, and component values remain visible. This is not an intelligence score. A completed v2 export includes the root seed, plan, agents and settings as a reproducibility manifest; **Rerun exact configuration** starts an identical schedule. The root seed and future Hangman challenge seeds stay out of public state and exports until the series completes. Model behavior may still vary between runs.
+
+The API offers `GET /api/series`, `GET /api/series/:id`, `GET /api/series/:id/export`, `POST /api/series`, and `POST /api/series/:id/{start,pause,stop,retry,skip}`. Creation accepts `plan` and optional 64-character hex `masterSeed`; a random seed is the default. Exact resolved identity and tool restrictions must be verified during a trial before its actions can score. Fixture tests exercise v1 and v2 lifecycles; they do not prove any live provider model or billing claim.
 
 ## Checks
 
@@ -92,9 +94,11 @@ The adapter/controller tests use fake local CLI executables and do not make paid
 - [Architecture](docs/ARCHITECTURE.md): module boundaries, state ownership, persistence and event flow.
 - [Agent protocol](docs/AGENT_PROTOCOL.md): observation and action contract, retry behavior and CLI invocation details.
 - [Handoff](docs/HANDOFF.md): what has been implemented and how another agent should continue.
+- [Battleship rules](docs/BATTLESHIP.md): actions, privacy, replay, and metrics.
+- [Game sources](docs/GAME_SOURCES.md): reviewed repositories, commits, licenses, and attribution decisions.
 
 ## Hangman
 
-Select **Hangman** in the top navigation, choose the two agents, and use **Start Hangman Match** at the top of setup. Each agent gets an independent lane with the same private word and sees only its own lane. The spectator sees both masked lanes; solved words remain sealed until both lanes finish. The sidebar shows live lane status, misses, and accepted actions without declaring a winner early. Each lane gets seven misses. The result favors non-forfeit, solved lanes, then fewer misses and accepted actions; failed lanes compare distinct correct letters. The winner and reason appear above the lanes when the match ends. Completed records include the result, replay, request telemetry, game-specific recent scoreboard, and safe JSON export. See [Hangman rules and privacy](docs/HANGMAN.md).
+Select **Hangman** in the top navigation, choose two different explicit model IDs, and use **Start Hangman Match** at the top of setup. Each agent gets an independent lane with the same private word and sees only its own lane. The spectator sees both masked lanes; solved words remain sealed until both lanes finish. The sidebar shows live lane status, misses, and accepted actions without declaring a winner early. Each lane gets seven misses. The result favors non-forfeit, solved lanes, then fewer misses and accepted actions; failed lanes compare distinct correct letters. The winner and reason appear above the lanes when the match ends. Completed records include the result, replay, request telemetry, game-specific recent scoreboard, and safe JSON export. A saved game result whose resolved model identities are missing or do not match both distinct requests is marked **unverified** and excluded from comparative standings. See [Hangman rules and privacy](docs/HANGMAN.md).
 
-Store version 5 retains legacy Chess records and time controls and adds series manifests. Migration backs up the original store before rewriting; unknown future versions refuse startup. Private seeds, canonical state, provider excerpts, and recovery candidates stay in local data files. Public match-list summaries contain no game state. Request identities are persisted before invocation, and budgets are rechecked before every request, including corrections.
+Store version 6 retains legacy Chess, Hangman and `battle-series-1` records while adding v2 plan records and Battleship. Migration backs up the original store before rewriting; unknown future versions refuse startup. Private seeds, canonical state, provider excerpts, and recovery candidates stay in local data files. Public match-list summaries contain no game state. Request identities are persisted before invocation, and budgets are rechecked before every request, including corrections.

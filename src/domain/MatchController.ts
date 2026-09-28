@@ -47,7 +47,7 @@ export interface CreateMatchRequest {
 }
 
 const DEFAULT_BUDGETS: MatchBudgets = { maxPlies: 150, maxRequests: 200, maxWallMinutes: 30, maxReportedCostUsd: null };
-const ADAPTER_VERSION = "agent-battle/adapter-v2";
+const ADAPTER_VERSION = "agent-battle/adapter-v3";
 
 function clampBudget(value: unknown, fallback: number, maximum: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
@@ -90,7 +90,7 @@ export class MatchController {
         }
         if (match.status === "running") {
           for (const attempt of match.pendingTurn?.attempts ?? []) {
-            if (attempt.status === "started") { attempt.status = "interrupted"; attempt.phase = "controller"; }
+            if (attempt.status === "started") { attempt.status = "interrupted"; attempt.accountedMs = Math.max(0, Date.parse(attempt.deadlineAt ?? new Date().toISOString()) - Date.parse(attempt.startedAt)); attempt.phase = "controller"; }
           }
           endMatchTime(match);
           match.status = "interrupted";
@@ -534,7 +534,6 @@ export class MatchController {
 
           if (match.series && reply && (!reply.resolvedModel || reply.resolvedModel !== seat.agent.model || reply.toolCalls !== 0)) {
             failure = new AgentExecutionError(`Series model or tool qualification failed for ${seat.label}: requested ${seat.agent.model}, reported ${reply.resolvedModel ?? "unknown"}, tool calls ${reply.toolCalls ?? "unknown"}.`);
-            reply = undefined;
           } else if (reply?.resolvedModel) seat.agent.resolvedModel = reply.resolvedModel;
 
           if (running.control !== "continue") {
@@ -553,7 +552,9 @@ export class MatchController {
           }
 
           if (failure instanceof AgentExecutionError && !failure.timedOut) {
-            finishAttempt(this.attempt(attemptNumber, startedAt, "error", { phase: "provider", error: failure.message, responseExcerpt: failure.responseExcerpt, stderrExcerpt: failure.stderrExcerpt, latencyMs: failure.latencyMs }));
+            finishAttempt(this.attempt(attemptNumber, startedAt, "error", { phase: reply ? "qualification" : "provider", error: failure.message,
+              responseExcerpt: reply?.responseExcerpt ?? failure.responseExcerpt, stderrExcerpt: reply?.stderrExcerpt ?? failure.stderrExcerpt,
+              latencyMs: reply?.latencyMs ?? failure.latencyMs, ...(reply ? { toolCalls: reply.toolCalls, usage: reply.usage, resolvedModel: reply.resolvedModel } : {}) }));
             const record = this.turnRecord(match, game, seat, turnId, observation, attempts, false);
             match.history.push(record);
             match.pendingTurn = undefined;
@@ -748,7 +749,7 @@ export class MatchController {
     if (!maximum) return Number.POSITIVE_INFINITY;
     const used = [...match.history, ...(match.pendingTurn ? [match.pendingTurn] : [])]
       .filter((turn) => turn.playerId === playerId).flatMap((turn) => turn.attempts)
-      .reduce((total, attempt) => total + (attempt.latencyMs ?? 0), 0);
+      .reduce((total, attempt) => total + (attempt.accountedMs ?? attempt.latencyMs ?? 0), 0);
     return maximum * 60_000 - used;
   }
 
