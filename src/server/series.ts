@@ -155,6 +155,11 @@ export class SeriesManager {
 
   list(): SeriesRecord[] { return [...this.series]; }
   get(id: string): SeriesRecord { const found = this.series.find((record) => record.id === id); if (!found) throw new Error("Series not found."); return found; }
+  private checkpoint(record: SeriesRecord, update: () => void): void {
+    const previous = structuredClone(record);
+    update();
+    try { this.save(); } catch (error) { Object.assign(record, previous); throw error; }
+  }
   create(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeconds: number, budgets: MatchBudgets, plan?: SeriesPlan, seed?: string): SeriesRecord {
     if (this.series.some((record) => ["ready", "running", "paused"].includes(record.status))) throw new Error("Finish or stop the current series first.");
     if (this.controller.active()) throw new Error("Stop or finish the current match before creating a series.");
@@ -166,22 +171,20 @@ export class SeriesManager {
   async start(id: string): Promise<void> {
     const record = this.get(id);
     if (!["ready", "paused"].includes(record.status)) throw new Error("Only a ready or paused series can start.");
-    const previous = structuredClone(record);
-    record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString();
-    try { this.save(); } catch (error) { Object.assign(record, previous); throw error; }
+    this.checkpoint(record, () => { record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString(); });
     void this.pump(record);
   }
   async pause(id: string): Promise<void> {
     const record = this.get(id);
     if (record.status !== "running") throw new Error("Series is not running.");
-    record.status = "paused"; record.updatedAt = new Date().toISOString(); this.save();
+    this.checkpoint(record, () => { record.status = "paused"; record.updatedAt = new Date().toISOString(); });
     const match = this.controller.active();
     if (match?.series?.id === id && match.status === "running") await this.controller.pause(match.id);
   }
   async stop(id: string): Promise<void> {
     const record = this.get(id);
     if (record.status === "completed") throw new Error("Completed series cannot be stopped.");
-    record.status = "stopped"; record.updatedAt = new Date().toISOString(); this.save();
+    this.checkpoint(record, () => { record.status = "stopped"; record.updatedAt = new Date().toISOString(); });
     const match = this.controller.active();
     if (match?.series?.id === id) await this.controller.stop(match.id);
   }
@@ -190,8 +193,9 @@ export class SeriesManager {
     if (record.status !== "paused") throw new Error("Pause the series before retrying.");
     const slot = record.slots.find((candidate) => !candidate.skipped && linkedMatch(candidate, this.controller.list())?.status !== "finished" && linkedMatch(candidate, this.controller.list())?.status !== "forfeit");
     if (!slot || !linkedMatch(slot, this.controller.list()) || !terminal.has(linkedMatch(slot, this.controller.list())!.status)) throw new Error("Current slot has no failed match to retry.");
+    this.checkpoint(record, () => { record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString(); });
     this.retrySlots.add(slot.id);
-    record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString(); this.save(); void this.pump(record);
+    void this.pump(record);
   }
   skip(id: string): void {
     const record = this.get(id);
@@ -200,7 +204,8 @@ export class SeriesManager {
     if (!slot) throw new Error("No slot to skip.");
     const match = linkedMatch(slot, this.controller.list());
     if (match && !terminal.has(match.status)) throw new Error("Stop the active match before skipping.");
-    slot.skipped = true; record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString(); this.save(); void this.pump(record);
+    this.checkpoint(record, () => { slot.skipped = true; record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString(); });
+    void this.pump(record);
   }
   onMatchChange(match: MatchRecord): void {
     if (!match.series || !terminal.has(match.status)) return;
