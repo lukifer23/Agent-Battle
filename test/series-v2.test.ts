@@ -48,6 +48,47 @@ test("v2 accepts arbitrary registered game plans, records seat imbalance, and re
   assert.deepEqual(makeSeriesV2(manifest.agents, manifest.settings.turnTimeoutSeconds, manifest.settings.budgets, manifest.plan!, manifest.masterSeed).slots.map((slot) => slot.challengeId), first.slots.map((slot) => slot.challengeId));
 });
 
+test("series totals retain requests and failed evidence from earlier tries of a scored slot", () => {
+  const oneGame: SeriesPlan = { mode: "exploratory", games: [{ gameId: "chess", gameVersion: "standard-1", repetitions: 1, rolePolicy: "alternating", challengePolicy: "fixed" }] };
+  const series = makeSeriesV2([...agents], 120, budgets, oneGame, "ac".repeat(32));
+  series.slots[0].matchIds = ["failed", "scored"];
+  const attempt = (costUsd: number) => ({ attempt: 1, startedAt: "2026-01-01T00:00:00.000Z", status: "valid", latencyMs: 10,
+    toolCalls: 0, usage: { inputTokens: 10, outputTokens: 5, costUsd, coverage: "partial" } });
+  const failed = { id: "failed", status: "error", history: [{ playerId: "white", attempts: [attempt(0.3)] }] } as unknown as MatchRecord;
+  const scored = { id: "scored", status: "finished", result: { kind: "win", winnerId: "white", notation: "1-0", reason: "checkmate" },
+    history: [{ playerId: "white", attempts: [attempt(0.2)] }] } as unknown as MatchRecord;
+  const row = publicSeries(series, [failed, scored]).aggregate["chess:0"];
+  assert.equal(row.scored, 1);
+  assert.equal(row.unscored, 1);
+  assert.equal(row.requests, 2);
+  assert.equal(row.latencyMs, 20);
+  assert.equal(row.inputTokens, 20);
+  assert.equal(row.costUsd, 0.5);
+  assert.deepEqual(row.coverage.costUsd, { reported: 2, total: 2 });
+});
+
+test("failed series checkpoints leave start, pause, stop, retry and skip state unchanged", async () => {
+  const oneGame: SeriesPlan = { mode: "exploratory", games: [{ gameId: "chess", gameVersion: "standard-1", repetitions: 1, rolePolicy: "alternating", challengePolicy: "fixed" }] };
+  const series = makeSeriesV2([...agents], 120, budgets, oneGame, "ad".repeat(32));
+  series.slots[0].matchIds = ["failed"];
+  const failed = { id: "failed", status: "error", series: { id: series.id, slotId: series.slots[0].id, attempt: 1 } } as unknown as MatchRecord;
+  const controller = { list: () => [failed], active: () => undefined } as unknown as MatchController;
+  const manager = new SeriesManager([series], controller, () => { throw new Error("disk full"); });
+  await assert.rejects(() => manager.start(series.id), /disk full/);
+  assert.equal(series.status, "ready");
+  series.status = "running";
+  await assert.rejects(() => manager.pause(series.id), /disk full/);
+  assert.equal(series.status, "running");
+  await assert.rejects(() => manager.stop(series.id), /disk full/);
+  assert.equal(series.status, "running");
+  series.status = "paused";
+  assert.throws(() => manager.retry(series.id), /disk full/);
+  assert.equal(series.status, "paused");
+  assert.throws(() => manager.skip(series.id), /disk full/);
+  assert.equal(series.status, "paused");
+  assert.equal(series.slots[0].skipped, false);
+});
+
 test("store version 5 backs up and loads historical battle-series-1 without rewriting its plan", () => {
   const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-v1-migration-"));
   try {

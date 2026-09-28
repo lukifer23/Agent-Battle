@@ -5,6 +5,13 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+- Rolled back in-memory battle-series start, pause, stop, retry, and skip changes when their checkpoint fails; a failed retry no longer leaves a hidden retry marker.
+- Stopped treating a terminal game with no authoritative derived result as a draw; the controller now records an unscored error.
+- Fixed event pagination after event 500; the endpoint now projects the requested historical slice directly.
+- Included every retried series attempt in request, latency, usage, cost, and unscored totals while keeping the final scored result attached to its slot.
+- Raised fresh-match action and request defaults to 250 and 500: a legal Battleship contest can require 201 accepted actions before its terminal result.
+- Applied verified distinct-model requirements to Chess and Battleship comparative standings as well as Hangman; casual game results remain in history.
+
 - Added `battleship-standard-1`: atomic fleet placement, alternating shots, deterministic terminal result, private player observations, masked public replay, terminal fleet reveal, and replay-validated persistence.
 - Added `battle-series-2` plans for registered two-player games, configurable repetitions, seat-aware strict mode, deterministic challenge schedules, normalized per-family/overall performance, completed reproducibility manifests, and UI rerun.
 - Kept `battle-series-1` records and exports readable without destructive conversion; store version 6 migrates with a backup.

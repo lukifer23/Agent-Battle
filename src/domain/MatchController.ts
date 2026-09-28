@@ -47,7 +47,9 @@ export interface CreateMatchRequest {
   series?: { id: string; slotId: string; attempt: number };
 }
 
-const DEFAULT_BUDGETS: MatchBudgets = { maxPlies: 150, maxRequests: 200, maxWallMinutes: 30, maxReportedCostUsd: null };
+// Battleship can require 201 accepted actions (two placements plus 199 shots).
+// Leave room for one correction per action in the default request budget.
+const DEFAULT_BUDGETS: MatchBudgets = { maxPlies: 250, maxRequests: 500, maxWallMinutes: 30, maxReportedCostUsd: null };
 const ADAPTER_VERSION = "agent-battle/adapter-v4";
 
 function clampBudget(value: unknown, fallback: number, maximum: number): number {
@@ -465,8 +467,7 @@ export class MatchController {
       }
       while (running.control === "continue") {
         if (game.isTerminal(state)) {
-          const result = game.result(state);
-          this.finish(match, game, state, result ?? { kind: "draw", notation: "1/2-1/2", reason: "Game ended without a result." });
+          this.finish(match, game, state, this.requiredTerminalResult(game, state));
           return;
         }
         const budgetReason = this.budgetStopReason(match, game, state);
@@ -671,10 +672,7 @@ export class MatchController {
         }
 
         const nextState = game.applyAction(game.cloneState(state), playerId, selectedAction);
-        match.pendingTurn = undefined;
-        const terminalResult = game.isTerminal(nextState)
-          ? game.result(nextState) ?? { kind: "draw" as const, notation: "1/2-1/2", reason: "Game ended without a result." }
-          : undefined;
+        const terminalResult = game.isTerminal(nextState) ? this.requiredTerminalResult(game, nextState) : undefined;
         const afterSnapshot = game.serialize(nextState, terminalResult);
         const record = this.turnRecord(match, game, seat, turnId, observation, attempts, true);
         record.action = selectedAction;
@@ -684,6 +682,7 @@ export class MatchController {
         record.latencyMs = attempts.reduce((total, attempt) => total + (attempt.latencyMs ?? 0), 0);
         record.retryCount = Math.max(0, attempts.length - 1);
         match.history.push(record);
+        match.pendingTurn = undefined;
         match.currentPlayerId = game.currentPlayer(nextState) ?? undefined;
         if (terminalResult) {
           match.result = terminalResult;
@@ -874,6 +873,12 @@ export class MatchController {
     match.gameState = game.serialize(state);
     match.updatedAt = new Date().toISOString();
     this.commit(match);
+  }
+
+  private requiredTerminalResult(game: GameDefinition<unknown>, state: unknown): MatchResult {
+    const result = game.result(state);
+    if (!result) throw new Error(`${game.id} reached a terminal state without an authoritative result.`);
+    return result;
   }
 
   private finish(match: MatchRecord, game: GameDefinition<unknown>, state: unknown, result: MatchResult, status: "finished" | "forfeit" = "finished"): void {
