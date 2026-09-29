@@ -6,8 +6,10 @@ import { dirname, join } from "node:path";
 import type { MatchRecord, SeriesRecord } from "../shared.js";
 import { defaultGames } from "../domain/defaultGames.js";
 import { validateMatchRecord, validateSeriesRecord, validateStoreEnvelope } from "./schema.js";
+import { JSON_STORE_VERSION } from "../version.js";
 
-export const STORE_VERSION = 7;
+/** Version written into the legacy JSON envelope. Kept only as an import/backup source. */
+export const STORE_VERSION = JSON_STORE_VERSION;
 
 export interface LoadResult {
   matches: MatchRecord[];

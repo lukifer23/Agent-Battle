@@ -741,3 +741,29 @@ test("restart charges an interrupted provider reservation to its player's active
   assert.equal(stopped.result, undefined);
   assert.match(stopped.error ?? "", /player1|white|active provider time/i);
 });
+
+test("a stop issued before a pause is never downgraded by the later pause", async () => {
+  // The provider never resolves, so both controls race the live run loop.
+  const { controller } = harness(async () => new Promise<GameAction>(() => undefined));
+  const match = await create(controller);
+  await controller.start(match.id);
+  const stopFirst = controller.stop(match.id);
+  const pauseSecond = controller.pause(match.id);
+  await Promise.allSettled([stopFirst, pauseSecond]);
+  assert.equal(controller.get(match.id)!.status, "stopped");
+});
+
+test("pause and stop resolve only after the run loop has actually stopped", async () => {
+  let acting = false;
+  const { controller } = harness(async () => { acting = true; return new Promise<GameAction>(() => undefined); });
+  const match = await create(controller);
+  await controller.start(match.id);
+  while (!acting) await new Promise((resolve) => setTimeout(resolve, 2));
+  await controller.pause(match.id);
+  // Once pause resolves the run must be detached, so a second start is accepted.
+  assert.equal(controller.get(match.id)!.status, "paused");
+  const resumed = harness(async () => resign, [controller.get(match.id)!]);
+  await resumed.controller.start(match.id);
+  const done = await waitFor(resumed.controller, match.id, ["finished"]);
+  assert.equal(done.result?.winnerId, "black");
+});

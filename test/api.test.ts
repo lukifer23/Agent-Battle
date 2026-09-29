@@ -6,6 +6,7 @@ import { request as httpRequest } from "node:http";
 import os from "node:os";
 import { join } from "node:path";
 import { ChessGame } from "../src/games/chess/ChessGame.js";
+import { openDatabase } from "../src/server/persistence/db.js";
 import type { MatchRecord } from "../src/shared.js";
 
 const projectRoot = process.cwd();
@@ -62,6 +63,20 @@ function stopServer(child: ChildProcess): Promise<void> {
     child.once("exit", () => { clearTimeout(timer); resolve(); });
     child.kill("SIGTERM");
   });
+}
+
+/**
+ * The server now persists to SQLite. Tests inspect private state through the
+ * durable store rather than the retired JSON archive. Opening the WAL database
+ * read-only alongside the running server is safe for concurrent readers.
+ */
+function readDurableStore(folder: string): { matches: Array<Record<string, unknown>>; series: Array<Record<string, unknown>> } {
+  const db = openDatabase(join(folder, "agent-battle.sqlite"));
+  const read = (table: "matches" | "series") =>
+    (db.prepare(`SELECT record_json FROM ${table} ORDER BY created_at DESC`).all() as Array<{ record_json: string }>).map((row) => JSON.parse(row.record_json) as Record<string, unknown>);
+  const result = { matches: read("matches"), series: read("series") };
+  db.close();
+  return result;
 }
 
 test("the API exposes a unified snapshot and rejects untrusted hosts and origins", async () => {
@@ -223,8 +238,8 @@ test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess c
     let word = "";
     for (let candidate = 0; candidate < 50; candidate++) {
       created = await request("/api/matches", { gameId: "hangman", gameVersion: "independent-lanes-1", players: { player1: player, player2: secondPlayer }, turnTimeoutSeconds: 30 });
-      const privateStore = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
-      word = privateStore.matches[0].gameState.word;
+      const privateStore = readDurableStore(folder);
+      word = (privateStore.matches[0].gameState as { word: string }).word;
       // A distinctive canary avoids matching ordinary JSON keys such as status.
       if (word.length >= 9 && !JSON.stringify(created).includes(word)) break;
       await request(`/api/matches/${created.match.id}/stop`, {});
@@ -266,10 +281,9 @@ test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess c
     for (const event of historicalEvents) if (event.payload?.publicState && !event.payload.publicState.terminal) {
       assert.equal(JSON.stringify(event).includes(word), false, "pre-terminal event was changed by final reveal");
     }
-    const raw = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
-    assert.equal(raw.matches[0].gameState.word, word);
-    assert.equal(raw.version, 7);
-    for (const event of raw.matches[0].events) {
+    const raw = readDurableStore(folder);
+    assert.equal((raw.matches[0].gameState as { word: string }).word, word);
+    for (const event of raw.matches[0].events as Array<{ payload?: { publicState?: { terminal?: boolean } } }>) {
       if (JSON.stringify(event).includes(word)) assert.equal(event.payload?.publicState?.terminal, true);
     }
     const list = await request("/api/matches");
@@ -297,8 +311,8 @@ test("series API persists private challenges and blocks unqualified Codex scorin
     const created = await request("/api/series", { agents: [{ provider: "codex", model: "fixture-a" }, { provider: "codex", model: "fixture-b" }] });
     assert.equal(created.status, 201);
     const id = created.value.series.id as string;
-    const store = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
-    const seed = store.series[0].slots.find((slot: { gameId: string }) => slot.gameId === "hangman").challengeSeed as string;
+    const store = readDurableStore(folder);
+    const seed = (store.series[0].slots as Array<{ gameId: string; challengeSeed: string }>).find((slot) => slot.gameId === "hangman")!.challengeSeed;
     assert.equal(JSON.stringify(created.value).includes(seed), false);
     assert.equal((await request(`/api/series/${id}/start`, {})).status, 200);
     let detail;
@@ -354,8 +368,8 @@ test("Battleship HTTP, SSE, events, attempts and replay hide fleets until termin
     assert.equal(JSON.stringify(finished.match.history).includes(hiddenPlacement), false);
     const events = (await request(`/api/matches/${id}/events`)).events as Array<{ payload?: { publicState?: { terminal?: boolean } } }>;
     for (const event of events) if (event.payload?.publicState && !event.payload.publicState.terminal) assert.equal(JSON.stringify(event).includes("placements"), false);
-    const privateStore = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
-    assert.equal(privateStore.matches[0].gameState.fleets.player1[0].start, "a1");
+    const privateStore = readDurableStore(folder);
+    assert.equal((privateStore.matches[0].gameState as { fleets: { player1: Array<{ start: string }> } }).fleets.player1[0].start, "a1");
   } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
 });
 
@@ -378,7 +392,7 @@ test("new Hangman uses distinct CLI subprocesses and shares opponent effects thr
     const { match } = await request("/api/matches", { gameId: "hangman", players: { player1: { provider: "codex", model: "fixture-a" }, player2: { provider: "claude", model: "fixture-b" } }, turnTimeoutSeconds: 30 });
     assert.equal(match.gameVersion, "shared-board-2");
     assert.deepEqual(match.players.map((p: { agent: { reasoning: string } }) => p.agent.reasoning), ["low", "none"]);
-    const word = JSON.parse(readFileSync(join(folder,"matches.json"),"utf8")).matches[0].gameState.word as string;
+    const word = (readDurableStore(folder).matches[0].gameState as { word: string }).word;
     writeFileSync(join(bin,"fixture-config.json"),JSON.stringify({word,delayMs:200}));
     await request(`/api/matches/${match.id}/start`, {});
     let done;
@@ -421,16 +435,16 @@ test("research API registers a frozen pilot without invoking providers and keeps
     assert.equal(series.status, "ready");
     assert.equal(series.slots.length, 144);
     assert.equal(series.researchPlan.comparison.kind, "same-model-control");
-    const raw = JSON.parse(readFileSync(join(folder, "matches.json"), "utf8"));
+    const raw = readDurableStore(folder);
     assert.equal(raw.matches.length, 0);
-    assert.equal(created.body.includes(raw.series[0].masterSeed), false);
+    assert.equal(created.body.includes(raw.series[0].masterSeed as string), false);
     const analysis = await probe(port, { path: `/api/series/${series.id}/analysis` });
     assert.equal(analysis.status, 200);
     const parsed = JSON.parse(analysis.body);
     assert.equal(parsed.primary.estimate, null);
     assert.equal(parsed.primary.missingBlocks, 24);
     const exported = await probe(port, { path: `/api/series/${series.id}/export` });
-    assert.equal(exported.body.includes(raw.series[0].masterSeed), false);
+    assert.equal(exported.body.includes(raw.series[0].masterSeed as string), false);
     assert.equal(JSON.parse(exported.body).schemaVersion, "battle-series-export-3");
   } finally { await stopServer(child); rmSync(folder, { recursive: true, force: true }); }
 });

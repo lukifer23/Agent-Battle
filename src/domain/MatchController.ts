@@ -8,6 +8,7 @@ import { buildSnapshot } from "./snapshot.js";
 import { projectTurn, projectEvent } from "./projection.js";
 import { matchReportedCost, matchRequests } from "./usage.js";
 import { beginMatchTime, endMatchTime, remainingMatchMs } from "./matchTime.js";
+import { ADAPTER_VERSION, ACTION_PROTOCOL_VERSION, OBSERVATION_PROTOCOL_VERSION } from "../version.js";
 import type {
   AgentAttempt,
   AppState,
@@ -51,7 +52,6 @@ export interface CreateMatchRequest {
 // Battleship can require 201 accepted actions (two placements plus 199 shots).
 // Leave room for one correction per action in the default request budget.
 const DEFAULT_BUDGETS: MatchBudgets = { maxPlies: 250, maxRequests: 500, maxWallMinutes: 30, maxReportedCostUsd: null };
-const ADAPTER_VERSION = "agent-battle/adapter-v6";
 
 function clampBudget(value: unknown, fallback: number, maximum: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
@@ -221,7 +221,7 @@ export class MatchController {
     for (const provider of detected) if (provider.version) cliVersions[provider.provider] = provider.version;
     const environment: MatchEnvironment = {
       adapterVersion: ADAPTER_VERSION,
-      promptVersion: "observation-contract-v3",
+      promptVersion: OBSERVATION_PROTOCOL_VERSION,
       toolSchemaVersion: game.actionSchemaVersion,
       cliVersions,
     };
@@ -229,7 +229,7 @@ export class MatchController {
       id: randomUUID(),
       gameId: game.id,
       gameVersion: game.version,
-      protocolVersion: "game-action-v1",
+      protocolVersion: ACTION_PROTOCOL_VERSION,
       createdAt: now,
       updatedAt: now,
       status: "ready",
@@ -276,7 +276,12 @@ export class MatchController {
     if (!this.runtime.has(id)) this.runtime.set(id, game.deserialize(match.gameState));
     const generation = (match.runGeneration ?? 0) + 1;
     match.runGeneration = generation;
-    const running: RunningMatch = { control: "continue", agents: new Map(), inFlight: new Set(), done: Promise.resolve(), generation };
+    // `done` is a deferred that settles only when the run loop's promise chain
+    // settles. A cancellation can therefore never observe a resolved placeholder
+    // before `run()` has started, and can never ack a pause/stop early.
+    let settleRun!: () => void;
+    const runSettled = new Promise<void>((resolve) => { settleRun = resolve; });
+    const running: RunningMatch = { control: "continue", agents: new Map(), inFlight: new Set(), done: runSettled, generation };
     this.runs.set(id, running);
     match.status = "running";
     beginMatchTime(match);
@@ -289,23 +294,25 @@ export class MatchController {
       this.emit(match, resuming ? "match.resumed" : "match.started", resuming ? "Match resumed" : "Match started");
     } catch {
       this.runs.delete(id);
+      settleRun();
       throw this.storageFailure ?? new Error("Could not save the match start.");
     }
-    running.done = this.run(id, game, running);
-    void running.done.catch((error: unknown) => {
-      const current = this.get(id);
-      if (!current) return;
-      current.status = "error";
-      endMatchTime(current);
-      current.error = error instanceof Error ? error.message : "Unexpected match controller failure.";
-      current.currentPlayerId = undefined;
-      try {
-        this.emit(current, "agent.error", `Match controller failed: ${current.error}`);
-      } catch (notificationError) {
-        console.error("Could not report a failed match controller state.", notificationError);
-      }
-      console.error("Unhandled match controller failure.", error);
-    });
+    void this.run(id, game, running)
+      .catch((error: unknown) => {
+        const current = this.get(id);
+        if (!current) return;
+        current.status = "error";
+        endMatchTime(current);
+        current.error = error instanceof Error ? error.message : "Unexpected match controller failure.";
+        current.currentPlayerId = undefined;
+        try {
+          this.emit(current, "agent.error", `Match controller failed: ${current.error}`);
+        } catch (notificationError) {
+          console.error("Could not report a failed match controller state.", notificationError);
+        }
+        console.error("Unhandled match controller failure.", error);
+      })
+      .finally(() => settleRun());
     return match;
   }
 
@@ -351,6 +358,9 @@ export class MatchController {
   }
 
   private async cancel(id: string, running: RunningMatch, control: "pause" | "stop"): Promise<void> {
+    // A stop always wins over a pause. If a pause is already in progress the
+    // control upgrades to stop; a later pause never downgrades a pending stop.
+    if (control === "pause" && running.control === "stop") { await running.done; return; }
     running.control = control;
     const reason = new AgentExecutionError(
       control === "pause" ? "Match paused during an active request." : "Match stopped during an active request.",

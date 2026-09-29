@@ -14,7 +14,7 @@ The implemented foundation is a registered exploratory study workflow (`battle-s
 - Registration does not launch providers. The saved study card provides start, pause, resume, stop, skip, export, and completed-study rerun controls.
 - First attempts define the primary analysis. A permitted infrastructure rerun remains in operational totals and cannot replace a failed primary observation. Qualification failures cannot be retried into eligibility.
 - All planned slots remain represented, including skipped, missing, and unqualified results. Research conditions have separate outcomes; no cross-condition intelligence average is produced.
-- Store version 7 validates the frozen assignment and backs up supported older envelopes before migration. Old records do not receive invented execution evidence.
+- Store version 7 is imported once into the durable SQLite store with a backup manifest; frozen assignments are validated and old records do not receive invented execution evidence.
 
 ## Both Hangman modes belong, with different interpretations
 

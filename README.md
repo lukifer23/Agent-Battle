@@ -38,7 +38,7 @@ Run commands from the project root. The built UI is resolved relative to the ser
 | --- | --- | --- |
 | `PORT` | API server port | `4173` |
 | `AGENT_BATTLE_API_PORT` | API port the Vite dev proxy targets | `PORT` or `4173` |
-| `AGENT_BATTLE_DATA_DIR` | Directory holding `matches.json` | `./data` |
+| `AGENT_BATTLE_DATA_DIR` | Directory holding the durable database and legacy import source | `./data` |
 | `AGENT_BATTLE_METRICS` | Set to `1` to log snapshot/checkpoint sizes and timings | off |
 
 The development UI runs on `127.0.0.1:5173` and proxies `/api` to the API port. Production serves the built UI and API from the same origin and port.
@@ -71,11 +71,11 @@ Each match stores requested provider/model/reasoning and provider CLI versions c
 
 ## Data, backup and recovery
 
-Match history and bounded provider diagnostics live in `data/matches.json`. The file is written with owner-only permissions and uses a versioned format. Supported migrations keep a backup; malformed records are quarantined with a visible warning. An unreadable or unsupported root prevents startup and remains in place. Set `AGENT_BATTLE_DATA_DIR` to use a different directory. An atomic single-writer lock prevents two app instances from sharing one store.
+Match history and bounded provider diagnostics live in `data/agent-battle.sqlite`, a local SQLite database in WAL mode. A match checkpoint writes one record instead of rewriting the whole archive, so write cost does not grow with history. Durable domain events are retained in full; the UI projects a bounded recent window. On first start the server imports a legacy `data/matches.json` (version 7 or a supported older envelope) into the database in a single transaction, after copying the original files into `data/migrations/v7-import-<timestamp>/` with a SHA-256 manifest. The legacy file is never modified or deleted; invalid records are quarantined with a visible warning. An unreadable or unsupported root prevents startup and remains in place. Set `AGENT_BATTLE_DATA_DIR` to use a different directory. An atomic single-writer lock prevents two app instances from sharing one store.
 
-Before moving or deleting history, copy the whole `data/` directory. If the store cannot be read, the server refuses startup without replacing it. Inspect the original file, any `.bak` backup, and any `.quarantine-*.json` output before recovery. If a stale-lock recovery guard remains after a crash, inspect process ownership and the data before removing it manually.
+Before moving or deleting history, copy the whole `data/` directory. If the database cannot be opened, the server refuses startup without replacing it. Inspect the legacy file, the `data/migrations/` backup, and the quarantine table before recovery. If a stale-lock recovery guard remains after a crash, inspect process ownership and the data before removing it manually.
 
-Match history is kept in full rather than silently pruned. `GET /api/matches` returns paginated summaries for browsing, `GET /api/matches/:id` returns a safe public detail, and `GET /api/matches/:id/events` and `GET /api/matches/:id/attempts` expose projected events and attempts. Raw diagnostics remain in private local persistence. Set `AGENT_BATTLE_METRICS=1` to log snapshot and checkpoint sizes and timings, and run `npm run benchmark` for local projection and full-store write measurements.
+Match history is kept in full. `GET /api/matches` returns paginated summaries for browsing, `GET /api/matches/:id` returns a safe public detail, and `GET /api/matches/:id/events` and `GET /api/matches/:id/attempts` expose projected events and attempts. The durable repository exposes indexed history queries by game, game version, provider, model, status, series, result, and date. Raw diagnostics remain in the private local database. Set `AGENT_BATTLE_METRICS=1` to log snapshot and checkpoint sizes and timings, and run `npm run benchmark` for local projection and storage-write measurements (it now reports the durable per-record checkpoint beside the JSON rewrite).
 
 ## Battle series
 
@@ -134,7 +134,7 @@ Select **Hangman**, choose two explicit models and a ruleset, and start. The def
 
 Hangman uses a light interface with a focused setup screen, a prominent winner and score, and **New match** above the board. New match preserves competitors for review; **Start Hangman match** creates a fresh word. **Back to match** restores the current board. Pause, resume and stop controls appear above the board; replay, request details, identity qualification and comparative standings remain available below or in disclosures. Model display names are presentation labels, not identity verification.
 
-Store version 7 adds research v3 declarations, assignment validation and execution evidence while retaining supported Chess, Hangman, Battleship, and v1/v2 series records. Migration backs up the original store before rewriting; unknown future versions refuse startup. Private seeds, canonical state, provider excerpts, and recovery candidates stay in local data files. Public match-list summaries contain no game state. Request identities are persisted before invocation, and budgets are rechecked before every request, including corrections.
+The durable store retains Chess, Hangman, Battleship, and v1/v2/v3 series records, including the research v3 declaration, assignment validation, and execution evidence. Legacy store version 7 is imported in one transaction with a backup and SHA-256 manifest; an unknown future version refuses startup. Private seeds, canonical state, provider excerpts, and recovery candidates stay in local data. Public match-list summaries contain no game state. Request identities are persisted before invocation, and budgets are rechecked before every request, including corrections.
 
 ## Troubleshooting
 

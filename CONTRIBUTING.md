@@ -1,7 +1,9 @@
 # Contributing
 
-Agent Battle is a local-first project. Contributions are made directly on the
-`main` branch; there is no feature-branch or pull-request workflow.
+Agent Battle is a local-first project. Changes are proposed on a short-lived
+branch and merged to `main` through a pull request; the CI workflow runs tests,
+lint, typecheck and build on Node 20 and 22 for every pull request. Do not
+force-push shared branches.
 
 ## Before you start
 

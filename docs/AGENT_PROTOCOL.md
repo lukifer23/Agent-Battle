@@ -114,7 +114,7 @@ Single matches and v2 series require two different explicit requested model IDs;
 For every game, Claude uses the same concise game system prompt. Reasoning `none` explicitly sets `MAX_THINKING_TOKENS=0`; selectable effort levels set both `--effort` and `CLAUDE_CODE_EFFORT_LEVEL` so inherited environment settings cannot silently override the selected level. Some models cannot disable thinking; this is provider-dependent. Codex JSONL is parsed for resolved identity when present; missing identity is never inferred from the requested model flag.
 
 
-## Adapter v5 execution evidence
+## Adapter v6 execution evidence
 
 New records use `agent-battle/adapter-v6` and `observation-contract-v3`. Claude emits verbose JSONL; the adapter reads the initialization tool inventory and assistant tool events instead of assuming zero tools. `StructuredOutput` is its response channel; every other observed tool call counts as external. Missing inventory or an incomplete result cannot establish zero calls. The final result supplies model usage and session ID.
 

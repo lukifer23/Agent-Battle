@@ -5,6 +5,18 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+### Durable SQLite store (2026-09-29)
+
+- Replace the whole-archive JSON rewrite with a local SQLite store in WAL mode (`node:sqlite`, no third-party dependency). A match checkpoint now touches one record instead of serializing the entire history, so checkpoint cost no longer scales with the archive.
+- Import the legacy store version 7 (and supported older envelopes) into the durable store once, in a single transaction, with an immutable migration backup plus SHA-256 manifest and per-record quarantine. The original `matches.json` is never modified or deleted.
+- Retain durable domain events in full. The in-memory record still projects a bounded presentation window; the durable log is complete.
+- Add indexed history queries (game, game version, provider, model, status, series, result, date) behind the repository so standings and history no longer depend on the 50-summary snapshot.
+- Centralize adapter/observation/action/store/schema version constants in `src/version.ts` to prevent documentation drift.
+- Log snapshot publication failures instead of discarding them.
+- Make the match run lifecycle explicit: `pause`/`stop` resolve only after the run loop has actually stopped, and a stop is never downgraded by a later pause.
+- Add deterministic persistence fault-injection tests: interrupted import rolls back atomically and preserves the legacy source, a failed checkpoint keeps the previous durable revision, import is idempotent, and a SIGKILL after a durable match creation reloads it without duplication.
+- Verify 170 tests (154 prior, plus durable-store, fault-injection and lifecycle regressions), lint, typecheck, build. `npm run benchmark -- --large` now reports the durable checkpoint beside the JSON rewrite: at 1,000 archived records the JSON write is ~458 ms median / ~601 ms p95 while the durable per-record checkpoint stays flat at ~1.6 ms.
+
 ### Registered research foundation (2026-09-28)
 
 - Add `battle-series-3` frozen condition declarations, deterministic matched challenge blocks, seat balancing, plan/root commitments and labeled same-model controls.

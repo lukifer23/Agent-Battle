@@ -2,7 +2,7 @@
 
 ## Current state
 
-Agent Battle has authoritative Chess (`standard-1`), both Hangman modes (`shared-board-2` and `independent-lanes-1`), and Battleship (`battleship-standard-1`). Each runs through the same two-player controller, registry, public/private projection, persistence, provider protocol, replay, and JSON export. Battleship has a dedicated responsive public arena. Series v2 schedules registered game families through a versioned plan; research v3 adds frozen condition declarations, paired blocks, same-model controls and first-attempt analysis; historical `battle-series-1` records and exports retain their ten-slot shape and validation. Store version 7 backs up supported older envelopes before migration.
+Agent Battle has authoritative Chess (`standard-1`), both Hangman modes (`shared-board-2` and `independent-lanes-1`), and Battleship (`battleship-standard-1`). Each runs through the same two-player controller, registry, public/private projection, persistence, provider protocol, replay, and JSON export. Battleship has a dedicated responsive public arena. Series v2 schedules registered game families through a versioned plan; research v3 adds frozen condition declarations, paired blocks, same-model controls and first-attempt analysis; historical `battle-series-1` records and exports retain their ten-slot shape and validation. Persistence is a local SQLite store in WAL mode: a checkpoint writes one record rather than the whole archive, durable domain events are retained in full, and a legacy store version 7 is imported once with a backup and SHA-256 manifest. Store version 7 import backs up supported older envelopes before migration.
 
 ## Current research acceptance (2026-09-28)
 

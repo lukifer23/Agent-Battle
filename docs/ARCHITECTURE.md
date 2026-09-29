@@ -55,13 +55,15 @@ All agents receive a new complete observation every turn. No transcript is neede
 
 ## Persistence and telemetry
 
-`data/matches.json` (override the directory with `AGENT_BATTLE_DATA_DIR`) stores match and series records in a versioned envelope. The current store version is 7; bare JSON arrays and supported older envelopes are migrated on load with a pre-migration backup. The store is validated on load:
+`data/agent-battle.sqlite` (override the directory with `AGENT_BATTLE_DATA_DIR`) is a local SQLite database in WAL mode. A checkpoint upserts one match and its bounded child rows inside a transaction instead of rewriting the whole archive; durable domain events are appended and retained in full. `record_json` is the lossless canonical record, with scalar columns and participant/event tables projected alongside it for indexed history queries. `src/version.ts` is the single source of truth for the store schema, adapter, observation, action and protocol versions.
+
+On first start the server imports a legacy `data/matches.json` (bare array or a supported versioned envelope up to 7) in one transaction. It copies the original files into `data/migrations/v7-import-<timestamp>/` with a SHA-256 manifest and never modifies or deletes them. Invalid records are quarantined in the database. The store is validated on open:
 
 - An unreadable, unsupported, or future-version root remains in place and prevents server startup.
-- Individual records that fail runtime validation are written to a quarantine file and excluded; valid records are retained.
-- Migration is idempotent and keeps a `.bak` copy; losing a valid record is never used as a recovery path.
+- Individual records that fail runtime validation are quarantined and excluded; valid records are retained.
+- The database schema is forward-only; a schema version newer than the build refuses to open.
 
-A single-writer lock (`matches.json.lock`) is acquired atomically at startup before data is loaded. A recovery guard serializes stale-lock reclamation; uncertain ownership fails closed. Writes use a unique temporary file with `fsync` and an atomic rename with owner-only permissions. An accepted action commits detached game state, turn telemetry, durable events/revisions, next player and any terminal result together before publication. Retry exhaustion commits invalid evidence and forfeit together. Presentation-only agent/turn activity streams without a durable revision or store write and is not replayed after reconnect. A failed write restores the last committed position in memory, stops further requests, reports a storage error, and prevents a success acknowledgement for the failed transition. The last durable running state is marked interrupted on restart.
+A single-writer lock (`matches.json.lock`) is acquired atomically at startup before data is opened. A recovery guard serializes stale-lock reclamation; uncertain ownership fails closed. Each durable checkpoint is a SQLite transaction that upserts the changed match and its bounded child rows (and appends its durable events) with `synchronous = FULL`, so a committed transition survives an app crash and a host power loss. Invocation reservations and the accepted transition commit together before publication. Retry exhaustion commits invalid evidence and forfeit together. Presentation-only agent/turn activity streams without a durable revision and is not replayed after reconnect. A failed transaction rolls back; the controller restores the last committed position in memory, stops further requests, reports a storage error, and prevents a success acknowledgement for the failed transition. The last durable running state is marked interrupted on restart.
 
 Each record contains:
 

@@ -11,7 +11,9 @@ import { MatchController } from "../domain/MatchController.js";
 import { defaultGames } from "../domain/defaultGames.js";
 import { summaryOf, projectRecord, projectEvent } from "../domain/projection.js";
 import { agentRegistryDefaults, detectProviders } from "./adapters.js";
-import { acquireStoreOwnership, loadMatches, releaseStoreOwnership, saveMatches, STORE_VERSION } from "./store.js";
+import { acquireStoreOwnership, releaseStoreOwnership } from "./store.js";
+import { DurableStore } from "./persistence/index.js";
+import { DATABASE_SCHEMA_VERSION } from "../version.js";
 import { shouldPersistChange, shouldPublishSnapshot } from "./eventPolicy.js";
 import { SeriesManager, publicSeries, seriesExport } from "./series.js";
 
@@ -26,16 +28,26 @@ try {
   process.exit(1);
 }
 
+const dataDirectory = process.env.AGENT_BATTLE_DATA_DIR ?? join(process.cwd(), "data");
+let durable: DurableStore;
+try {
+  durable = DurableStore.open(dataDirectory);
+} catch (error) {
+  console.error(`Could not open the durable store: ${error instanceof Error ? error.message : "unknown error"}`);
+  releaseStoreOwnership();
+  process.exit(1);
+}
+
 let storedMatches: MatchRecord[] = [];
 let storedSeries: SeriesRecord[] = [];
 let storageWarning: string | null = null;
 try {
-  const loaded = loadMatches();
+  const loaded = durable.load();
   storedMatches = loaded.matches;
   storedSeries = loaded.series;
   storageWarning = loaded.recoveryWarning ?? null;
   if (loaded.migrated) {
-    console.log(`Migrated saved matches to store version ${STORE_VERSION}.${loaded.backupPath ? ` Backup: ${loaded.backupPath}.` : ""}${loaded.quarantined ? ` Quarantined ${loaded.quarantined} invalid record(s).` : ""}`);
+    console.log(`Imported the legacy store into durable schema ${DATABASE_SCHEMA_VERSION}.${loaded.backupPath ? ` Backup manifest: ${loaded.backupPath}.` : ""}${loaded.quarantined ? ` Quarantined ${loaded.quarantined} invalid record(s).` : ""}`);
   }
 } catch (error) {
   console.error(`Could not load saved matches: ${error instanceof Error ? error.message : "unknown error"}`);
@@ -114,13 +126,13 @@ function publishSnapshot(): void {
     const encoded = JSON.stringify(snapshot);
     logMetric("snapshot", { bytes: Buffer.byteLength(encoded), matches: snapshot.recentMatches.length, ms: Date.now() - started });
     for (const response of eventClients) writeToClient(response, "snapshot", encoded);
-  }).catch(() => undefined);
+  }).catch((error: unknown) => { console.error("Could not publish a state snapshot.", error); });
 }
 
 function stateChanged(record: MatchRecord, event?: import("../shared.js").MatchEvent): void {
   if (shouldPersistChange(event)) {
     const started = Date.now();
-    saveMatches(storedMatches, storedSeries);
+    durable.saveMatch(record);
     logMetric("checkpoint", { matches: storedMatches.length, ms: Date.now() - started });
   }
   if (event) {
@@ -144,12 +156,12 @@ try {
   controller = new MatchController(games, agents, storedMatches, () => providerCache.value, stateChanged, () => {
     const candidate = controller.getRecoveryCandidate();
     if (candidate) {
-      try { writeFileSync(join(process.env.AGENT_BATTLE_DATA_DIR ?? join(process.cwd(), "data"), `unsaved-recovery-${candidate.id}-${Date.now()}.json`), JSON.stringify(candidate), { mode: 0o600, flag: "wx" }); }
+      try { writeFileSync(join(dataDirectory, `unsaved-recovery-${candidate.id}-${Date.now()}.json`), JSON.stringify(candidate), { mode: 0o600, flag: "wx" }); }
       catch { console.error("Unable to persist the private recovery candidate; it remains in memory until shutdown."); }
     }
     publishSnapshot();
   });
-  seriesManager = new SeriesManager(storedSeries, controller, () => saveMatches(storedMatches, storedSeries));
+  seriesManager = new SeriesManager(storedSeries, controller, () => { for (const series of seriesManager!.list()) durable.saveSeries(series); });
 } catch (error) {
   console.error("Could not restore saved matches.", error);
   releaseStoreOwnership();
@@ -291,7 +303,7 @@ app.get("/api/events", (request: Request, response: Response) => {
   response.setHeader("Connection", "keep-alive");
   response.flushHeaders();
   eventClients.add(response);
-  void controller.snapshot().then((snapshot) => writeToClient(response, "snapshot", JSON.stringify(withStorage(snapshot)))).catch(() => undefined);
+  void controller.snapshot().then((snapshot) => writeToClient(response, "snapshot", JSON.stringify(withStorage(snapshot)))).catch((error: unknown) => { console.error("Could not send the opening event-stream snapshot.", error); });
   const heartbeat = setInterval(() => writeToClient(response, "keepalive", JSON.stringify({ at: new Date().toISOString() })), 20_000);
   heartbeat.unref();
   request.on("close", () => { clearInterval(heartbeat); eventClients.delete(response); });
@@ -389,6 +401,7 @@ function shutdown(): void {
       const fallback = setTimeout(resolve, 2000);
       fallback.unref();
     });
+    try { durable.close(); } catch { /* Closing an already-closed database is harmless. */ }
     releaseStoreOwnership();
     clearTimeout(budget);
     process.exit(failed || controller.getStorageError() ? 1 : 0);

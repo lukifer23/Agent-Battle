@@ -1,6 +1,7 @@
 import { buildSnapshot } from "../src/domain/snapshot.js";
 import { projectRecord } from "../src/domain/projection.js";
 import { MatchStore } from "../src/server/store.js";
+import { DurableStore } from "../src/server/persistence/index.js";
 import { BattleshipGame } from "../src/games/battleship/BattleshipGame.js";
 import { makeSeriesV2 } from "../src/server/series.js";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -135,5 +136,43 @@ try {
       writeMedianMs: Number(timings[2].toFixed(2)), writeP95Ms: Number(timings[4].toFixed(2)), parseMs: Number((performance.now() - readStart).toFixed(2)) });
   }
 } finally { rmSync(folder, { recursive: true, force: true }); }
+
+// Durable-store comparison. The JSON archive rewrites the whole store at every
+// checkpoint (above). The durable store's per-record checkpoint should not scale
+// with the number of archived records. Counts accumulate on purpose so the
+// archive grows while the checkpoint cost is measured.
+const durableFolder = mkdtempSync(join(os.tmpdir(), "agent-battle-durable-benchmark-"));
+try {
+  const durable = DurableStore.open(durableFolder);
+  for (const count of (process.argv.includes("--large") ? [10, 50, 100, 500, 1000] : [10, 50, 100])) {
+    const records = Array.from({ length: count }, (_value, index) => index % 4 === 0 ? syntheticBattleship(index) : synthetic(index, 80, 500));
+    const bulkStart = performance.now();
+    durable.repository.transaction(() => { for (const record of records) durable.saveMatch(record); });
+    const bulkLoadMs = performance.now() - bulkStart;
+    const target = records[records.length - 1];
+    const timings: number[] = [];
+    for (let repeat = 0; repeat < 5; repeat++) {
+      const start = performance.now();
+      durable.saveMatch({ ...target, revision: (target.revision ?? 0) + repeat + 1 });
+      timings.push(performance.now() - start);
+    }
+    timings.sort((a, b) => a - b);
+    results.push({
+      durableArchiveMatches: durable.repository.countMatches(),
+      durableAddedThisStep: count,
+      durableBulkLoadMs: Number(bulkLoadMs.toFixed(2)),
+      durableCheckpointMedianMs: Number(timings[2].toFixed(2)),
+      durableCheckpointP95Ms: Number(timings[4].toFixed(2)),
+    });
+  }
+  const reopenStart = performance.now();
+  const archiveSize = durable.repository.countMatches();
+  durable.close();
+  const reopened = DurableStore.open(durableFolder);
+  reopened.repository.listMatches();
+  const reopenMs = performance.now() - reopenStart;
+  results.push({ durableArchiveMatches: archiveSize, durableReopenAndListMs: Number(reopenMs.toFixed(2)) });
+  reopened.close();
+} finally { rmSync(durableFolder, { recursive: true, force: true }); }
 
 console.log(JSON.stringify(results, null, 2));
