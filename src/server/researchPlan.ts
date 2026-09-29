@@ -1,7 +1,7 @@
 import { selectWord } from "../games/hangman/corpus.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { defaultGames } from "../domain/defaultGames.js";
-import { distinctExplicitModels, explicitModelId, PROVIDERS, type MatchBudgets, type PlayerConfig, type ResearchPlan, type SeriesRecord, type SeriesSlot } from "../shared.js";
+import { explicitModelId, PROVIDERS, sameEvaluatedSystem, type MatchBudgets, type PlayerConfig, type ResearchPlan, type SeriesRecord, type SeriesSlot } from "../shared.js";
 
 const identifier = /^[a-z][a-z0-9-]{0,63}$/;
 const object = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -73,7 +73,7 @@ export function makeResearchSeries(agents: [PlayerConfig, PlayerConfig], turnTim
     || agents.some((a) => !a || !PROVIDERS.includes(a.provider) || typeof a.name !== "string" || a.name.length > 200 || !explicitModelId(a.model) || a.model.length > 140 || /[\r\n\0]/.test(a.model)
       || a.reasoning !== undefined && (a.reasoning.length > 40 || /[\r\n\0]/.test(a.reasoning)))
     || !Number.isSafeInteger(turnTimeoutSeconds) || turnTimeoutSeconds < 30 || turnTimeoutSeconds > 600) throw new Error("Research requires explicit system identities, a valid seed and a 30–600 second timeout.");
-  if ((plan.comparison.kind === "system-comparison") !== distinctExplicitModels(...agents)) throw new Error("Label identical model IDs as a same-model control; distinct IDs as a system comparison.");
+  if ((plan.comparison.kind === "system-comparison") === sameEvaluatedSystem(agents[0], agents[1])) throw new Error("Label the same provider, model, and reasoning as a same-model control; a different provider, model, or reasoning setting as a system comparison.");
   if (!budgets || !Number.isSafeInteger(budgets.maxPlies) || budgets.maxPlies < 1 || budgets.maxPlies > 10000
     || !Number.isSafeInteger(budgets.maxRequests) || budgets.maxRequests < 2 || budgets.maxRequests > 100000
     || !Number.isSafeInteger(budgets.maxWallMinutes) || budgets.maxWallMinutes < 2 || budgets.maxWallMinutes > 10000

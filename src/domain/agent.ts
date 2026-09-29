@@ -1,4 +1,4 @@
-import type { AgentAttempt, GameAction, GameObservation, PlayerConfig } from "../shared.js";
+import type { AdapterCapabilities, AgentAttempt, GameAction, GameObservation, PlayerConfig } from "../shared.js";
 
 export interface AgentReply {
   execution?: AgentAttempt["execution"];
@@ -14,6 +14,8 @@ export interface AgentReply {
 
 export interface AttemptControl {
   signal: AbortSignal;
+  /** Called once the provider child exists, before its response is read. */
+  onSpawn?: (pid: number) => void;
 }
 
 export interface AgentAdapter {
@@ -22,6 +24,9 @@ export interface AgentAdapter {
   /** Describes the effective per-invocation restrictions as applied, or undefined when unknown. */
   readonly restrictions?: string;
   readonly isolationQualified?: boolean;
+  readonly capabilities?: AdapterCapabilities;
+  /** First line of `CLI --version` captured for this adapter instance, when the transport has one. */
+  readonly observedCliVersion?: string | null;
   initialize(): Promise<void>;
   act(observation: GameObservation, control: AttemptControl): Promise<AgentReply>;
   shutdown(): Promise<void>;

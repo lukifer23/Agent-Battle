@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { parseActionEnvelope, isPlainObject } from "../../domain/actions.js";
 import type { GameDefinition, ObservationContext, ActionValidation } from "../../domain/game.js";
-import type { GameAction, GameObservation, MatchResult, MatchRecord } from "../../shared.js";
+import type { GameAction, GameMetric, GameObservation, MatchResult, MatchRecord } from "../../shared.js";
 import { selectWord, type WordProvenance } from "./corpus.js";
 
 export type HangmanRole = "player1" | "player2";
@@ -27,7 +27,7 @@ const other = (role: HangmanRole): HangmanRole => role === "player1" ? "player2"
 export class HangmanGame implements GameDefinition<HangmanState> {
   readonly id = "hangman";
   readonly version = "independent-lanes-1";
-  readonly observationVersion = "hangman-observation-v1";
+  readonly observationVersion = "hangman-observation-v2";
   readonly actionSchemaVersion = "game-action-v1";
   readonly playerIds = roles;
   readonly hiddenInformation = true;
@@ -57,7 +57,7 @@ export class HangmanGame implements GameDefinition<HangmanState> {
     return {
       schemaVersion: this.observationVersion, gameId: this.id, matchId: context.matchId, turnId: context.turnId,
       playerId: role, playerLabel: this.playerLabel(role), sideToMove: role,
-      ply: context.ply, turnIndex: context.turnIndex,
+      ply: lane.actionsTaken + 1, turnIndex: lane.actionsTaken + 1,
       state: { pattern: this.pattern(state, role), wordLength: state.word.length, guessedLetters: [...lane.guessedLetters], misses: lane.misses, missesAllowed: 7, actionsTaken: lane.actionsTaken,
         rules: { version: this.version, incorrectLetterMisses: 1, incorrectSolutionMisses: 2, repeatedLetter: "invalid; one correction allowed", failureAtMisses: 7,
           objective: "Solve the word. A solved lane wins over an ordinary failed lane. Among solved lanes minimize misses, then accepted actions. Among failed lanes maximize distinct correctly guessed letters. A forfeited lane loses to a non-forfeited lane." },
@@ -184,6 +184,23 @@ export class HangmanGame implements GameDefinition<HangmanState> {
     }
     return frames;
   }
+  metrics(state: HangmanState): GameMetric[] {
+    const version = "hangman-lane-metrics-v1";
+    return roles.flatMap((role) => {
+      const lane = state.lanes[role];
+      const correct = lane.guessedLetters.filter((letter) => state.word.includes(letter)).length;
+      const solves = state.entries.filter((entry) => entry.playerId === role && entry.action.type === "solve").length;
+      return [
+        { key: "solved", version, participantId: role, value: lane.status === "solved", unit: "boolean" },
+        { key: "misses", version, participantId: role, value: lane.misses, unit: "miss" },
+        { key: "actions", version, participantId: role, value: lane.actionsTaken, unit: "action" },
+        { key: "correctDistinctLetters", version, participantId: role, value: correct, unit: "letter" },
+        { key: "solveAttempts", version, participantId: role, value: solves, unit: "attempt" },
+        { key: "revealEfficiency", version, participantId: role, value: lane.actionsTaken ? correct / lane.actionsTaken : null, unit: "ratio" },
+      ];
+    });
+  }
+
   publicAction(action: GameAction): GameAction {
     if (action.type === "guess_letter" && typeof action.payload.letter === "string" && /^[a-z]$/.test(action.payload.letter)) return { type: "guess_letter", payload: { letter: action.payload.letter } };
     return { type: action.type === "solve" ? "solve" : "redacted", payload: {} };

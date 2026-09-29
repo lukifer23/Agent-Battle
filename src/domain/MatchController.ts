@@ -1,3 +1,4 @@
+import { executionProfileDrift } from "./executionProfile.js";
 import { researchExecutionReasons } from "./executionEvidence.js";
 import { randomUUID } from "node:crypto";
 import { competitorId } from "../shared.js";
@@ -14,6 +15,7 @@ import type {
   AppState,
   GameAction,
   MatchBudgets,
+  FrozenExecutionProfile,
   MatchEnvironment,
   MatchEvent,
   MatchRecord,
@@ -61,7 +63,10 @@ function clampBudget(value: unknown, fallback: number, maximum: number): number 
 export class MatchController {
   private readonly runtime = new Map<string, unknown>();
   private readonly runs = new Map<string, RunningMatch>();
-  private readonly records: MatchRecord[];
+  private readonly records = new Map<string, MatchRecord>();
+  private readonly recordOrder: string[] = [];
+  private readonly activeIds = new Set<string>();
+  private readonly recordList: MatchRecord[];
   private creatingMatch = false;
   private readonly durableRecords = new Map<string, MatchRecord>();
   private storageFailure?: Error;
@@ -76,11 +81,15 @@ export class MatchController {
     private readonly providers: () => Promise<ProviderInfo[]>,
     private readonly onChange: (record: MatchRecord, event?: MatchEvent) => void,
     private readonly onStorageFailure: (message: string) => void = () => undefined,
+    private readonly sessionOwner?: (sessionId: string) => { matchId: string; invocationId: string } | undefined,
+    private readonly executionProfile?: (match: MatchRecord, playerId: string) => FrozenExecutionProfile | undefined,
   ) {
-    this.records = initialRecords;
-    for (const record of initialRecords) this.durableRecords.set(record.id, structuredClone(record));
-    let migrated = false;
-    for (const match of this.records) {
+    this.recordList = initialRecords;
+    const changed: MatchRecord[] = [];
+    for (const match of initialRecords) {
+      this.records.set(match.id, match);
+      this.recordOrder.push(match.id);
+      this.durableRecords.set(match.id, structuredClone(match));
       try {
         const game = this.games.get(match.gameId, match.gameVersion);
         const state = game.deserialize(match.gameState);
@@ -94,23 +103,50 @@ export class MatchController {
         }
         if (match.status === "running") {
           for (const attempt of match.pendingTurn?.attempts ?? []) {
-            if (attempt.status === "started") { attempt.status = "interrupted"; attempt.accountedMs = Math.max(0, Date.parse(attempt.deadlineAt ?? new Date().toISOString()) - Date.parse(attempt.startedAt)); attempt.phase = "controller"; }
+            if (attempt.status === "started") {
+              attempt.status = "interrupted";
+              attempt.accountedMs = Math.max(0, Date.parse(attempt.deadlineAt ?? new Date().toISOString()) - Date.parse(attempt.startedAt));
+              attempt.phase = "controller";
+            }
           }
           endMatchTime(match);
           match.status = "interrupted";
           match.currentPlayerId = undefined;
           match.error = "The app restarted during this match. Its saved game state is intact; resume to ask the current player again.";
-          migrated = true;
+          changed.push(match);
         }
         if (ACTIVE_STATUSES.includes(match.status)) this.runtime.set(match.id, state);
       } catch (error) {
         endMatchTime(match);
         match.status = "error";
         match.error = `Could not restore saved ${match.gameId || "game"} state: ${error instanceof Error ? error.message : "invalid snapshot"}`;
-        migrated = true;
+        changed.push(match);
       }
+      this.noteActive(match);
     }
-    if (migrated) this.save();
+    for (const match of changed) this.commit(match);
+  }
+
+  private noteActive(match: MatchRecord): void {
+    if (ACTIVE_STATUSES.includes(match.status)) this.activeIds.add(match.id);
+    else this.activeIds.delete(match.id);
+  }
+
+  private remember(match: MatchRecord): void {
+    this.records.set(match.id, match);
+    this.recordOrder.unshift(match.id);
+    this.recordList.unshift(match);
+    this.noteActive(match);
+  }
+
+  private forget(id: string): void {
+    this.records.delete(id);
+    const order = this.recordOrder.indexOf(id);
+    if (order >= 0) this.recordOrder.splice(order, 1);
+    const listed = this.recordList.findIndex((match) => match.id === id);
+    if (listed >= 0) this.recordList.splice(listed, 1);
+    this.activeIds.delete(id);
+    this.runtime.delete(id);
   }
 
   getRecoveryCandidate(): MatchRecord | undefined { return this.recoveryCandidate ? structuredClone(this.recoveryCandidate) : undefined; }
@@ -126,6 +162,7 @@ export class MatchController {
     try {
       this.onChange(match);
       this.durableRecords.set(match.id, structuredClone(match));
+      this.noteActive(match);
       this.stateVersion++;
     } catch (error) {
       this.recoveryCandidate = structuredClone(match);
@@ -139,6 +176,7 @@ export class MatchController {
         match.status = "error";
         match.error = this.storageFailure.message;
         match.currentPlayerId = undefined;
+        this.noteActive(match);
       }
       try { this.onStorageFailure(this.storageFailure.message); } catch { /* Reporting cannot make a failed write succeed. */ }
       throw this.storageFailure;
@@ -146,20 +184,28 @@ export class MatchController {
   }
 
   get(id: string): MatchRecord | undefined {
-    return this.records.find((match) => match.id === id);
+    return this.records.get(id);
   }
 
   list(): MatchRecord[] {
-    return [...this.records];
+    return this.recordOrder.flatMap((id) => {
+      const match = this.records.get(id);
+      return match ? [match] : [];
+    });
   }
 
   active(): MatchRecord | null {
-    return this.records.find((match) => ["ready", "running", "paused", "interrupted"].includes(match.status)) ?? null;
+    for (const id of this.recordOrder) {
+      if (!this.activeIds.has(id)) continue;
+      const match = this.records.get(id);
+      if (match && ACTIVE_STATUSES.includes(match.status)) return match;
+    }
+    return null;
   }
 
   async snapshot(): Promise<AppState> {
     const providers = await this.providers();
-    return { ...buildSnapshot(this.records, providers, 50, this.games), epoch: this.epoch, stateVersion: this.stateVersion };
+    return { ...buildSnapshot(this.list(), providers, 50, this.games), epoch: this.epoch, stateVersion: this.stateVersion };
   }
 
   async create(request: CreateMatchRequest): Promise<MatchRecord> {
@@ -180,7 +226,7 @@ export class MatchController {
     if (!Number.isInteger(request.turnTimeoutSeconds) || request.turnTimeoutSeconds < 30 || request.turnTimeoutSeconds > 600) {
       throw new Error("Move timeout must be between 30 and 600 seconds.");
     }
-    if (this.records.some((match) => ["ready", "running", "paused", "interrupted"].includes(match.status))) {
+    if (this.activeIds.size > 0) {
       throw new Error("Resume or stop the current match before creating another.");
     }
     const detected = await this.providers();
@@ -252,12 +298,11 @@ export class MatchController {
       events: [],
     };
     this.runtime.set(match.id, state);
-    this.records.unshift(match);
+    this.remember(match);
     try {
       this.emit(match, "match.created", "Match created", { gameId: game.id, gameVersion: game.version });
     } catch (error) {
-      this.records.shift();
-      this.runtime.delete(match.id);
+      this.forget(match.id);
       throw new Error(`The new match could not be saved: ${error instanceof Error ? error.message : "storage failure"}. It was not added.`);
     }
     return match;
@@ -270,8 +315,7 @@ export class MatchController {
     if (existingRun && match.status === "running") return match;
     if (match.status === "running" || existingRun) throw new Error("This match is already running.");
     if (!["ready", "paused", "interrupted"].includes(match.status)) throw new Error("Only a ready, paused or interrupted match can be started or resumed.");
-    const otherActive = this.records.find((candidate) => candidate.id !== id && ACTIVE_STATUSES.includes(candidate.status));
-    if (otherActive) throw new Error("Another match is already active. Stop or finish it before resuming this match.");
+    if ([...this.activeIds].some((candidate) => candidate !== id)) throw new Error("Another match is already active. Stop or finish it before resuming this match.");
     const game = this.games.get(match.gameId, match.gameVersion);
     if (!this.runtime.has(id)) this.runtime.set(id, game.deserialize(match.gameState));
     const generation = (match.runGeneration ?? 0) + 1;
@@ -422,8 +466,13 @@ export class MatchController {
     }
   }
 
-  private save(): void {
-    if (this.records[0]) this.commit(this.records[0]);
+  private sessionReused(sessionId: string): boolean {
+    if (this.sessionOwner) return Boolean(this.sessionOwner(sessionId));
+    for (const record of this.records.values()) {
+      const attempts = [...record.history.flatMap((turn) => turn.attempts), ...(record.pendingTurn?.attempts ?? [])];
+      if (attempts.some((attempt) => attempt.sessionId === sessionId)) return true;
+    }
+    return false;
   }
 
   private player(match: MatchRecord, playerId: string): PlayerSeat {
@@ -528,34 +577,56 @@ export class MatchController {
           if (attemptBudgetReason) { this.budgetStop(match, attemptBudgetReason); return; }
           const startedAt = new Date().toISOString();
           const invocationId = randomUUID();
-          const reservation: AgentAttempt = { attempt: attemptNumber, invocationId, startedAt, deadlineAt: new Date(Date.parse(startedAt) + Math.min(observation.clock.turnTimeoutMs, remainingMatchMs(match), this.remainingPlayerMs(match, playerId))).toISOString(), status: "started", phase: "provider", toolCalls: null, usage: { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" } };
+          const reservation: AgentAttempt = { attempt: attemptNumber, invocationId, ledgerState: "reserved", startedAt, deadlineAt: new Date(Date.parse(startedAt) + Math.min(observation.clock.turnTimeoutMs, remainingMatchMs(match), this.remainingPlayerMs(match, playerId))).toISOString(), status: "started", phase: "provider", toolCalls: null, usage: { inputTokens: null, outputTokens: null, costUsd: null, coverage: "none" } };
           attempts.push(reservation);
           if (!this.persistCheckpoint(match, game, state)) return;
           const finishAttempt = (completed: AgentAttempt) => Object.assign(reservation, completed, { invocationId, deadlineAt: reservation.deadlineAt });
           this.emit(match, "agent.started", `${seat.agent.name} request ${attemptNumber}`, { turnId, attempt: attemptNumber }, playerId);
           let reply: Awaited<ReturnType<typeof adapter.act>> | undefined;
           let failure: unknown;
+          let spawnPersistFailed = false;
           const control = new AbortController();
           running.inFlight.add(control);
           try {
             const attemptObservation = feedback ? { ...observation, feedback } : observation;
-            reply = await this.invokeWithTimeout(adapter, attemptObservation, control, Math.min(remainingMatchMs(match), this.remainingPlayerMs(match, playerId)));
+            reply = await this.invokeWithTimeout(adapter, attemptObservation, control, Math.min(remainingMatchMs(match), this.remainingPlayerMs(match, playerId)), (pid) => {
+              reservation.ledgerState = "spawned";
+              reservation.ledgerDetail = { pid };
+              if (!this.persistCheckpoint(match, game, state)) {
+                spawnPersistFailed = true;
+                control.abort(new AgentExecutionError("The spawned invocation could not be saved."));
+              }
+            });
           } catch (error) { failure = error; }
           finally {
             running.inFlight.delete(control);
             await adapter.shutdown();
           }
+          if (spawnPersistFailed) return;
 
           const evidence = reply ?? (failure instanceof AgentProtocolError ? failure : failure instanceof AgentExecutionError && failure.evidence ? { ...failure, ...failure.evidence } : undefined);
           const researchReasons = match.series?.conditionId ? researchExecutionReasons(evidence?.execution, seat.agent.model) : [];
           if (match.series?.conditionId) {
             if (!evidence?.sessionId) researchReasons.push("Missing provider session identity.");
-            else if (this.records.some((record) => [...record.history.flatMap((turn) => turn.attempts), ...(record.pendingTurn?.attempts ?? [])]
-              .some((attempt) => attempt.sessionId === evidence.sessionId))) researchReasons.push("Provider session identity was reused across requests.");
+            else if (this.sessionReused(evidence.sessionId)) researchReasons.push("Provider session identity was reused across requests.");
           }
-          const qualificationFailed = Boolean(match.series && (evidence || failure instanceof AgentExecutionError && failure.timedOut) && (!evidence?.resolvedModel || evidence.resolvedModel !== seat.agent.model || evidence.toolCalls !== 0 || researchReasons.length > 0));
+          const frozen = match.series ? this.executionProfile?.(match, playerId) : undefined;
+          const drift = frozen ? executionProfileDrift(frozen, {
+            provider: seat.agent.provider,
+            model: seat.agent.model,
+            reasoning: seat.agent.reasoning,
+            adapterVersion: match.environment?.adapterVersion ?? "",
+            observationProtocolVersion: match.environment?.promptVersion ?? "",
+            actionProtocolVersion: match.environment?.toolSchemaVersion ?? "",
+            cliVersion: adapter.observedCliVersion ?? null,
+            restrictions: adapter.restrictions,
+            capabilities: adapter.capabilities,
+          }) : [];
+          const identityFailed = Boolean(match.series && (evidence || failure instanceof AgentExecutionError && failure.timedOut) && (!evidence?.resolvedModel || evidence.resolvedModel !== seat.agent.model || evidence.toolCalls !== 0 || researchReasons.length > 0));
+          const qualificationFailed = drift.length > 0 || identityFailed;
           if (qualificationFailed) {
-            failure = new AgentExecutionError(`Series model or tool qualification failed for ${seat.label}: requested ${seat.agent.model}, reported ${evidence?.resolvedModel ?? "unknown"}, tool calls ${evidence?.toolCalls ?? "unknown"}. ${researchReasons.join(" ")}`.trim());
+            const identity = `requested ${seat.agent.model}, reported ${evidence?.resolvedModel ?? "unknown"}, tool calls ${evidence?.toolCalls ?? "unknown"}.`;
+            failure = new AgentExecutionError(`Series qualification failed for ${seat.label}: ${[...drift, ...(identityFailed ? [identity, ...researchReasons] : [])].join(" ")}`.trim());
           } else if (evidence?.resolvedModel) seat.agent.resolvedModel = evidence.resolvedModel;
 
           if (running.control !== "continue") {
@@ -828,8 +899,9 @@ export class MatchController {
     observation: ReturnType<GameDefinition<unknown>["observe"]>,
     control: AbortController,
     wallRemainingMs: number,
+    onSpawn?: (pid: number) => void,
   ): Promise<Awaited<ReturnType<AgentAdapter["act"]>>> {
-    const actPromise = adapter.act(observation, { signal: control.signal });
+    const actPromise = adapter.act(observation, { signal: control.signal, ...(onSpawn ? { onSpawn } : {}) });
     const wallFirst = wallRemainingMs < observation.clock.turnTimeoutMs;
     const timeoutMs = Math.max(1, Math.min(observation.clock.turnTimeoutMs, wallRemainingMs));
     const timeoutError = wallFirst

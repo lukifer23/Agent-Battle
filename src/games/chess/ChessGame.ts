@@ -1,5 +1,5 @@
 import { Chess, type Move } from "chess.js";
-import type { ChessMoveRecord, ChessSnapshot, GameAction, GameObservation, MatchResult, PlayerSeat } from "../../shared.js";
+import type { ChessMoveRecord, ChessSnapshot, GameAction, GameMetric, GameObservation, MatchRecord, MatchResult, PlayerSeat } from "../../shared.js";
 import type { ActionValidation, GameDefinition, ObservationContext } from "../../domain/game.js";
 import { isPlainObject, parseActionEnvelope } from "../../domain/actions.js";
 
@@ -48,7 +48,7 @@ function validateResignation(value: unknown): { playerId: string; at: string } |
 export class ChessGame implements GameDefinition<ChessRuntimeState> {
   readonly id = "chess";
   readonly version = "standard-1";
-  readonly observationVersion = "chess-observation-v2";
+  readonly observationVersion = "chess-observation-v3";
   readonly actionSchemaVersion = "game-action-v1";
   readonly playerIds = ["white", "black"] as const;
   readonly hiddenInformation = false;
@@ -102,7 +102,6 @@ export class ChessGame implements GameDefinition<ChessRuntimeState> {
         side_to_move: sideToMove,
         move_number: state.chess.moveNumber(),
         status: "active",
-        legal_moves_uci: moves,
       },
       legalActions,
       actionSchema: this.schemaFor(moves),
@@ -230,6 +229,17 @@ export class ChessGame implements GameDefinition<ChessRuntimeState> {
     if (action.type === "resign") return "Resignation";
     const move = action.payload.move;
     return typeof move === "string" ? move : "Invalid move";
+  }
+
+  metrics(state: ChessRuntimeState, record: MatchRecord): GameMetric[] {
+    const version = "chess-metrics-v1";
+    const attempts = record.history.flatMap((turn) => turn.attempts).filter((attempt) => attempt.phase !== "initialization");
+    const invalid = attempts.filter((attempt) => attempt.status === "invalid" || attempt.status === "timeout").length;
+    return [
+      { key: "acceptedPlies", version, value: state.moves.length, unit: "ply" },
+      { key: "termination", version, value: this.result(state)?.reason ?? record.status, unit: "label" },
+      { key: "invalidRate", version, value: attempts.length ? invalid / attempts.length : null, unit: "ratio" },
+    ];
   }
 
   private schemaFor(legalMoves: string[]): Record<string, unknown> {

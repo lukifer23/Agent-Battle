@@ -10,7 +10,7 @@ By default, new matches are direct contests on **one shared board**. The setup a
 - A letter that finishes the word also earns the 2-point completion bonus.
 - Incorrect full solution: −2 points and two shared misses.
 - Seven or more shared misses ends the game. Highest score wins; equal scores draw.
-- Exhausted invalid-action corrections forfeit the contest to the opponent. Provider failures and budget stops remain unscored.
+- Exhausted invalid-action corrections forfeit the contest to the opponent. That protocol forfeit is a scored result and is labeled separately from resignation, a budget stop, and a provider or storage failure. Provider failures and budget stops remain unscored.
 - Before terminal play the secret/provenance and full solution submissions stay private. Both agents receive opponent letter guesses and their outcomes. The terminal frame reveals the word; earlier replay frames remain masked.
 
 The corpus and deterministic selection below are reused. CLI requests still pass through the existing controller, adapters and persistence. For new casual Hangman matches, blank reasoning defaults to `none` for Claude (`MAX_THINKING_TOKENS=0`) and `low` for Codex; explicit choices and series configurations are preserved. Claude models that cannot disable thinking may still reason. Claude receives a concise game system prompt instead of the default coding prompt. Disabling extended thinking reduces unnecessary generation; it does not promise a network response deadline shorter than the configured timeout.
@@ -56,8 +56,8 @@ Canonical persistence contains the word, seed, selected index, package/filter/ge
 
 ## Independent-lane reveal boundary
 
-- Agent observations contain only their own masked pattern, guessed letters, misses, accepted action count, own history, legal letter actions, solution schema, and request timeout.
-- Player counters are lane-local. Opponent progress, guesses, masks, and miss counts are omitted.
+- Agent observations contain only their own masked pattern, guessed letters, misses, accepted action count, own history, legal letter actions, solution schema, and request timeout. Independent-lane observations use `hangman-observation-v2`. Shared-board observations use `hangman-shared-observation-v3`.
+- Player counters are lane-local. In `hangman-observation-v2`, ply and turn index count that lane's own accepted actions. Shared-board observations keep the global ply. Opponent progress, guesses, masks, and miss counts are omitted from an independent lane.
 - Browser state contains both masked lanes. A solved lane is sealed until both lanes finish. Full solution submissions are redacted from public telemetry.
 - The word is revealed only once both lanes are terminal, including lane forfeits. Stops, errors, and interruptions before that point keep it private.
 - Match summaries contain no game state, pending turn, history, events, diagnostic excerpts, or word provenance.
@@ -87,4 +87,4 @@ The corpus package is MIT licensed. Its license and notices are supplied in the 
 
 ## Research interpretation
 
-Independent lanes probe lexical inference without opponent discoveries. Shared-board play adds information externalities and a different reward structure. The registered 144-match pilot pairs 24 distinct words across these conditions and balances seats, using first attempts and block-level uncertainty. It does not isolate strategic ability from scoring or establish generalization beyond a familiar public corpus. Same-model controls are allowed only in explicitly labeled research series. See [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md) for the design and zero-provider baseline.
+Independent lanes probe lexical inference without opponent discoveries. Shared-board play adds information externalities and a different reward structure. The registered 144-match pilot pairs 24 distinct words across these conditions and balances seats, using first attempts and block-level uncertainty. It does not isolate strategic ability from scoring or establish generalization beyond a familiar public corpus. A same-model control is an explicitly labeled research series whose seats share one evaluated system: the same provider, requested model, and requested reasoning. Read-time scorecards (`hangman-lane-metrics-v1` and `hangman-shared-metrics-v1`) describe a finished match. They do not change the scoring rules above and are not an input to the research v3 primary endpoint. Offline seat measurements for these rules are harness controls, recorded in [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md) beside the zero-provider baseline.

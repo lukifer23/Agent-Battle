@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { isPlainObject, parseActionEnvelope } from "../../domain/actions.js";
 import type { ActionValidation, GameDefinition, ObservationContext } from "../../domain/game.js";
-import type { GameAction, GameObservation, MatchRecord, MatchResult } from "../../shared.js";
+import type { GameAction, GameMetric, GameObservation, MatchRecord, MatchResult } from "../../shared.js";
 
 type Role = "player1" | "player2";
 type Ship = "carrier" | "battleship" | "cruiser" | "submarine" | "destroyer";
@@ -49,7 +49,7 @@ function fleetError(raw: unknown): string | undefined {
 export class BattleshipGame implements GameDefinition<BattleshipState> {
   readonly id = "battleship";
   readonly version = "battleship-standard-1";
-  readonly observationVersion = "battleship-observation-1";
+  readonly observationVersion = "battleship-observation-2";
   readonly actionSchemaVersion = "game-action-v1";
   readonly playerIds = roles;
   readonly hiddenInformation = true;
@@ -70,7 +70,7 @@ export class BattleshipGame implements GameDefinition<BattleshipState> {
       state: { phase: state.phase, rules: { version: this.version, board: "10x10", coordinates: "a1 through j10", fleet,
         placement: "Place all five ships at once, horizontal or vertical, without overlap.", turn: "Players alternate one shot; a hit does not grant an extra shot.", victory: "Sink all five opposing ships." },
         ownFleet: state.fleets[role], hitsReceived: received.filter((shot) => shot.hit).map((shot) => shot.coordinate), missesReceived: received.filter((shot) => !shot.hit).map((shot) => shot.coordinate),
-        ownShots, opponentPlaced: Boolean(state.fleets[other(role)]), availableTargets: coordinates.filter((cell) => !ownShots.some((shot) => shot.coordinate === cell)) },
+        ownShots, opponentPlaced: Boolean(state.fleets[other(role)]) },
       legalActions: state.phase === "battle" ? coordinates.filter((cell) => !ownShots.some((shot) => shot.coordinate === cell)).map((coordinate) => ({ type: "fire", payload: { coordinate } })) : [],
       actionSchema: state.phase === "placement" ? { type: "object", required: ["type", "payload"], additionalProperties: false, properties: { type: { type: "string", const: "place_fleet" }, payload: { type: "object", required: ["ships"], additionalProperties: false, properties: { ships: { type: "array", minItems: 5, maxItems: 5, items: { type: "object", required: ["ship", "start", "orientation"], additionalProperties: false, properties: { ship: { type: "string", enum: shipNames }, start: { type: "string", pattern: "^[a-j](?:[1-9]|10)$" }, orientation: { type: "string", enum: ["horizontal", "vertical"] } } } } } } } }
         : { type: "object", required: ["type", "payload"], additionalProperties: false, properties: { type: { type: "string", const: "fire" }, payload: { type: "object", required: ["coordinate"], additionalProperties: false, properties: { coordinate: { type: "string", pattern: "^[a-j](?:[1-9]|10)$" } } } } },
@@ -159,6 +159,24 @@ export class BattleshipGame implements GameDefinition<BattleshipState> {
     }
     return undefined;
   }
+  metrics(state: BattleshipState): GameMetric[] {
+    const version = "battleship-metrics-v1";
+    return roles.flatMap((role) => {
+      const shots = state.shots.filter((shot) => shot.playerId === role);
+      const hits = shots.filter((shot) => shot.hit).length;
+      const firstHit = shots.findIndex((shot) => shot.hit);
+      const rows: GameMetric[] = [
+        { key: "shotsFired", version, participantId: role, value: shots.length, unit: "shot" },
+        { key: "hits", version, participantId: role, value: hits, unit: "shot" },
+        { key: "accuracy", version, participantId: role, value: shots.length ? hits / shots.length : null, unit: "ratio" },
+        { key: "shipsSunk", version, participantId: role, value: shots.filter((shot) => shot.sunk).length, unit: "ship" },
+        { key: "shotsToFirstHit", version, participantId: role, value: firstHit < 0 ? null : firstHit + 1, unit: "shot" },
+      ];
+      for (const [index, shot] of shots.entries()) if (shot.sunk) rows.push({ key: `shotsToSink.${shot.sunk}`, version, participantId: role, value: index + 1, unit: "shot" });
+      return rows;
+    });
+  }
+
   publicAction(action: GameAction): GameAction { return action.type === "fire" && coordinates.includes(action.payload.coordinate as string) ? { type: "fire", payload: { coordinate: action.payload.coordinate } } : { type: "place_fleet", payload: {} }; }
   actionLabel(action: GameAction): string { return action.type === "fire" ? `Fire ${this.publicAction(action).payload.coordinate ?? "target"}` : "Fleet placed"; }
   eventProjection(state: BattleshipState): Record<string, unknown> { return { publicState: this.publicState(state) }; }

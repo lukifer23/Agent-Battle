@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import type { GameAction, GameObservation, MatchResult, MatchRecord, PlayerSeat } from "../shared.js";
+import type { GameAction, GameMetric, GameObservation, MatchResult, MatchRecord, PlayerSeat } from "../shared.js";
 
 export interface ObservationContext {
   matchId: string;
@@ -48,6 +48,8 @@ export interface GameDefinition<State> {
   forfeit?(state: State, playerId: string): State;
   actionLabel(action: GameAction): string;
   eventProjection(state: State): Record<string, unknown>;
+  /** Versioned raw measurements. Higher is not assumed to be better. */
+  metrics?(state: State, record: MatchRecord): GameMetric[];
 }
 
 export class GameRegistry {

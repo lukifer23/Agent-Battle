@@ -28,9 +28,11 @@ export function pairedBootstrap(values: number[], seed: string, samples = 5000):
 export function analyzeResearchSeries(series: SeriesRecord, matches: MatchRecord[]) {
   const plan = series.researchPlan;
   if (!plan || series.version !== "battle-series-3") throw new Error("A registered research series is required.");
-  const byId = new Map(matches.map((match) => [match.id, match]));
+  const linkedIds = new Set(series.slots.flatMap((slot) => slot.matchIds));
+  const studyMatches = matches.filter((match) => linkedIds.has(match.id));
+  const byId = new Map(studyMatches.map((match) => [match.id, match]));
   const sessionCounts = new Map<string, number>();
-  for (const match of matches) for (const attempt of [...match.history.flatMap((turn) => turn.attempts), ...(match.pendingTurn?.attempts ?? [])]) {
+  for (const match of studyMatches) for (const attempt of [...match.history.flatMap((turn) => turn.attempts), ...(match.pendingTurn?.attempts ?? [])]) {
     if (attempt.sessionId) sessionCounts.set(attempt.sessionId, (sessionCounts.get(attempt.sessionId) ?? 0) + 1);
   }
   const rows = series.slots.map((slot) => {

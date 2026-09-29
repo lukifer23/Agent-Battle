@@ -63,6 +63,8 @@ function validateAttempt(raw: unknown): ValidationResult<AgentAttempt> {
   if (!Number.isSafeInteger(raw.attempt) || (raw.attempt as number) < 1) return { error: "attempt number is invalid" };
   if (!isIsoDate(raw.startedAt)) return { error: "attempt start time is invalid" };
   if (raw.invocationId !== undefined && (!isString(raw.invocationId) || !/^[0-9a-f-]{36}$/.test(raw.invocationId))) return { error: "invocation identity is invalid" };
+  if (raw.ledgerState !== undefined && raw.ledgerState !== "reserved" && raw.ledgerState !== "spawned") return { error: "invocation ledger state is invalid" };
+  if (raw.ledgerDetail !== undefined && (!isPlainObject(raw.ledgerDetail) || (raw.ledgerDetail.pid !== undefined && (!Number.isSafeInteger(raw.ledgerDetail.pid) || (raw.ledgerDetail.pid as number) <= 0)))) return { error: "invocation ledger detail is invalid" };
   if (raw.deadlineAt !== undefined && !isIsoDate(raw.deadlineAt)) return { error: "invocation deadline is invalid" };
   if (raw.execution !== undefined) {
     const e = raw.execution;
@@ -85,6 +87,8 @@ function validateAttempt(raw: unknown): ValidationResult<AgentAttempt> {
         modelIds: [...raw.execution.modelIds as string[]], toolInventory: raw.execution.toolInventory === null ? null : [...raw.execution.toolInventory as string[]],
       } } : {}),
       ...(isString(raw.invocationId) ? { invocationId: raw.invocationId } : {}),
+      ...(raw.ledgerState === "reserved" || raw.ledgerState === "spawned" ? { ledgerState: raw.ledgerState } : {}),
+      ...(isPlainObject(raw.ledgerDetail) && Number.isSafeInteger(raw.ledgerDetail.pid) && (raw.ledgerDetail.pid as number) > 0 ? { ledgerDetail: { pid: raw.ledgerDetail.pid as number } } : {}),
       ...(isIsoDate(raw.deadlineAt) ? { deadlineAt: raw.deadlineAt } : {}),
       startedAt: raw.startedAt,
       ...(isIsoDate(raw.completedAt) ? { completedAt: raw.completedAt } : {}),

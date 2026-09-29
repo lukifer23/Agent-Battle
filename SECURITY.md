@@ -14,7 +14,16 @@ Agent Battle is a single-user, loopback-only local application. It binds to
   forwards supported credential environment variables to the child CLI, which
   also retains access to its normal authentication locations.
 - Match history and bounded provider diagnostics are stored locally under
-  `data/`, which is excluded from version control.
+  `data/`, which is excluded from version control. On Unix the data directory
+  is mode `0700`. The database, its `-wal` and `-shm` files, migration backups,
+  and recovery candidates are mode `0600`. A chmod failure refuses startup.
+  These modes limit access to the file owner. They are not encryption, and they
+  are not operating-system isolation of the agent CLI.
+- Persisted rows are validated on load. A malformed match or a series whose
+  slots disagree with the linked matches is quarantined. `record_json` is left
+  unchanged. An interrupted provider request stays uncertain: recovery does not
+  invent a response, and a later request uses a new invocation id. Possible
+  duplicate billing stays visible.
 
 ## Hidden state and provider execution
 

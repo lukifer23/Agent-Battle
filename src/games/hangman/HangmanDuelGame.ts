@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { isPlainObject, parseActionEnvelope } from "../../domain/actions.js";
 import type { GameDefinition, ObservationContext, ActionValidation } from "../../domain/game.js";
-import type { GameAction, GameObservation, MatchRecord, MatchResult } from "../../shared.js";
+import type { GameAction, GameMetric, GameObservation, MatchRecord, MatchResult } from "../../shared.js";
 import { HangmanGame, hangmanActionSchema } from "./HangmanGame.js";
 import { selectWord, type WordProvenance } from "./corpus.js";
 
@@ -29,7 +29,7 @@ const blank = (): Score => ({ points: 0, misses: 0, actionsTaken: 0, revealedLet
 export class HangmanDuelGame implements GameDefinition<HangmanDuelState> {
   readonly id = "hangman";
   readonly version = "shared-board-2";
-  readonly observationVersion = "hangman-shared-observation-v2";
+  readonly observationVersion = "hangman-shared-observation-v3";
   readonly actionSchemaVersion = "game-action-v1";
   readonly hiddenInformation = true;
   readonly playerIds = roles;
@@ -130,6 +130,23 @@ export class HangmanDuelGame implements GameDefinition<HangmanDuelState> {
     if (!isDeepStrictEqual(raw, state)) throw new Error("Hangman state differs from replay.");
     return state;
   }
+  metrics(state: HangmanDuelState): GameMetric[] {
+    const version = "hangman-shared-metrics-v1";
+    return roles.flatMap((role) => {
+      const player = state.players[role];
+      const entries = state.entries.filter((entry) => entry.playerId === role);
+      return [
+        { key: "points", version, participantId: role, value: player.points, unit: "point" },
+        { key: "pointDifferential", version, participantId: role, value: player.points - state.players[opponent(role)].points, unit: "point" },
+        { key: "positionsRevealed", version, participantId: role, value: player.revealedLetters, unit: "position" },
+        { key: "missesCaused", version, participantId: role, value: player.misses, unit: "miss" },
+        { key: "correctGuesses", version, participantId: role, value: entries.filter((entry) => entry.action.type === "guess_letter" && entry.correct).length, unit: "guess" },
+        { key: "incorrectGuesses", version, participantId: role, value: entries.filter((entry) => entry.action.type === "guess_letter" && !entry.correct).length, unit: "guess" },
+        { key: "solveAttempts", version, participantId: role, value: entries.filter((entry) => entry.action.type === "solve").length, unit: "attempt" },
+      ];
+    });
+  }
+
   publicState(state: HangmanDuelState) {
     return { ruleset: this.version, pattern: this.pattern(state), wordLength: state.word.length, guessedLetters: [...state.guessedLetters], misses: state.misses, missesAllowed: 7, terminal: this.isTerminal(state), currentPlayerId: this.currentPlayer(state), players: structuredClone(state.players),
       history: state.entries.map((entry) => ({ ...structuredClone(entry), action: this.publicAction(entry.action) })),

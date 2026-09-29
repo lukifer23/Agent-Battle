@@ -26,7 +26,7 @@ Chess remains a planning/control environment with substantial prior-exposure con
 
 ## First study
 
-Use two explicit, provider-reported Claude model IDs available to the operator, with requested medium effort, or use one identical ID as a labeled same-model control. Do not infer model availability from this document. Reasoning effort is recorded as requested; effective effort is unknown unless later independently reported.
+Use two explicit, provider-reported Claude model IDs available to the operator, with requested medium effort, or use one identical evaluated system as a labeled same-model control. An evaluated system is the provider, requested model, and requested reasoning together. Equal model strings are the same system only when the provider and requested reasoning also match. Infer model availability from the installed CLI, not from this document. Reasoning effort is recorded as requested; effective effort stays unknown unless the provider later reports it. At start, each research system freezes its execution profile. A later CLI, restriction, adapter, or protocol change pauses qualification.
 
 | Design field | Declaration |
 | --- | --- |
@@ -79,6 +79,8 @@ npm run --silent research -- prepare EXACT_MODEL_A EXACT_MODEL_B > registration.
 The baseline compares a fixed English letter-frequency order with alphabetical order. Each policy receives only legal actions. It has no hidden-word access, lookup corpus, model, or reflection. Deterministic replicates are deliberate duplicates and do not add sample size. This is a harness control, not a competitive lexical solver.
 
 On the initial 24-word suite the baseline completed 144 games with zero provider calls. Frequency-policy shared-minus-independent outcome share was **+0.0417**, with exploratory block-bootstrap interval **[-0.0729, +0.1563]**. This says nothing about model strength and is not evidence of equivalence. Reproduce from the command rather than treating these rounded values as a permanent benchmark.
+
+A separate offline role-swap control, also with zero provider calls, measures seat effects inside the current rules. Ruleset versions stay the same, and these figures stay outside the primary endpoint. Over 24 SHA-256 seeds, identical alphabetical policies on independent lanes drew every game (draw share **1**). The same 24 seeds on the shared board, frequency order `etaoinshrdlcumwfgypbvkjxqz` against alphabetical order, gave the frequency policy a first-seat outcome share of **0.729**. Its paired seat difference (frequency as player 1 minus frequency as player 2) was **-0.146**. The shared board is seat-sensitive under these policies. Identical Battleship fleets on rows `a1`–`a5`, both firing in scan order, produced a first-seat share of **1**: the first shooter sinks the shared target layout first. A white resignation awards the win to black. These figures describe the harness.
 
 API additions:
 

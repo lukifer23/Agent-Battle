@@ -6,13 +6,13 @@ The browser is never an agent tool or input source. The match controller builds 
 
 Agents do not receive a mutable game object, a filesystem path to the game database, an HTTP endpoint for arbitrary moves, or access to the GUI. A restarted agent can play from the next full observation without earlier conversation history.
 
-## Chess observation v2
+## Chess observation v3
 
 The exact fields are defined by `GameObservation` in `src/shared.ts` and built by `ChessGame.observe()`.
 
 ```json
 {
-  "schemaVersion": "chess-observation-v2",
+  "schemaVersion": "chess-observation-v3",
   "gameId": "chess",
   "matchId": "match UUID",
   "turnId": "unique turn UUID",
@@ -25,8 +25,7 @@ The exact fields are defined by `GameObservation` in `src/shared.ts` and built b
     "fen": "current FEN",
     "side_to_move": "white",
     "move_number": 12,
-    "status": "active",
-    "legal_moves_uci": ["e2e4", "g1f3"]
+    "status": "active"
   },
   "legalActions": [
     { "type": "move", "payload": { "move": "e2e4" } },
@@ -50,7 +49,9 @@ The exact fields are defined by `GameObservation` in `src/shared.ts` and built b
 }
 ```
 
-`history` is complete from the beginning of the game. `state.fen` and `legalActions` are authoritative for the current turn. UCI coordinate notation is used for moves, including promotion suffixes such as `e7e8q`; SAN is retained for display and PGN. This is not the UCI engine process protocol.
+`history` is complete from the beginning of the game. `state.fen` and `legalActions` are the move authority for the current turn. UCI coordinate notation is used for moves, including promotion suffixes such as `e7e8q`; SAN is retained for display and PGN. This is not the UCI engine process protocol.
+
+Claude and Codex receive the action schema as a CLI argument, and their prompt carries the observation without a second `actionSchema`. OpenCode's prompt includes `actionSchema` with the observation. The controller observation always keeps the schema. On this machine a chess opening prompt was 1,698 bytes for Claude and 2,332 bytes for OpenCode; that is a local measurement, not a token budget.
 
 When retrying, the controller sends the same position and legal actions with a `feedback` field describing the rejected action. This keeps correction bounded and does not silently fix, guess or repair a move.
 
@@ -89,7 +90,7 @@ Both the provider parser and the game boundary enforce the same strict envelope:
 
 Each adapter processes its provider envelope once and reports usage and tool-call metadata from that single pass. Tool-call counts are `null` when the provider emitted no parseable event stream, rather than being assumed to be zero. Codex ignores user configuration and discovered rules for the invocation, but its read-only sandbox still permits tool use; reported tool calls are rejected after the fact, which does not undo a tool's observation or external effect.
 
-The user authenticates each CLI separately before starting a match. Agent Battle passes no API key arguments, never stores credentials and does not call model endpoints directly. Optional model/reasoning values are passed as separate CLI arguments, not shell text. The public creation API requires explicit distinct model IDs for single games and v2 series. Research v3 allows identical IDs only under a labeled same-model control. Low-level adapters retain default-model support for compatibility; this does not bypass API validation.
+The user authenticates each CLI separately before starting a match. Agent Battle passes no API key arguments, never stores credentials and does not call model endpoints directly. Optional model/reasoning values are passed as separate CLI arguments, not shell text. The public creation API requires explicit distinct model IDs for single games and v2 series. Research v3 allows the same evaluated system only under a labeled same-model control. An evaluated system is the provider, the requested model, and the requested reasoning setting together. The same model string on two providers, or two reasoning settings on one model, is a system comparison. Resolved-model evidence stays a separate per-attempt check. A research series freezes each system's execution profile at start, including adapter, observation, and action protocol versions, the CLI version line, and the restriction-profile digest. Later scored attempts that drift from that profile are qualification failures and the series pauses. A profile is written only when a research series starts before any match exists. Casual matches and series that already have matches stay as saved. Low-level adapters retain default-model support for compatibility; this does not bypass API validation.
 
 The action schema keeps a root object and uses a nested `anyOf` for move payload versus empty resignation payload. The controller remains authoritative for the relationship between the action type and payload and rejects mismatched combinations. This format works with Codex's strict response-schema subset.
 
@@ -99,13 +100,13 @@ The contract leaves room for a second adapter style that calls a local model/API
 
 ## Hangman observation and actions
 
-`shared-board-2` uses `hangman-shared-observation-v2`: both agents receive the shared pattern, guessed letters, shared misses, both scores and redacted action outcomes. The secret word and seed remain private. `independent-lanes-1` observations retain only the current player's lane and lane-local counters. Actions are `{"type":"guess_letter","payload":{"letter":"s"}}` or `{"type":"solve","payload":{"word":"example"}}`. Letters must be one lowercase ASCII letter; solutions must be lowercase ASCII and the displayed word length. No extra keys or automatic repair are accepted. Repeated letters use the correction policy; in shared-board play, a letter guessed by either player is unavailable to both. Retry exhaustion forfeits the shared-board contest; independent-lane games use lane-local forfeiture. See [the rules](HANGMAN.md). Public exports redact solution payloads; private persistence retains authoritative actions.
+`shared-board-2` uses `hangman-shared-observation-v3`: both agents receive the shared pattern, guessed letters, shared misses, both scores and redacted action outcomes. The secret word and seed remain private. Global ply stays, because it is the shared turn count. `independent-lanes-1` uses `hangman-observation-v2`. Those observations retain only the current player's lane. `ply` and `turnIndex` count that lane's own actions. Actions are `{"type":"guess_letter","payload":{"letter":"s"}}` or `{"type":"solve","payload":{"word":"example"}}`. Letters must be one lowercase ASCII letter; solutions must be lowercase ASCII and the displayed word length. No extra keys or automatic repair are accepted. Repeated letters use the correction policy; in shared-board play, a letter guessed by either player is unavailable to both. Retry exhaustion forfeits the shared-board contest; independent-lane games use lane-local forfeiture. See [the rules](HANGMAN.md). Public exports redact solution payloads; private persistence retains authoritative actions.
 
 Game observations use discriminated schemas to pair each action type with its payload. The CLI output-schema guard flattens that union into a root object for provider dialect compatibility. It checks the envelope and payload shapes; the controller then enforces the exact type/payload pairing and game legality. This does not change the direct action protocol or repair invalid responses. Paid-provider acceptance of new schemas remains part of live qualification.
 
 ## Battleship observation and actions
 
-`battleship-observation-1` exposes the phase, exact ruleset, board/fleet rules, the player's own full fleet, hits and misses received, the player's shots with hit/miss/sunk outcomes, opponent placement status, and untargeted coordinates. It never includes the untouched opponent fleet. Placement uses one `place_fleet` action listing all five ships exactly once; fire uses one canonical lowercase coordinate. See [Battleship rules and privacy](BATTLESHIP.md) for complete examples and reveal timing. A placement submitted during battle, fire during placement, wrong-player action, repeated shot, extra key, or illegal fleet is rejected with bounded correction feedback. Private placement submissions are redacted in public telemetry and exports.
+`battleship-observation-2` exposes the phase, exact ruleset, board/fleet rules, the player's own full fleet, hits and misses received, the player's shots with hit/miss/sunk outcomes, and opponent placement status. Remaining target coordinates are the battle `legalActions`. It never includes the untouched opponent fleet. Placement uses one `place_fleet` action listing all five ships exactly once; fire uses one canonical lowercase coordinate. See [Battleship rules and privacy](BATTLESHIP.md) for complete examples and reveal timing. A placement submitted during battle, fire during placement, wrong-player action, repeated shot, extra key, or illegal fleet is rejected with bounded correction feedback. Private placement submissions are redacted in public telemetry and exports.
 
 ## Strict series qualification
 
@@ -116,7 +117,7 @@ For every game, Claude uses the same concise game system prompt. Reasoning `none
 
 ## Adapter v6 execution evidence
 
-New records use `agent-battle/adapter-v6` and `observation-contract-v3`. Claude emits verbose JSONL; the adapter reads the initialization tool inventory and assistant tool events instead of assuming zero tools. `StructuredOutput` is its response channel; every other observed tool call counts as external. Missing inventory or an incomplete result cannot establish zero calls. The final result supplies model usage and session ID.
+New records use `agent-battle/adapter-v6` and `observation-contract-v4`. Historical records keep the observation version they were played with. Claude emits verbose JSONL; the adapter reads the initialization tool inventory and assistant tool events instead of assuming zero tools. `StructuredOutput` is its response channel; every other observed tool call counts as external. Missing inventory or an incomplete result cannot establish zero calls. The final result supplies model usage and session ID.
 
 Claude's native schema has a single `action` field containing the ordinary `{type,payload}` action. Only that exact transport envelope is unwrapped. Legacy unwrapped responses remain readable. No model action is repaired. This avoids a reproduced root-envelope failure where the model repeatedly nested the whole action inside `payload`. Battleship coordinate schemas explicitly declare string types for strict validators.
 

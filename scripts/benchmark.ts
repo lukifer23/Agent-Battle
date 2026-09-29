@@ -2,12 +2,18 @@ import { buildSnapshot } from "../src/domain/snapshot.js";
 import { projectRecord } from "../src/domain/projection.js";
 import { MatchStore } from "../src/server/store.js";
 import { DurableStore } from "../src/server/persistence/index.js";
+import { buildPrompt } from "../src/server/adapters.js";
+import { analyzeResearchSeries } from "../src/server/researchAnalysis.js";
+import { makeResearchSeries, hangmanPilotPlan } from "../src/server/researchPlan.js";
+import { seriesExport, makeSeriesV2 } from "../src/server/series.js";
 import { BattleshipGame } from "../src/games/battleship/BattleshipGame.js";
-import { makeSeriesV2 } from "../src/server/series.js";
+import { ChessGame } from "../src/games/chess/ChessGame.js";
+import { HangmanDuelGame } from "../src/games/hangman/HangmanDuelGame.js";
+import { HangmanGame } from "../src/games/hangman/HangmanGame.js";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import { join } from "node:path";
-import type { AgentAttempt, MatchEvent, MatchRecord, TurnTelemetry } from "../src/shared.js";
+import type { AgentAttempt, GameObservation, MatchEvent, MatchRecord, TurnTelemetry } from "../src/shared.js";
 
 const turnTimeout = 120;
 
@@ -174,5 +180,152 @@ try {
   results.push({ durableArchiveMatches: archiveSize, durableReopenAndListMs: Number(reopenMs.toFixed(2)) });
   reopened.close();
 } finally { rmSync(durableFolder, { recursive: true, force: true }); }
+
+function thinMatch(index: number): MatchRecord {
+  const record = synthetic(index, 0, 0);
+  record.id = `thin-${index}`;
+  record.status = "stopped";
+  record.createdAt = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
+  record.players = [
+    { id: "white", label: "White", agent: { provider: "codex", model: "bench-codex", name: "Codex" } },
+    { id: "black", label: "Black", agent: { provider: "claude", model: "bench-claude", name: "Claude" } },
+  ];
+  record.events = [{ at: record.createdAt, type: "match.created", text: "created", sequence: 1 }];
+  return record;
+}
+
+function promptBytes(observation: GameObservation, provider: "claude" | "codex" | "opencode"): number {
+  return Buffer.byteLength(buildPrompt(observation, provider));
+}
+
+function observeBenchmarks(): void {
+  const chess = new ChessGame();
+  const context = (id: string) => ({ matchId: "m", turnId: "t", player: { id, label: id, agent: { provider: "codex" as const, model: "bench", name: id } }, ply: 1, turnIndex: 1, turnTimeoutMs: 30_000 });
+  const opening = chess.observe(chess.createState(), context("white"));
+  let long = chess.createState();
+  for (let ply = 0; ply < 40 && !chess.isTerminal(long); ply += 1) {
+    const player = chess.currentPlayer(long)!;
+    const legal = chess.observe(long, context(player)).legalActions.find((action) => action.type === "move");
+    if (!legal) break;
+    long = chess.applyAction(long, player, legal);
+  }
+  const longPlayer = chess.currentPlayer(long);
+  const longView = longPlayer ? chess.observe(long, context(longPlayer)) : opening;
+  const lanes = new HangmanGame();
+  const laneState = lanes.createState("ab".repeat(32));
+  const laneView = lanes.observe(laneState, context("player1"));
+  const shared = new HangmanDuelGame();
+  const sharedView = shared.observe(shared.createState("cd".repeat(32)), context("player1"));
+  const battle = new BattleshipGame();
+  const placing = battle.createState();
+  const placement = battle.observe(placing, context("player1"));
+  const fleet = ["carrier", "battleship", "cruiser", "submarine", "destroyer"].map((ship, row) => ({ ship, start: `a${row + 1}`, orientation: "horizontal" }));
+  battle.applyAction(placing, "player1", { type: "place_fleet", payload: { ships: fleet } });
+  battle.applyAction(placing, "player2", { type: "place_fleet", payload: { ships: fleet } });
+  const early = battle.observe(placing, context("player1"));
+  for (let shot = 0; shot < 40 && !battle.isTerminal(placing); shot += 1) {
+    const player = battle.currentPlayer(placing)!;
+    const target = battle.observe(placing, context(player)).legalActions[0];
+    battle.applyAction(placing, player, target);
+  }
+  const latePlayer = battle.currentPlayer(placing);
+  const late = latePlayer ? battle.observe(placing, context(latePlayer)) : early;
+  results.push({
+    chessOpeningNativePromptBytes: promptBytes(opening, "claude"),
+    chessOpeningEmbeddedPromptBytes: promptBytes(opening, "opencode"),
+    chessLongNativePromptBytes: promptBytes(longView, "claude"),
+    chessLongEmbeddedPromptBytes: promptBytes(longView, "opencode"),
+    hangmanLanePromptBytes: promptBytes(laneView, "claude"),
+    hangmanSharedPromptBytes: promptBytes(sharedView, "claude"),
+    battleshipPlacementNativePromptBytes: promptBytes(placement, "codex"),
+    battleshipPlacementEmbeddedPromptBytes: promptBytes(placement, "opencode"),
+    battleshipEarlyNativePromptBytes: promptBytes(early, "codex"),
+    battleshipEarlyEmbeddedPromptBytes: promptBytes(early, "opencode"),
+    battleshipLateNativePromptBytes: promptBytes(late, "codex"),
+    battleshipLateEmbeddedPromptBytes: promptBytes(late, "opencode"),
+    chessOpeningDuplicatesLegalMovesUci: "legal_moves_uci" in opening.state ? 1 : 0,
+    battleshipEarlyDuplicatesTargets: "availableTargets" in early.state ? 1 : 0,
+  });
+}
+
+observeBenchmarks();
+
+const harnessFolder = mkdtempSync(join(os.tmpdir(), "agent-battle-harness-benchmark-"));
+try {
+  const counts = process.argv.includes("--large") ? [100, 1000, 10000] : [100, 1000];
+  let store = DurableStore.open(harnessFolder);
+  const openAgain = performance.now();
+  store.close();
+  store = DurableStore.open(harnessFolder);
+  results.push({ emptyDatabaseReopenMs: Number((performance.now() - openAgain).toFixed(2)) });
+  for (const count of counts) {
+    const startIndex = store.repository.countMatches();
+    const records = Array.from({ length: count }, (_value, index) => thinMatch(startIndex + index));
+    const writeStart = performance.now();
+    store.repository.transaction(() => { for (const record of records) store.saveMatch(record); });
+    const writeMs = performance.now() - writeStart;
+    store.database.prepare("DELETE FROM provider_sessions WHERE session_id = ?").run("bench-session");
+    store.database.prepare("INSERT INTO provider_sessions (session_id, match_id, invocation_id, player_id) VALUES (?, ?, ?, ?)").run("bench-session", records[0].id, "bench-invocation", "white");
+    const lookupStart = performance.now();
+    const found = store.repository.getMatch(records[0].id);
+    const lookupMs = performance.now() - lookupStart;
+    const sessionStart = performance.now();
+    const owner = store.repository.sessionOwner("bench-session");
+    const sessionMs = performance.now() - sessionStart;
+    const pageStart = performance.now();
+    const page = store.repository.queryMatches({ provider: "codex", status: "stopped", limit: 50, offset: 50 });
+    const pageMs = performance.now() - pageStart;
+    const eventsStart = performance.now();
+    const events = store.repository.allEvents(records[0].id);
+    const eventsMs = performance.now() - eventsStart;
+    store.close();
+    const before = process.memoryUsage().heapUsed;
+    const hydrateStart = performance.now();
+    store = DurableStore.open(harnessFolder);
+    const resident = store.load();
+    const hydrateMs = performance.now() - hydrateStart;
+    const heapMb = Number(((process.memoryUsage().heapUsed - before) / (1024 * 1024)).toFixed(2));
+    const series = makeSeriesV2(
+      [{ provider: "codex", model: "bench-codex", name: "A" }, { provider: "claude", model: "bench-claude", name: "B" }],
+      120, { maxPlies: 150, maxRequests: 200, maxWallMinutes: 30, maxReportedCostUsd: null },
+      { mode: "exploratory", games: [{ gameId: "chess", gameVersion: "standard-1", repetitions: 1, rolePolicy: "alternating", challengePolicy: "fixed" }] },
+      `${(counts.indexOf(count) + 1).toString(16).padStart(2, "0")}`.repeat(32),
+    );
+    const seriesStart = performance.now();
+    store.saveSeries(series);
+    const seriesMs = performance.now() - seriesStart;
+    const exportStart = performance.now();
+    seriesExport(series, resident.matches);
+    const exportMs = performance.now() - exportStart;
+    results.push({
+      thinArchiveMatches: store.repository.countMatches(),
+      thinAdded: count,
+      thinBulkWriteMs: Number(writeMs.toFixed(2)),
+      oneMatchLookupMs: Number(lookupMs.toFixed(2)),
+      lookupFound: found ? 1 : 0,
+      sessionLookupMs: Number(sessionMs.toFixed(2)),
+      sessionHit: owner?.matchId === records[0].id ? 1 : 0,
+      historyPageCount: page.matches.length,
+      historyPageTotal: page.total,
+      historyPageMs: Number(pageMs.toFixed(2)),
+      durableEventCount: events.length,
+      durableEventReadMs: Number(eventsMs.toFixed(2)),
+      validatedStartupMs: Number(hydrateMs.toFixed(2)),
+      residentMatches: resident.matches.length,
+      residentSeries: resident.series.length,
+      hydrationHeapDeltaMb: heapMb,
+      seriesCheckpointMs: Number(seriesMs.toFixed(2)),
+      seriesExportMs: Number(exportMs.toFixed(2)),
+    });
+  }
+  const pilot = makeResearchSeries(
+    [{ provider: "claude", model: "bench-a", name: "A", reasoning: "medium" }, { provider: "claude", model: "bench-b", name: "B", reasoning: "medium" }],
+    120, { maxPlies: 64, maxRequests: 128, maxWallMinutes: 60, maxReportedCostUsd: null }, hangmanPilotPlan, "22".repeat(32),
+  );
+  const analysisStart = performance.now();
+  const analysis = analyzeResearchSeries(pilot, []);
+  results.push({ researchSlots: analysis.rows.length, researchAnalysisMs: Number((performance.now() - analysisStart).toFixed(2)), researchPrimaryFrozen: analysis.version === "paired-block-bootstrap-1" ? 1 : 0 });
+  store.close();
+} finally { rmSync(harnessFolder, { recursive: true, force: true }); }
 
 console.log(JSON.stringify(results, null, 2));

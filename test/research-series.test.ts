@@ -97,6 +97,20 @@ test("primary analysis clusters blocks and retains failed first attempts despite
   assert.equal(analyzeResearchSeries(series, [wrong]).rows[1].score, null);
 });
 
+test("an unrelated archive match does not change within-study session eligibility", () => {
+  const series = makeResearchSeries(agents, 120, budgets, smallPlan);
+  const matches = syntheticMatches(series);
+  const outsider = structuredClone(matches[0]);
+  outsider.id = randomUUID();
+  outsider.series = { ...outsider.series!, id: "other-study" };
+  outsider.history[0].attempts[0].sessionId = matches[1].history[0].attempts[0].sessionId;
+  const alone = analyzeResearchSeries(series, matches);
+  const withOutsider = analyzeResearchSeries(series, [...matches, outsider]);
+  assert.deepEqual(withOutsider.rows.map((row) => row.eligible), alone.rows.map((row) => row.eligible));
+  assert.equal(withOutsider.rows[0].eligible, true);
+  assert.equal(withOutsider.rows[1].eligible, true);
+});
+
 test("analysis rejects changed resource assignments and session reuse across matches", () => {
   const series = makeResearchSeries(agents, 120, budgets, smallPlan);
   const matches = syntheticMatches(series);

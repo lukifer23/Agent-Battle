@@ -1,4 +1,5 @@
 import { comparisonEligibility } from "./comparison.js";
+import { buildScorecard } from "./scorecard.js";
 import { defaultGames } from "./defaultGames.js";
 import type { AgentAttempt, MatchRecord, PendingTurn, TurnTelemetry, PublicMatchDetail, MatchSummary, MatchEvent } from "../shared.js";
 
@@ -89,6 +90,7 @@ export function projectRecord(record: MatchRecord, eventLimit = 40, registry = d
     ...(record.currentPlayerId ? { currentPlayerId: record.currentPlayerId } : {}),
     ...(record.error ? { error: hidden ? "Match interrupted. Review private local diagnostics for details." : record.error } : {}),
     ...(record.series ? { series: { ...record.series } } : {}),
+    scorecard: buildScorecard(record, registry),
   };
 }
 

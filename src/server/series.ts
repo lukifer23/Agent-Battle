@@ -6,10 +6,26 @@ import type { MatchController } from "../domain/MatchController.js";
 import { aggregateUsage } from "../domain/usage.js";
 import { defaultGames } from "../domain/defaultGames.js";
 import { projectRecord } from "../domain/projection.js";
-import { distinctExplicitModels, type MatchBudgets, type MatchRecord, type PlayerConfig, type PublicSeries, type PublicSeriesSlot, type SeriesPlan, type SeriesRecord, type SeriesSlot } from "../shared.js";
+import { buildScorecard } from "../domain/scorecard.js";
+import { distinctExplicitModels, type FrozenExecutionProfile, type MatchBudgets, type MatchRecord, type PlayerConfig, type PublicSeries, type PublicSeriesSlot, type SeriesPlan, type SeriesRecord, type SeriesSlot } from "../shared.js";
 
 const hexSeed = /^[0-9a-f]{64}$/;
 const terminal = new Set(["finished", "forfeit", "stopped", "error"]);
+
+export interface SeriesSaveSide {
+  command?: { kind: string; slotId?: string; payload?: unknown };
+  consumeRetry?: { slotId: string; matchId: string };
+}
+
+export interface SeriesCommandStore {
+  acceptedRetry(seriesId: string, slotId: string): boolean;
+}
+
+export interface ExecutionProfileStore {
+  load(seriesId: string): FrozenExecutionProfile[];
+  save(seriesId: string, profiles: FrozenExecutionProfile[]): void;
+  capture(agent: PlayerConfig): Promise<FrozenExecutionProfile>;
+}
 
 export function makeSeries(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeconds: number, budgets: MatchBudgets, seed = randomBytes(32).toString("hex")): SeriesRecord {
   if (!hexSeed.test(seed) || agents.some((agent) => !agent.model.trim()) || !Number.isInteger(turnTimeoutSeconds) || turnTimeoutSeconds < 30 || turnTimeoutSeconds > 600) throw new Error("Series requires a valid seed, explicit models, and a 30–600 second turn timeout.");
@@ -106,7 +122,8 @@ export function publicSeries(series: SeriesRecord, matches: MatchRecord[], inclu
     return { id: slot.id, ordinal: slot.ordinal, gameId: slot.gameId, ...(slot.gameVersion ? { gameVersion: slot.gameVersion } : {}), ...(slot.conditionId ? { conditionId: slot.conditionId, blockId: slot.blockId, replicate: slot.replicate } : {}), challengeId: slot.challengeId, roles: structuredClone(slot.roles), matchIds: [...slot.matchIds], skipped: slot.skipped,
       ...(includeProvenance && series.status === "completed" && slot.challengeSeed ? { challengeSeed: slot.challengeSeed } : {}), status,
       ...(status === "unscored" && match ? { unscoredReasons: comparisonEligibility(match).reasons } : {}),
-      ...(status === "scored" && match?.result ? { result: match.result } : {}) };
+      ...(status === "scored" && match?.result ? { result: match.result } : {}),
+      ...(match ? { scorecard: buildScorecard(match) } : {}) };
   });
   for (const slot of slots) if (!includeProvenance || series.status !== "completed") delete slot.challengeSeed;
   for (const agentIndex of [0, 1]) {
@@ -152,22 +169,27 @@ function hasScoredResult(match: MatchRecord | undefined): boolean {
 export class SeriesManager {
   private pumping = new Set<string>();
   private retrySlots = new Set<string>();
-  constructor(private readonly series: SeriesRecord[], private readonly controller: MatchController, private readonly save: () => void) {
+  constructor(private readonly series: SeriesRecord[], private readonly controller: MatchController, private readonly save: (record?: SeriesRecord, side?: SeriesSaveSide) => void, private readonly commands?: SeriesCommandStore, private readonly profiles?: ExecutionProfileStore) {
     for (const record of series) {
+      let relinked = false;
       for (const slot of record.slots) {
+        if (slot.matchIds.length > 0) continue;
         const linked = controller.list().filter((match) => match.series?.id === record.id && match.series.slotId === slot.id).sort((a, b) => (a.series?.attempt ?? 0) - (b.series?.attempt ?? 0));
+        if (linked.length === 0) continue;
         slot.matchIds = linked.map((match) => match.id);
+        relinked = true;
       }
-      if (record.status === "running") { record.status = "paused"; record.error = "Server restarted. Resume the saved slot when ready."; this.save(); }
+      if (record.status === "running") { record.status = "paused"; record.error = "Server restarted. Resume the saved slot when ready."; this.save(record); }
+      else if (relinked) this.save(record);
     }
   }
 
   list(): SeriesRecord[] { return [...this.series]; }
   get(id: string): SeriesRecord { const found = this.series.find((record) => record.id === id); if (!found) throw new Error("Series not found."); return found; }
-  private checkpoint(record: SeriesRecord, update: () => void): void {
+  private checkpoint(record: SeriesRecord, update: () => void, side?: SeriesSaveSide): void {
     const previous = structuredClone(record);
     update();
-    try { this.save(); } catch (error) { Object.assign(record, previous); throw error; }
+    try { this.save(record, side); } catch (error) { Object.assign(record, previous); throw error; }
   }
   create(agents: [PlayerConfig, PlayerConfig], turnTimeoutSeconds: number, budgets: MatchBudgets, plan?: SeriesPlan, seed?: string, researchPlan?: unknown): SeriesRecord {
     if (plan !== undefined && researchPlan !== undefined) throw new Error("Choose a tournament plan or a research plan, not both.");
@@ -175,12 +197,24 @@ export class SeriesManager {
     if (this.controller.active()) throw new Error("Stop or finish the current match before creating a series.");
     const record = researchPlan !== undefined ? makeResearchSeries(agents, turnTimeoutSeconds, budgets, researchPlan, seed) : makeSeriesV2(agents, turnTimeoutSeconds, budgets, plan, seed);
     this.series.unshift(record);
-    try { this.save(); } catch (error) { this.series.shift(); throw error; }
+    try { this.save(record); } catch (error) { this.series.shift(); throw error; }
     return record;
   }
-  async start(id: string): Promise<void> {
+  async start(id: string, preflight?: (agent: PlayerConfig) => string | undefined): Promise<void> {
     const record = this.get(id);
     if (!["ready", "paused"].includes(record.status)) throw new Error("Only a ready or paused series can start.");
+    if (record.researchPlan && preflight) {
+      for (const agent of record.agents) {
+        const reason = preflight(agent);
+        if (reason) throw new Error(reason);
+      }
+    }
+    const alreadyPlayed = record.slots.some((slot) => slot.matchIds.length > 0);
+    if (this.profiles && !alreadyPlayed && this.profiles.load(record.id).length === 0) {
+      const frozen: FrozenExecutionProfile[] = [];
+      for (const agent of record.agents) frozen.push(await this.profiles.capture(agent));
+      this.profiles.save(record.id, frozen);
+    }
     this.checkpoint(record, () => { record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString(); });
     void this.pump(record);
   }
@@ -210,8 +244,8 @@ export class SeriesManager {
       if (failed.status !== "error" || !attempts.some((attempt) => attempt.phase === "provider" && attempt.status === "error")
         || attempts.some((attempt) => attempt.phase === "qualification")) throw new Error("Research retries require a recorded provider infrastructure error; qualification failures require a new study.");
     }
-    this.checkpoint(record, () => { record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString(); });
-    this.retrySlots.add(slot.id);
+    this.checkpoint(record, () => { record.status = "running"; record.error = undefined; record.updatedAt = new Date().toISOString(); }, { command: { kind: "retry", slotId: slot.id } });
+    if (!this.commands) this.retrySlots.add(slot.id);
     void this.pump(record);
   }
   skip(id: string): void {
@@ -235,7 +269,7 @@ export class SeriesManager {
     try {
       while (record.status === "running") {
         const slot = record.slots.find((candidate) => !candidate.skipped && !hasScoredResult(linkedMatch(candidate, this.controller.list())));
-        if (!slot) { record.status = "completed"; record.updatedAt = new Date().toISOString(); this.save(); return; }
+        if (!slot) { record.status = "completed"; record.updatedAt = new Date().toISOString(); this.save(record); return; }
         let match = linkedMatch(slot, this.controller.list());
         if (match && ["running", "ready"].includes(match.status)) {
           if (match.status === "ready") await this.controller.start(match.id);
@@ -243,8 +277,8 @@ export class SeriesManager {
         }
         if (match && ["paused", "interrupted"].includes(match.status)) { await this.controller.start(match.id); return; }
         if (match && terminal.has(match.status)) {
-          if (this.retrySlots.has(slot.id)) this.retrySlots.delete(slot.id);
-          else { record.status = "paused"; record.error = `Slot ${slot.ordinal + 1} ended without a scored result.`; this.save(); return; }
+          const authorized = this.commands ? this.commands.acceptedRetry(record.id, slot.id) : this.retrySlots.has(slot.id);
+          if (!authorized) { record.status = "paused"; record.error = `Slot ${slot.ordinal + 1} ended without a scored result.${match.error ? ` ${match.error}` : ""}`; this.save(record); return; }
         }
         const players = Object.fromEntries(Object.entries(slot.roles).map(([role, agentIndex]) => [role, record.agents[agentIndex]]));
         const requested = record.settings.budgets;
@@ -253,13 +287,16 @@ export class SeriesManager {
             maxPlies: requested.maxPlies, maxRequests: requested.maxRequests * 2 + 2, maxWallMinutes: requested.maxWallMinutes * 2 + 5,
             maxReportedCostUsd: requested.maxReportedCostUsd, maxRequestsPerPlayer: requested.maxRequests, maxActiveMinutesPerPlayer: requested.maxWallMinutes,
           } });
-        slot.matchIds.push(match.id); record.updatedAt = new Date().toISOString(); this.save();
+        const authorizedRetry = this.commands ? this.commands.acceptedRetry(record.id, slot.id) : this.retrySlots.has(slot.id);
+        slot.matchIds.push(match.id); record.updatedAt = new Date().toISOString();
+        this.save(record, authorizedRetry ? { consumeRetry: { slotId: slot.id, matchId: match.id } } : undefined);
+        if (!this.commands) this.retrySlots.delete(slot.id);
         await this.controller.start(match.id);
         return;
       }
     } catch (error) {
       record.status = "paused"; record.error = error instanceof Error ? error.message : "Series execution failed."; record.updatedAt = new Date().toISOString();
-      try { this.save(); } catch { /* Store failure is already surfaced by the match controller. */ }
+      try { this.save(record); } catch { /* Store failure is already surfaced by the match controller. */ }
     } finally { this.pumping.delete(record.id); }
   }
 }

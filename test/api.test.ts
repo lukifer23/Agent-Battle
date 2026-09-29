@@ -48,7 +48,7 @@ function waitForListening(child: ChildProcess, port: number): Promise<void> {
 async function startServer(): Promise<{ child: ChildProcess; port: number; folder: string }> {
   const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-api-"));
   const port = 4400 + Math.floor(Math.random() * 400);
-  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], {
+  const child = spawn(process.execPath, [tsxBin, "src/server/main.ts"], {
     cwd: projectRoot,
     env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, NO_COLOR: "1" },
     stdio: ["ignore", "pipe", "pipe"],
@@ -144,7 +144,7 @@ test("event pagination reaches events beyond the match-detail projection window"
   };
   writeFileSync(join(folder, "matches.json"), JSON.stringify({ version: 6, matches: [record], series: [] }));
   const port = 4900 + Math.floor(Math.random() * 400);
-  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], {
+  const child = spawn(process.execPath, [tsxBin, "src/server/main.ts"], {
     cwd: projectRoot, env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder }, stdio: ["ignore", "pipe", "pipe"],
   });
   try {
@@ -188,7 +188,7 @@ test("unsupported saved versions stop startup without rewriting the store", asyn
   const path = join(folder, "matches.json");
   const source = JSON.stringify({ version: 999, matches: [] });
   writeFileSync(path, source);
-  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], {
+  const child = spawn(process.execPath, [tsxBin, "src/server/main.ts"], {
     cwd: projectRoot, env: { ...process.env, PORT: "0", AGENT_BATTLE_DATA_DIR: folder }, stdio: "ignore",
   });
   try {
@@ -203,7 +203,7 @@ test("quarantined records produce a recovery notice in the state API", async () 
   const path = join(folder, "matches.json");
   const port = 4800 + Math.floor(Math.random() * 200);
   writeFileSync(path, JSON.stringify({ version: 3, matches: [{ id: "bad" }] }));
-  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], {
+  const child = spawn(process.execPath, [tsxBin, "src/server/main.ts"], {
     cwd: projectRoot, env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder }, stdio: ["ignore", "pipe", "pipe"],
   });
   try {
@@ -222,7 +222,7 @@ test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess c
   const fixture = join(bin, "codex");
   writeFileSync(fixture, `#!${process.execPath}\n${readFileSync(join(projectRoot, "test/fixtures/hangman-cli.cjs"), "utf8")}`); chmodSync(fixture, 0o700);
   const port = 5200 + Math.floor(Math.random() * 300);
-  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], { cwd: projectRoot, env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [tsxBin, "src/server/main.ts"], { cwd: projectRoot, env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
   const request = async (path: string, body?: unknown) => {
     const result = await probe(port, { path, ...(body ? { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } } : {}) });
     assert.ok(result.status < 300, result.body); return JSON.parse(result.body);
@@ -257,8 +257,13 @@ test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess c
     const stream = await fetch(`http://127.0.0.1:${port}/api/events`);
     const reader = stream.body!.getReader(); const first = await reader.read(); await reader.cancel();
     assert.equal(new TextDecoder().decode(first.value).includes(word), false);
-    await new Promise((resolve) => setTimeout(resolve, 850));
-    const early = await request(`/api/matches/${id}`);
+    let early;
+    for (let i = 0; i < 40; i++) {
+      early = await request(`/api/matches/${id}`);
+      const pendingAttempt = early.match.pendingTurn?.attempts?.at(-1);
+      if (early.match.gameState.lanes?.player1?.sealed === true && pendingAttempt?.status === "started") break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     assert.equal(early.match.gameState.lanes.player1.sealed, true);
     assert.equal(JSON.stringify(early).includes(word), false);
     const pending = early.match.pendingTurn.attempts.at(-1);
@@ -298,7 +303,7 @@ test("series API persists private challenges and blocks unqualified Codex scorin
   const fixture = join(bin, "codex");
   writeFileSync(fixture, `#!${process.execPath}\nif (process.argv.includes('--version')) { console.log('codex fixture 1'); process.exit(0); }`); chmodSync(fixture, 0o700);
   const port = 5500 + Math.floor(Math.random() * 200);
-  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], { cwd: projectRoot,
+  const child = spawn(process.execPath, [tsxBin, "src/server/main.ts"], { cwd: projectRoot,
     env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
   const request = async (path: string, body?: unknown) => {
     const result = await probe(port, { path, ...(body ? { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } } : {}) });
@@ -335,7 +340,7 @@ test("Battleship HTTP, SSE, events, attempts and replay hide fleets until termin
   const fixture = join(bin, "codex");
   writeFileSync(fixture, `#!${process.execPath}\n${readFileSync(join(projectRoot, "test/fixtures/battleship-cli.cjs"), "utf8")}`); chmodSync(fixture, 0o700);
   const port = 5800 + Math.floor(Math.random() * 200);
-  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], { cwd: projectRoot,
+  const child = spawn(process.execPath, [tsxBin, "src/server/main.ts"], { cwd: projectRoot,
     env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
   const request = async (path: string, body?: unknown) => {
     const result = await probe(port, { path, ...(body ? { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } } : {}) });
@@ -382,7 +387,7 @@ test("new Hangman uses distinct CLI subprocesses and shares opponent effects thr
     writeFileSync(fixture, `#!${process.execPath}\n${readFileSync(join(projectRoot, "test/fixtures/hangman-cli.cjs"), "utf8")}`); chmodSync(fixture, 0o700);
   }
   const port = 6100 + Math.floor(Math.random() * 200);
-  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], { cwd: projectRoot, env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [tsxBin, "src/server/main.ts"], { cwd: projectRoot, env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
   const request = async (path: string, body?: unknown) => {
     const result = await probe(port, { path, ...(body ? { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } } : {}) });
     assert.ok(result.status < 300, result.body); return JSON.parse(result.body);
@@ -422,7 +427,7 @@ test("research API registers a frozen pilot without invoking providers and keeps
   const fixture = join(bin, "claude");
   writeFileSync(fixture, `#!${process.execPath}\nif (process.argv.includes('--version')) { console.log('claude fixture'); process.exit(0); } process.exit(99);`); chmodSync(fixture, 0o700);
   const port = 5800 + Math.floor(Math.random() * 150);
-  const child = spawn(process.execPath, [tsxBin, "src/server/index.ts"], { cwd: projectRoot,
+  const child = spawn(process.execPath, [tsxBin, "src/server/main.ts"], { cwd: projectRoot,
     env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}:/usr/bin:/bin` }, stdio: ["ignore", "pipe", "pipe"] });
   try {
     await waitForListening(child, port);

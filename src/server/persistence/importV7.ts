@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { MatchRecord, SeriesRecord } from "../../shared.js";
 import { defaultGames } from "../../domain/defaultGames.js";
+import { crossMatchInvocationErrors, validateSeriesLinkage } from "../integrity.js";
 import { validateMatchRecord, validateSeriesRecord, validateStoreEnvelope } from "../schema.js";
+import { restrictOwnerPermissions } from "./db.js";
 import type { PersistenceRepository } from "./repository.js";
 
 export interface ImportV7Result {
@@ -12,14 +14,21 @@ export interface ImportV7Result {
   quarantined: number;
   backupDir: string;
   backupManifest: string;
+  sourceSha256: string;
 }
 
 function stamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-function sha256(path: string): string {
+export function sha256File(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function recordId(record: unknown): string | undefined {
+  if (!record || typeof record !== "object" || !("id" in record)) return undefined;
+  const id = (record as { id: unknown }).id;
+  return typeof id === "string" && id ? id : undefined;
 }
 
 /**
@@ -30,7 +39,8 @@ function sha256(path: string): string {
 function backupLegacyStore(storePath: string): { backupDir: string; backupManifest: string } {
   const directory = dirname(storePath);
   const backupDir = join(directory, "migrations", `v7-import-${stamp()}`);
-  mkdirSync(backupDir, { recursive: true });
+  mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+  chmodSync(backupDir, 0o700);
   const manifest: Record<string, string> = {};
   const baseName = storePath.slice(directory.length + 1);
   const related = existsSync(directory)
@@ -39,20 +49,23 @@ function backupLegacyStore(storePath: string): { backupDir: string; backupManife
   for (const name of related) {
     const source = join(directory, name);
     try {
-      copyFileSync(source, join(backupDir, name));
-      manifest[name] = sha256(source);
-    } catch { /* Non-critical sibling (for example an open lock) is skipped. */ }
+      const target = join(backupDir, name);
+      copyFileSync(source, target);
+      chmodSync(target, 0o600);
+      manifest[name] = sha256File(source);
+    } catch { /* A non-critical sibling, for example an open lock, is skipped. */ }
   }
   const backupManifest = join(backupDir, "manifest.json");
-  writeFileSync(backupManifest, JSON.stringify({ storePath, copiedAt: new Date().toISOString(), files: manifest }, null, 2), { mode: 0o600 });
+  writeFileSync(backupManifest, JSON.stringify({ storePath, sourceSha256: sha256File(storePath), copiedAt: new Date().toISOString(), files: manifest }, null, 2), { mode: 0o600 });
+  chmodSync(backupManifest, 0o600);
   return { backupDir, backupManifest };
 }
 
 /**
  * Imports a legacy JSON store (bare array or versioned envelope up to v7) into
- * the durable database in one transaction. Invalid records are quarantined
- * rather than allowed to abort the import; a structural failure (unreadable or
- * future version) refuses without writing anything.
+ * the durable database in one transaction. Invalid records and relationally
+ * inconsistent series are quarantined. A structural failure refuses without
+ * writing the receipt. The original file is never modified.
  */
 export function importV7Store(repository: PersistenceRepository, storePath: string): ImportV7Result {
   if (!existsSync(storePath)) throw new Error(`No legacy store exists at ${storePath}.`);
@@ -61,10 +74,10 @@ export function importV7Store(repository: PersistenceRepository, storePath: stri
   try { root = JSON.parse(text); }
   catch { throw new Error(`Legacy store ${storePath} is not valid JSON. The original is preserved.`); }
   const envelope = validateStoreEnvelope(root);
-
+  const sourceSha256 = sha256File(storePath);
   const { backupDir, backupManifest } = backupLegacyStore(storePath);
 
-  const matches: MatchRecord[] = [];
+  let matches: MatchRecord[] = [];
   const invalid: Array<{ error?: string; record: unknown }> = [];
   const seenIds = new Set<string>();
   for (const raw of envelope.records) {
@@ -77,28 +90,59 @@ export function importV7Store(repository: PersistenceRepository, storePath: stri
     else if (result.value) invalid.push({ error: `duplicate match id ${result.value.id}`, record: raw });
     else invalid.push({ error: result.error, record: raw });
   }
+  const conflicts = crossMatchInvocationErrors(matches);
+  if (conflicts.size > 0) {
+    const kept: MatchRecord[] = [];
+    for (const match of matches) {
+      const error = conflicts.get(match.id);
+      if (error) invalid.push({ error, record: match });
+      else kept.push(match);
+    }
+    matches = kept;
+  }
 
-  const series: SeriesRecord[] = [];
+  const series: Array<{ raw: unknown; record: SeriesRecord }> = [];
   const seenSeries = new Set<string>();
   for (const raw of envelope.series) {
     try {
       const record = validateSeriesRecord(raw);
       if (seenSeries.has(record.id)) throw new Error("Duplicate series id.");
       seenSeries.add(record.id);
-      series.push(record);
+      series.push({ raw, record });
     } catch (error) {
       invalid.push({ error: error instanceof Error ? error.message : "Invalid series", record: raw });
     }
   }
+  const accepted = new Map(matches.map((match) => [match.id, match]));
+  const quarantinedIds = new Set(invalid.flatMap((entry) => { const id = recordId(entry.record); return id ? [id] : []; }));
+  const keptSeries: SeriesRecord[] = [];
+  for (const entry of series) {
+    const linkage = validateSeriesLinkage(entry.record, accepted, quarantinedIds);
+    if (linkage) invalid.push({ error: linkage, record: entry.raw });
+    else keptSeries.push(entry.record);
+  }
 
+  const importedAt = new Date().toISOString();
   repository.transaction(() => {
     for (const match of matches) repository.upsertMatch(match);
-    for (const record of series) repository.upsertSeries(record);
-    for (const entry of invalid) repository.addQuarantine(storePath, entry.error, entry.record);
+    for (const record of keptSeries) repository.upsertSeries(record);
+    for (const entry of invalid) repository.addQuarantine(storePath, entry.error, entry.record, recordId(entry.record));
+    repository.recordLegacyImport({
+      sourcePath: storePath,
+      sourceSha256,
+      storeVersion: envelope.version,
+      state: "completed",
+      manifestPath: backupManifest,
+      importedAt,
+      matchCount: matches.length,
+      seriesCount: keptSeries.length,
+      quarantined: invalid.length,
+    });
     repository.setMeta("imported_from", storePath);
-    repository.setMeta("imported_at", new Date().toISOString());
+    repository.setMeta("imported_at", importedAt);
     repository.setMeta("import_manifest", backupManifest);
   });
+  restrictOwnerPermissions(repository.path);
 
-  return { importedMatches: matches.length, importedSeries: series.length, quarantined: invalid.length, backupDir, backupManifest };
+  return { importedMatches: matches.length, importedSeries: keptSeries.length, quarantined: invalid.length, backupDir, backupManifest, sourceSha256 };
 }

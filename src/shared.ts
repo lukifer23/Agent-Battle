@@ -58,6 +58,19 @@ export function distinctExplicitModels(a: Pick<PlayerConfig, "model">, b: Pick<P
   return explicitModelId(first) && explicitModelId(second) && first !== second;
 }
 
+/**
+ * Identity of an evaluated system. Provider, requested model, and requested
+ * reasoning are all experimental factors. Equal model strings from different
+ * providers or reasoning settings are not the same system.
+ */
+export function evaluatedSystemKey(config: Pick<PlayerConfig, "provider" | "model" | "reasoning">): string {
+  return `${config.provider}\0${config.model.trim().toLowerCase()}\0${(config.reasoning ?? "").trim().toLowerCase()}`;
+}
+
+export function sameEvaluatedSystem(a: Pick<PlayerConfig, "provider" | "model" | "reasoning">, b: Pick<PlayerConfig, "provider" | "model" | "reasoning">): boolean {
+  return evaluatedSystemKey(a) === evaluatedSystemKey(b);
+}
+
 export function verifiedDistinctModels(a: PlayerConfig, b: PlayerConfig): boolean {
   return distinctExplicitModels(a, b) && a.resolvedModel === a.model && b.resolvedModel === b.model;
 }
@@ -114,6 +127,26 @@ export interface AgentUsage {
   coverage: "none" | "partial" | "full";
 }
 
+export interface GameMetric {
+  key: string;
+  version: string;
+  participantId?: string;
+  value: number | string | boolean | null;
+  unit?: string;
+}
+
+export type TerminationClass = "game-terminal" | "resignation" | "protocol-forfeit" | "lane-forfeit" | "budget-stop" | "operator-stop" | "provider-failure" | "storage-failure" | "interrupted" | "unknown";
+
+/** Read-time layers. This is not a universal score and is not a stored authority. */
+export interface MatchScorecard {
+  version: "scorecard-v1";
+  outcome: { kind: "win" | "draw" | "unscored"; winnerId: string | null; notation?: string; reason?: string; seats: Record<string, "win" | "draw" | "loss" | "unscored"> };
+  termination: { class: TerminationClass; detail?: string };
+  qualification: { eligible: boolean; reasons: string[] };
+  resources: { requests: number; latencyMs: number | null; inputTokens: number | null; outputTokens: number | null; costUsd: number | null; coverage: "none" | "partial" | "full" };
+  metrics: GameMetric[];
+}
+
 export interface ExecutionEvidence {
   version: "execution-evidence-1";
   profileId: string;
@@ -130,6 +163,15 @@ export interface ExecutionEvidence {
 export interface AgentAttempt {
   execution?: ExecutionEvidence;
   invocationId?: string;
+  /**
+   * Ledger edge committed with this attempt. Absent on historical attempts.
+   * `reserved` is durable before any provider process exists; `spawned` means
+   * a child process was acknowledged. Terminal attempt status is projected
+   * separately and does not clear this edge.
+   */
+  ledgerState?: "reserved" | "spawned";
+  /** Pid observed when the provider child was spawned. */
+  ledgerDetail?: { pid?: number };
   deadlineAt?: string;
   attempt: number;
   startedAt: string;
@@ -303,6 +345,8 @@ export interface SeriesRecord {
   masterSeed: string;
   slots: SeriesSlot[];
   error?: string;
+  /** Attached from the execution_profiles table when a study froze one. Never invented for older rows. */
+  executionProfiles?: FrozenExecutionProfile[];
 }
 
 export interface PublicSeriesSlot extends Omit<SeriesSlot, "challengeSeed"> {
@@ -310,6 +354,7 @@ export interface PublicSeriesSlot extends Omit<SeriesSlot, "challengeSeed"> {
   status: "pending" | "running" | "scored" | "unscored" | "skipped";
   result?: MatchResult;
   unscoredReasons?: string[];
+  scorecard?: MatchScorecard;
 }
 
 export interface PublicSeries extends Omit<SeriesRecord, "masterSeed" | "slots"> {
@@ -347,6 +392,36 @@ export interface PublicMatchDetail extends MatchSummary {
   error?: string;
   pendingTurn?: PendingTurn;
   series?: MatchRecord["series"];
+  scorecard?: MatchScorecard;
+}
+
+export interface AdapterCapabilities {
+  exactModel: "observable" | "unavailable";
+  sessionIdentity: "observable" | "unavailable";
+  streamCompletion: "observable" | "unavailable";
+  toolInventory: "observable" | "unavailable";
+  toolUse: "observable" | "unavailable";
+  structuredOutput: "native" | "prompt";
+  usage: "observable" | "unavailable";
+  cost: "observable" | "unavailable";
+  reasoningRequest: "requested" | "unavailable";
+  effectiveReasoning: "unobserved";
+  cancellation: "observable" | "unavailable";
+  isolation: "qualified" | "unqualified";
+}
+
+/** Frozen at series start. Historical series omit this rather than receiving a backfill. */
+export interface FrozenExecutionProfile {
+  provider: Provider;
+  requestedModel: string;
+  requestedReasoning: string;
+  adapterVersion: string;
+  observationProtocolVersion: string;
+  actionProtocolVersion: string;
+  cliVersion: string | null;
+  restrictionProfileId: string;
+  profileHash: string;
+  capabilities: AdapterCapabilities;
 }
 
 export interface ProviderInfo {

@@ -2,12 +2,12 @@
 
 Agent Battle is a local-first project. Changes are proposed on a short-lived
 branch and merged to `main` through a pull request; the CI workflow runs tests,
-lint, typecheck and build on Node 20 and 22 for every pull request. Do not
+lint, typecheck and build on Node 22 and 24 for every pull request. Do not
 force-push shared branches.
 
 ## Before you start
 
-- Node.js 20.19 or newer and npm are required.
+- Node.js 22.13 or newer and npm are required. Node 20 cannot load `node:sqlite`.
 - At least one supported agent CLI (Codex, Claude Code, OpenCode) must be
   installed and authenticated to run a real match. Tests do not require any CLI
   and never make paid model requests.
@@ -58,8 +58,10 @@ Write short, factual, imperative commit messages on `main`. Do not force-push.
 
 ## Research changes
 
-Read [the research protocol](docs/RESEARCH_PROTOCOL.md) before adding environments or scores. Preserve exact ruleset lookup, frozen declarations, deterministic role/challenge assignments, first-attempt analysis, all planned rows and unknown usage. Tests must cover malformed commitments, assignment drift, missing evidence, session reuse, retry selection and private projections. Do not silently change an existing generator, analysis version, or scoring rule.
+Read [the research protocol](docs/RESEARCH_PROTOCOL.md) before adding environments or scores. Preserve exact ruleset lookup, frozen declarations, deterministic role/challenge assignments, first-attempt analysis, all planned rows, unknown usage, and the research v3 primary endpoint: first-attempt paired-block win share, missing-outcome bounds, and `paired-block-bootstrap-1`. New metrics stay additive. Tests must cover malformed commitments, assignment drift, missing evidence, session reuse, retry selection and private projections. Do not silently change an existing generator, analysis version, scoring rule, or the primary endpoint.
 
-Keep game outcomes, execution qualification and scientific interpretation separate. A fixture agent or offline control must be labeled as such and cannot populate a live-model ranking. Research v3 permits explicit same-model controls without weakening casual-match validation. Include reflection/learning only under a future versioned protocol with leakage and matched-control tests.
+An evaluated system is the provider, requested model, and requested reasoning together. A same-model control requires equal keys. A system comparison requires unequal keys. Research series freeze one execution profile per agent at start, before any match exists. Later drift in CLI version, restrictions, adapter, observation protocol, or action protocol is a qualification failure and pauses the series. Current prompts use `observation-contract-v4`. Historical fixtures may still store an older prompt version as saved data.
+
+Keep game outcomes, execution qualification and scientific interpretation separate. A fixture agent or offline control must be labeled as such and cannot populate a live-model ranking. Research v3 permits an explicit same-model control without weakening casual-match validation. Include reflection/learning only under a future versioned protocol with leakage and matched-control tests.
 
 Update README, rules/protocol/architecture docs, changelog and handoff together when contracts change. Keep historical acceptance evidence dated, and report only checks actually run for the new change. An offline baseline is not a paid-provider qualification test.

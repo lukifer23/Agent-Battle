@@ -4,7 +4,7 @@ import type { ChildProcess } from "node:child_process";
 import { accessSync, constants, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { delimiter, join } from "node:path";
-import type { AgentUsage, GameAction, GameObservation, PlayerConfig, Provider, ProviderInfo } from "../shared.js";
+import type { AdapterCapabilities, AgentUsage, GameAction, GameObservation, PlayerConfig, Provider, ProviderInfo } from "../shared.js";
 import { AgentExecutionError, AgentProtocolError, type AgentAdapter, type AgentReply, type AttemptControl } from "../domain/agent.js";
 import { parseActionEnvelope } from "../domain/actions.js";
 import { excerpt } from "./diagnostics.js";
@@ -245,12 +245,18 @@ export function parseStructuredAction(output: string, provider: Provider): GameA
   return result.action;
 }
 
-function buildPrompt(observation: GameObservation): string {
+/** Native structured-output transports receive the schema as CLI arguments, not a second copy in the prompt. */
+export function buildPrompt(observation: GameObservation, provider: Provider): string {
+  const nativeSchema = provider === "claude" || provider === "codex";
+  const body = nativeSchema ? { ...observation, actionSchema: undefined } : observation;
+  const contract = nativeSchema
+    ? "Return exactly one JSON object in the supplied action schema, with type and payload at the top level. The payload contains only the fields for that action, never another action envelope. Do not include prose or markdown."
+    : "Return exactly one JSON object matching observation.actionSchema, with type and payload at the top level. The payload contains only the fields for that action, never another action envelope. Do not include prose or markdown.";
   return [
     "You are an agent playing a turn-based game. The controller is authoritative and validates every action.",
     "Use only the observation below. It is complete for this turn; do not assume memory from earlier turns.",
-    "Return exactly one JSON object matching observation.actionSchema, with type and payload at the top level. The payload contains only the fields for that action, never another action envelope. Do not include prose or markdown.",
-    JSON.stringify({ observation }),
+    contract,
+    JSON.stringify({ observation: body }),
   ].join("\n\n");
 }
 
@@ -258,8 +264,16 @@ abstract class CliAgentAdapter implements AgentAdapter {
   readonly id: string;
   readonly restrictions?: string;
   readonly isolationQualified: boolean = false;
+  readonly capabilities: AdapterCapabilities = {
+    exactModel: "unavailable", sessionIdentity: "unavailable", streamCompletion: "unavailable", toolInventory: "unavailable",
+    toolUse: "unavailable", structuredOutput: "prompt", usage: "unavailable", cost: "unavailable", reasoningRequest: "unavailable",
+    effectiveReasoning: "unobserved", cancellation: "observable", isolation: "unqualified",
+  };
   private executable?: string;
+  private versionCaptured = false;
+  private cliVersionLine: string | null = null;
   private readonly activeChildren = new Set<ChildProcess>();
+  get observedCliVersion(): string | null { return this.cliVersionLine; }
 
   constructor(readonly config: PlayerConfig) {
     this.id = `${config.provider}:${config.model || "default"}`;
@@ -268,6 +282,11 @@ abstract class CliAgentAdapter implements AgentAdapter {
   async initialize(): Promise<void> {
     this.executable = locate(commandName[this.config.provider]);
     if (!this.executable) throw new AgentExecutionError(`${commandName[this.config.provider]} CLI is not available in PATH.`);
+    if (!this.versionCaptured) {
+      this.versionCaptured = true;
+      const reported = await smallCommand(this.executable, ["--version"]);
+      this.cliVersionLine = reported.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
+    }
   }
 
   async act(observation: GameObservation, control: AttemptControl): Promise<AgentReply> {
@@ -284,8 +303,10 @@ abstract class CliAgentAdapter implements AgentAdapter {
         signal: control.signal,
         returnNonzeroExit: true,
         onChild: (child) => {
-          if (child) this.activeChildren.add(child);
-          else for (const active of this.activeChildren) if (active.exitCode !== null || active.signalCode !== null) this.activeChildren.delete(active);
+          if (child) {
+            this.activeChildren.add(child);
+            if (typeof child.pid === "number" && child.pid > 0) control.onSpawn?.(child.pid);
+          } else for (const active of this.activeChildren) if (active.exitCode !== null || active.signalCode !== null) this.activeChildren.delete(active);
         },
       });
       const responseText = invocation.readResponse(response.stdout);
@@ -354,6 +375,11 @@ abstract class CliAgentAdapter implements AgentAdapter {
 
 export class CodexCLIAdapter extends CliAgentAdapter {
   override readonly isolationQualified = false;
+  override readonly capabilities: AdapterCapabilities = {
+    exactModel: "unavailable", sessionIdentity: "unavailable", streamCompletion: "observable", toolInventory: "unavailable",
+    toolUse: "observable", structuredOutput: "native", usage: "observable", cost: "unavailable", reasoningRequest: "requested",
+    effectiveReasoning: "unobserved", cancellation: "observable", isolation: "unqualified",
+  };
   override readonly restrictions = "Codex read-only sandbox, ephemeral session, approval_policy=never; reported tool calls are rejected and no tool observation is undone.";
   protected invocation(observation: GameObservation, workingDirectory: string): Invocation {
     const schemaPath = join(workingDirectory, "action-schema.json");
@@ -368,7 +394,7 @@ export class CodexCLIAdapter extends CliAgentAdapter {
         "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "-c", 'approval_policy="never"',
         "--json", "--output-schema", schemaPath, "--output-last-message", responsePath, "--cd", workingDirectory,
         ...this.getModelArgs(), ...reasoningArgs,
-        buildPrompt(observation),
+        buildPrompt(observation, "codex"),
       ],
       env: safeEnvironment(),
       readResponse: (stdout) => readBoundedFile(responsePath) ?? stdout,
@@ -379,6 +405,11 @@ export class CodexCLIAdapter extends CliAgentAdapter {
 
 export class ClaudeCodeAdapter extends CliAgentAdapter {
   override readonly isolationQualified = true;
+  override readonly capabilities: AdapterCapabilities = {
+    exactModel: "observable", sessionIdentity: "observable", streamCompletion: "observable", toolInventory: "observable",
+    toolUse: "observable", structuredOutput: "native", usage: "observable", cost: "observable", reasoningRequest: "requested",
+    effectiveReasoning: "unobserved", cancellation: "observable", isolation: "qualified",
+  };
   override readonly restrictions = "Claude Code print/safe mode with tools, hooks, discovered settings, MCP and slash commands disabled; no session persistence. OAuth/keychain authentication remains available; this is not OS isolation.";
   protected invocation(observation: GameObservation): Invocation {
     const reasoning = this.config.reasoning?.trim().toLowerCase();
@@ -392,7 +423,7 @@ export class ClaudeCodeAdapter extends CliAgentAdapter {
         "--system-prompt", "You are a game-playing agent. Follow the supplied rules and observation. Maximize your game objective. Submit the requested action in the action field of StructuredOutput.",
         ...effortArgs,
         ...(this.config.model.trim() ? ["--model", this.config.model.trim()] : []),
-        buildPrompt(observation),
+        buildPrompt(observation, "claude"),
       ],
       // Both --bare and CLAUDE_CODE_SIMPLE suppress OAuth/keychain reads.
       // Safe mode disables customizations while retaining authentication.
@@ -423,6 +454,11 @@ function openCodeRestrictedConfig(): string {
 
 export class OpenCodeAdapter extends CliAgentAdapter {
   override readonly isolationQualified = true;
+  override readonly capabilities: AdapterCapabilities = {
+    exactModel: "observable", sessionIdentity: "unavailable", streamCompletion: "observable", toolInventory: "unavailable",
+    toolUse: "observable", structuredOutput: "prompt", usage: "observable", cost: "observable", reasoningRequest: "requested",
+    effectiveReasoning: "unobserved", cancellation: "observable", isolation: "qualified",
+  };
   override readonly restrictions = "OpenCode run with --pure and a per-invocation agent that denies all built-in and custom tools; not a general account/config isolation boundary.";
   protected invocation(observation: GameObservation, workingDirectory: string): Invocation {
     const env = safeEnvironment();
@@ -431,7 +467,7 @@ export class OpenCodeAdapter extends CliAgentAdapter {
     const reasoning = this.config.reasoning?.trim();
     const variantArgs = reasoning ? ["--variant", reasoning] : [];
     return {
-      args: ["run", "--format", "json", "--pure", "--agent", "agent-battle", "--dir", workingDirectory, ...modelArgs, ...variantArgs, buildPrompt(observation)],
+      args: ["run", "--format", "json", "--pure", "--agent", "agent-battle", "--dir", workingDirectory, ...modelArgs, ...variantArgs, buildPrompt(observation, "opencode")],
       env,
       readResponse: (stdout) => stdout,
       interpret: interpretOpenCode,

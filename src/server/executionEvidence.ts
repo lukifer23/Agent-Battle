@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ExecutionEvidence, PlayerConfig } from "../shared.js";
+import { OBSERVATION_PROTOCOL_VERSION } from "../version.js";
 
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const knownTypes = {
@@ -30,6 +31,7 @@ export function inspectExecutionStream(config: PlayerConfig, stdout: string, res
         const knownBlocks = new Set(["text", "thinking", "redacted_thinking", "tool_use", "tool_result"]);
         if (event.message.content.some((block) => !object(block) || !knownBlocks.has(String(block.type)))) unknownEvents = true;
       }
+      if (event.type === "system" && event.subtype === "init") add(event.model);
       if (object(event.message)) add(event.message.model);
       if (object(event.modelUsage)) Object.keys(event.modelUsage).forEach(add);
       if (event.type === "result") add(event.model);
@@ -46,7 +48,7 @@ export function inspectExecutionStream(config: PlayerConfig, stdout: string, res
   const streamComplete = events.length > 0 && events.at(-1)?.type === endType && events.filter((e) => e.type === endType).length === 1;
   const profileId = `${config.provider}/restricted-cli-v1`;
   // Only static policy/configuration is hashed: low-entropy private observations must not leak through public hashes.
-  const profileHash = createHash("sha256").update(JSON.stringify({ profileId, restrictions, model: config.model, reasoning: config.reasoning ?? "", promptVersion: "observation-contract-v3", environment: "allowlist-v1" })).digest("hex");
+  const profileHash = createHash("sha256").update(JSON.stringify({ profileId, restrictions, model: config.model, reasoning: config.reasoning ?? "", promptVersion: OBSERVATION_PROTOCOL_VERSION, environment: "allowlist-v1" })).digest("hex");
   return { version: "execution-evidence-1", profileId, profileHash, requestedReasoning: config.reasoning ?? "", effectiveReasoning: null,
     streamComplete, unknownEvents, modelIds: [...modelIds].sort(), toolInventory: inventory };
 }

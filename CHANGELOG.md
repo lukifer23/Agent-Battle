@@ -5,6 +5,19 @@ early development and does not yet follow a released versioning scheme.
 
 ## Unreleased
 
+### Experimental harness (2026-09-29)
+
+- Require Node.js 22.13 or newer. CI runs Node 22 and 24. Startup exits when `node:sqlite` is unavailable.
+- Validate durable match and series rows on load. Quarantine a malformed record or a series whose slots, agents, challenge, research assignment, or completion state disagree with the linked matches. Leave `record_json` unchanged.
+- Record one legacy-import receipt per source hash. An empty or series-only import does not repeat. A later change to the original JSON is not merged.
+- Project the invocation ledger from the match checkpoint. A provider process starts only after the pending attempt and its reservation are committed. Interrupted attempts stay uncertain; recovery does not invent a provider response.
+- Persist series retry intent and save only the series that changed. History, events, and session identity use the SQLite indexes. `/api/state` stays a bounded snapshot. Complete durable events remain available to the events API and series export.
+- Freeze a research execution profile at series start. Drift in CLI version, restrictions, adapter, or protocol is a qualification failure. Same-system controls compare provider, model, and reasoning together.
+- Add read-time scorecards that separate outcome, termination, qualification, resource coverage, and versioned per-game metrics. Protocol forfeits stay scored and are labeled separately from resignation and provider failure. Research v3 primary analysis is unchanged.
+- Publish `observation-contract-v4`: chess `chess-observation-v3` and Battleship `battleship-observation-2` keep a single legal-action list; independent Hangman `hangman-observation-v2` counts ply inside the current lane; Claude and Codex prompts leave `actionSchema` to the CLI schema argument.
+- Record offline seat measurements for the current rules: independent identical policies draw; shared-board frequency versus alphabetical is seat-sensitive; identical Battleship fleets give the first shooter the win. These are harness controls.
+- Verify 190 offline tests on this machine. No paid provider calls.
+
 ### Durable SQLite store (2026-09-29)
 
 - Replace the whole-archive JSON rewrite with a local SQLite store in WAL mode (`node:sqlite`, no third-party dependency). A match checkpoint now touches one record instead of serializing the entire history, so checkpoint cost no longer scales with the archive.

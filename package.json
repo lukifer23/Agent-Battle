@@ -6,12 +6,12 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n api,web -c green,cyan \"npm:dev:api\" \"npm:dev:web\"",
-    "dev:api": "tsx watch src/server/index.ts",
+    "dev:api": "tsx watch src/server/main.ts",
     "dev:web": "vite",
     "lint": "eslint src test scripts vite.config.ts",
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && vite build",
-    "start": "tsx src/server/index.ts",
+    "start": "tsx src/server/main.ts",
     "test": "tsx --test test/*.test.ts",
     "benchmark": "tsx scripts/benchmark.ts",
     "research": "tsx scripts/research.ts"
@@ -39,6 +39,6 @@
     "vite": "^7.1.4"
   },
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=22.13.0"
   }
 }

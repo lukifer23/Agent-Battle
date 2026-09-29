@@ -5,7 +5,8 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
-import { PROVIDERS, distinctExplicitModels, type MatchRecord, type PlayerConfig, type Provider, type SeriesRecord } from "../shared.js";
+import { PROVIDERS, distinctExplicitModels, sameEvaluatedSystem, type MatchRecord, type PlayerConfig, type Provider, type SeriesRecord } from "../shared.js";
+import { buildFrozenProfile, researchCapabilityRefusal } from "../domain/executionProfile.js";
 import { AgentRegistry } from "../domain/agent.js";
 import { MatchController } from "../domain/MatchController.js";
 import { defaultGames } from "../domain/defaultGames.js";
@@ -16,6 +17,7 @@ import { DurableStore } from "./persistence/index.js";
 import { DATABASE_SCHEMA_VERSION } from "../version.js";
 import { shouldPersistChange, shouldPublishSnapshot } from "./eventPolicy.js";
 import { SeriesManager, publicSeries, seriesExport } from "./series.js";
+import type { AppState } from "../shared.js";
 
 const app = express();
 const httpServer = createServer(app);
@@ -120,9 +122,15 @@ function withStorage(snapshot: import("../shared.js").AppState): import("../shar
   return { ...snapshot, storage: { status: "healthy", message: "" } };
 }
 
+async function serverSnapshot(): Promise<AppState> {
+  const snapshot = await controller.snapshot();
+  const recent = durable.repository.queryMatches({ limit: 50, offset: 0 });
+  return { ...snapshot, revision: Math.max(snapshot.revision, durable.repository.maxRevision()), recentMatches: recent.matches.map(summaryOf) };
+}
+
 function publishSnapshot(): void {
   const started = Date.now();
-  void controller.snapshot().then(withStorage).then((snapshot) => {
+  void serverSnapshot().then(withStorage).then((snapshot) => {
     const encoded = JSON.stringify(snapshot);
     logMetric("snapshot", { bytes: Buffer.byteLength(encoded), matches: snapshot.recentMatches.length, ms: Date.now() - started });
     for (const response of eventClients) writeToClient(response, "snapshot", encoded);
@@ -133,14 +141,14 @@ function stateChanged(record: MatchRecord, event?: import("../shared.js").MatchE
   if (shouldPersistChange(event)) {
     const started = Date.now();
     durable.saveMatch(record);
-    logMetric("checkpoint", { matches: storedMatches.length, ms: Date.now() - started });
+    logMetric("checkpoint", { matches: durable.repository.countMatches(), ms: Date.now() - started });
   }
   if (event) {
     const encoded = JSON.stringify({ matchId: record.id, ...(event.sequence === undefined ? { transient: true } : { revision: event.sequence }), event });
     logMetric("event", { type: event.type, bytes: Buffer.byteLength(encoded) });
     for (const response of eventClients) writeToClient(response, event.type, encoded, event.sequence === undefined ? undefined : `${record.id}:${event.sequence}`);
   }
-  if (shouldPublishSnapshot(event) || record.gameId === "hangman" || event?.type === "agent.started") publishSnapshot();
+  if (shouldPublishSnapshot(event)) publishSnapshot();
   if (event) seriesManager?.onMatchChange(record);
 }
 
@@ -160,8 +168,28 @@ try {
       catch { console.error("Unable to persist the private recovery candidate; it remains in memory until shutdown."); }
     }
     publishSnapshot();
+  }, (sessionId) => {
+    const owner = durable.repository.sessionOwner(sessionId);
+    return owner ? { matchId: owner.matchId, invocationId: owner.invocationId } : undefined;
+  }, (match, playerId) => {
+    if (!match.series) return undefined;
+    const series = durable.repository.getSeries(match.series.id);
+    const slot = series?.slots.find((item) => item.id === match.series?.slotId);
+    const index = slot?.roles[playerId];
+    return typeof index === "number" ? series?.executionProfiles?.[index] : undefined;
   });
-  seriesManager = new SeriesManager(storedSeries, controller, () => { for (const series of seriesManager!.list()) durable.saveSeries(series); });
+  seriesManager = new SeriesManager(storedSeries, controller, (record, side) => { if (record) durable.saveSeries(record, side); }, {
+    acceptedRetry: (seriesId, slotId) => durable.repository.hasAcceptedRetry(seriesId, slotId),
+  }, {
+    load: (seriesId) => durable.repository.executionProfiles(seriesId),
+    save: (seriesId, profiles) => durable.repository.saveExecutionProfiles(seriesId, profiles),
+    capture: async (agent) => {
+      const adapter = agents.create(agent);
+      await adapter.initialize();
+      try { return buildFrozenProfile(adapter); }
+      finally { await adapter.shutdown(); }
+    },
+  });
 } catch (error) {
   console.error("Could not restore saved matches.", error);
   releaseStoreOwnership();
@@ -208,8 +236,40 @@ function matchIdOf(request: Request): string {
 }
 
 app.get("/api/state", asyncRoute(async (_request, response) => {
-  response.json(withStorage(await controller.snapshot()));
+  response.json(withStorage(await serverSnapshot()));
 }));
+
+function queryString(request: Request, key: string): string | undefined {
+  const value = request.query[key];
+  const text = Array.isArray(value) ? value[0] : value;
+  return typeof text === "string" && text.trim() ? text.trim() : undefined;
+}
+
+function liveSeries(): SeriesRecord[] {
+  const live = new Map(seriesManager!.list().map((record) => [record.id, record]));
+  for (const stored of durable.repository.listSeries()) if (!live.has(stored.id)) live.set(stored.id, stored);
+  return [...live.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function seriesById(id: string): SeriesRecord {
+  try { return seriesManager!.get(id); }
+  catch { /* Completed and stopped series stay in SQLite. */ }
+  const stored = durable.repository.getSeries(id);
+  if (!stored) throw new Error("Series not found.");
+  return stored;
+}
+
+function matchesFor(series: SeriesRecord, fullEvents = false): MatchRecord[] {
+  const found: MatchRecord[] = [];
+  for (const id of series.slots.flatMap((slot) => slot.matchIds)) {
+    const match = controller.get(id) ?? durable.repository.getMatch(id);
+    if (!match) continue;
+    if (!fullEvents) { found.push(match); continue; }
+    const events = durable.repository.allEvents(id);
+    found.push(events.length > 0 ? { ...match, events } : match);
+  }
+  return found;
+}
 
 function pageParams(request: Request): { limit: number; offset: number } {
   const rawLimit = Number(request.query.limit ?? 50);
@@ -221,29 +281,43 @@ function pageParams(request: Request): { limit: number; offset: number } {
 
 app.get("/api/matches", (request, response) => {
   const { limit, offset } = pageParams(request);
-  response.json({
-    total: storedMatches.length,
-    offset,
+  const qualified = queryString(request, "qualified");
+  const page = durable.repository.queryMatches({
+    gameId: queryString(request, "gameId"),
+    gameVersion: queryString(request, "gameVersion"),
+    provider: queryString(request, "provider"),
+    model: queryString(request, "model"),
+    status: queryString(request, "status"),
+    seriesId: queryString(request, "seriesId"),
+    resultKind: queryString(request, "resultKind"),
+    since: queryString(request, "since"),
+    until: queryString(request, "until"),
+    ...(qualified === "true" || qualified === "false" ? { qualified: qualified === "true" } : {}),
     limit,
-    matches: storedMatches.slice(offset, offset + limit).map(summaryOf),
+    offset,
   });
+  response.json({ total: page.total, offset, limit, matches: page.matches.map(summaryOf) });
 });
 
 app.get("/api/matches/:id", (request, response) => {
-  const match = controller.get(matchIdOf(request));
+  const id = matchIdOf(request);
+  const match = controller.get(id) ?? durable.repository.getMatch(id);
   if (!match) { response.status(404).json({ error: "Match not found.", code: "not_found" }); return; }
   response.json({ match: projectRecord(match, 500) });
 });
 
 app.get("/api/matches/:id/events", (request, response) => {
-  const match = controller.get(matchIdOf(request));
+  const id = matchIdOf(request);
+  const match = controller.get(id) ?? durable.repository.getMatch(id);
   if (!match) { response.status(404).json({ error: "Match not found.", code: "not_found" }); return; }
   const { limit, offset } = pageParams(request);
-  response.json({ total: match.events.length, offset, limit, events: match.events.slice(offset, offset + limit).map((event) => projectEvent(match, event)) });
+  const events = durable.repository.allEvents(id);
+  response.json({ total: events.length, offset, limit, events: events.slice(offset, offset + limit).map((event) => projectEvent(match, event)) });
 });
 
 app.get("/api/matches/:id/attempts", (request, response) => {
-  const match = controller.get(matchIdOf(request));
+  const id = matchIdOf(request);
+  const match = controller.get(id) ?? durable.repository.getMatch(id);
   if (!match) { response.status(404).json({ error: "Match not found.", code: "not_found" }); return; }
   const { limit, offset } = pageParams(request);
   const publicMatch = projectRecord(match);
@@ -254,17 +328,26 @@ app.get("/api/matches/:id/attempts", (request, response) => {
 app.get("/api/games", (_request, response) => response.json({ games: games.list(), versions: games.listVersions() }));
 app.get("/api/research/presets", (_request, response) => response.json({ presets: [{ id: "hangman-pilot", plan: hangmanPilotPlan, expectedMatches: 144, expectedRequests: [1500, 5000] }] }));
 app.get("/api/series/:id/analysis", (request, response) => {
-  try { response.json(analyzeResearchSeries(seriesManager!.get(matchIdOf(request)), storedMatches)); }
+  try {
+    const series = seriesById(matchIdOf(request));
+    response.json(analyzeResearchSeries(series, matchesFor(series)));
+  }
   catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : "Analysis unavailable.", code: "analysis_unavailable" }); }
 });
 
-app.get("/api/series", (_request, response) => response.json({ series: seriesManager!.list().map((record) => publicSeries(record, storedMatches)) }));
+app.get("/api/series", (_request, response) => response.json({ series: liveSeries().map((record) => publicSeries(record, matchesFor(record))) }));
 app.get("/api/series/:id", (request, response) => {
-  try { response.json({ series: publicSeries(seriesManager!.get(matchIdOf(request)), storedMatches) }); }
+  try {
+    const series = seriesById(matchIdOf(request));
+    response.json({ series: publicSeries(series, matchesFor(series)) });
+  }
   catch { response.status(404).json({ error: "Series not found.", code: "not_found" }); }
 });
 app.get("/api/series/:id/export", (request, response) => {
-  try { response.json(seriesExport(seriesManager!.get(matchIdOf(request)), storedMatches)); }
+  try {
+    const series = seriesById(matchIdOf(request));
+    response.json(seriesExport(series, matchesFor(series, true)));
+  }
   catch { response.status(404).json({ error: "Series not found.", code: "not_found" }); }
 });
 app.post("/api/series", asyncRoute(async (request, response) => {
@@ -280,20 +363,24 @@ app.post("/api/series", asyncRoute(async (request, response) => {
   const plan = body.plan as import("../shared.js").SeriesPlan | undefined;
   if (body.researchPreset !== undefined && body.researchPreset !== "hangman-pilot") throw new Error("Unknown research preset.");
   if (body.researchPreset && (body.plan || body.researchPlan || body.masterSeed)) throw new Error("A preset cannot be combined with another plan or root.");
-  const researchPlan = body.researchPreset ? { ...structuredClone(hangmanPilotPlan), comparison: { ...hangmanPilotPlan.comparison, kind: distinctExplicitModels(parsed[0], parsed[1]) ? "system-comparison" : "same-model-control" } } : body.researchPlan;
+  const researchPlan = body.researchPreset ? { ...structuredClone(hangmanPilotPlan), comparison: { ...hangmanPilotPlan.comparison, kind: sameEvaluatedSystem(parsed[0], parsed[1]) ? "same-model-control" : "system-comparison" } } : body.researchPlan;
   const seed = body.researchPreset ? hangmanPilotSeed() : typeof body.masterSeed === "string" ? body.masterSeed : undefined;
   const created = seriesManager!.create(parsed as [PlayerConfig, PlayerConfig], Number(body.turnTimeoutSeconds ?? 120), budgets, plan, seed, researchPlan);
-  response.status(201).json({ series: publicSeries(created, storedMatches) });
+  response.status(201).json({ series: publicSeries(created, matchesFor(created)) });
 }));
 for (const command of ["start", "pause", "stop", "retry", "skip"] as const) {
   app.post(`/api/series/:id/${command}`, asyncRoute(async (request, response) => {
     const id = matchIdOf(request);
-    if (command === "start") await seriesManager!.start(id);
+    if (command === "start") {
+      const existing = seriesManager!.get(id);
+      await seriesManager!.start(id, existing.researchPlan ? (agent) => researchCapabilityRefusal(agents.create(agent)) : undefined);
+    }
     else if (command === "pause") await seriesManager!.pause(id);
     else if (command === "stop") await seriesManager!.stop(id);
     else if (command === "retry") seriesManager!.retry(id);
     else seriesManager!.skip(id);
-    response.json({ series: publicSeries(seriesManager!.get(id), storedMatches) });
+    const series = seriesManager!.get(id);
+    response.json({ series: publicSeries(series, matchesFor(series)) });
   }));
 }
 
@@ -303,7 +390,7 @@ app.get("/api/events", (request: Request, response: Response) => {
   response.setHeader("Connection", "keep-alive");
   response.flushHeaders();
   eventClients.add(response);
-  void controller.snapshot().then((snapshot) => writeToClient(response, "snapshot", JSON.stringify(withStorage(snapshot)))).catch((error: unknown) => { console.error("Could not send the opening event-stream snapshot.", error); });
+  void serverSnapshot().then((snapshot) => writeToClient(response, "snapshot", JSON.stringify(withStorage(snapshot)))).catch((error: unknown) => { console.error("Could not send the opening event-stream snapshot.", error); });
   const heartbeat = setInterval(() => writeToClient(response, "keepalive", JSON.stringify({ at: new Date().toISOString() })), 20_000);
   heartbeat.unref();
   request.on("close", () => { clearInterval(heartbeat); eventClients.delete(response); });
