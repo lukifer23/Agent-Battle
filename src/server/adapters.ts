@@ -1,10 +1,10 @@
 import { inspectExecutionStream } from "./executionEvidence.js";
 import { actionOutputSchema } from "./actionOutputSchema.js";
 import type { ChildProcess } from "node:child_process";
-import { accessSync, constants, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { delimiter, join } from "node:path";
-import type { AdapterCapabilities, AgentUsage, GameAction, GameObservation, PlayerConfig, Provider, ProviderInfo } from "../shared.js";
+import { explicitModelId, type AdapterCapabilities, type AgentUsage, type GameAction, type GameObservation, type PlayerConfig, type Provider, type ProviderInfo } from "../shared.js";
 import { AgentExecutionError, AgentProtocolError, type AgentAdapter, type AgentReply, type AttemptControl } from "../domain/agent.js";
 import { parseActionEnvelope } from "../domain/actions.js";
 import { excerpt } from "./diagnostics.js";
@@ -35,12 +35,23 @@ interface ProcessResult {
   exitCode?: number | null;
 }
 
-const commandName: Record<Provider, string> = { codex: "codex", claude: "claude", opencode: "opencode" };
+const commandName: Record<Provider, string> = { codex: "codex", claude: "claude", opencode: "opencode", grok: "grok" };
 const commandDefault: Record<Provider, string> = {
   codex: "",
   claude: "",
   opencode: "",
+  grok: "grok-4.7",
 };
+
+function configuredOpenCodeModel(): string {
+  try {
+    const parsed = JSON.parse(readFileSync(join(os.homedir(), ".config", "opencode", "opencode.json"), "utf8")) as { model?: unknown };
+    const model = typeof parsed.model === "string" ? parsed.model.trim() : "";
+    return explicitModelId(model) && model.length <= 140 ? model : "";
+  } catch {
+    return "";
+  }
+}
 
 function locate(command: string): string | undefined {
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
@@ -76,14 +87,14 @@ export async function detectProviders(): Promise<ProviderInfo[]> {
       installed: Boolean(executable),
       ...(executable ? { executable } : {}),
       ...(version ? { version } : {}),
-      defaultModel: commandDefault[provider],
+      defaultModel: provider === "opencode" ? configuredOpenCodeModel() || commandDefault.opencode : commandDefault[provider],
     };
   }));
 }
 
 function safeEnvironment(): NodeJS.ProcessEnv {
   const allowed = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
-    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY",
     "BATTLE_CODEX_ARGS", "BATTLE_TEST_CONFIG", "BATTLE_TEST_ARGS"]);
   const env: NodeJS.ProcessEnv = { NO_COLOR: "1", FORCE_COLOR: "0" };
   for (const key of allowed) if (process.env[key] !== undefined) env[key] = process.env[key];
@@ -197,44 +208,127 @@ function interpretClaude(root: { stdout: string; responseText: string }): Interp
   return { ...metadata, action, ...(action ? {} : { protocolError: "Claude returned no structured action; expected a structured_output or JSON result field." }) };
 }
 
+function rememberBoundedId(ids: Set<string>, value: unknown): void {
+  if (typeof value === "string" && value.length > 0 && value.length <= 200) ids.add(value);
+}
+
+function openCodeReportedModel(event: Record<string, unknown>, part: Record<string, unknown> | undefined): string | undefined {
+  const modelID = typeof part?.modelID === "string" ? part.modelID : typeof event.modelID === "string" ? event.modelID : undefined;
+  const providerID = typeof part?.providerID === "string" ? part.providerID : typeof event.providerID === "string" ? event.providerID : undefined;
+  if (modelID && providerID) return `${providerID}/${modelID}`;
+  if (modelID?.includes("/")) return modelID;
+  return undefined;
+}
+
 function interpretOpenCode(root: { stdout: string }): InterpreterResult {
   let inputTokens: number | null = null;
   let outputTokens: number | null = null;
   let costUsd: number | null = null;
   let toolCalls = 0;
   let sawEvents = false;
-  let resolvedModel: string | undefined;
+  const models = new Set<string>();
+  const sessionIds = new Set<string>();
   const text: string[] = [];
   for (const line of root.stdout.split(/\r?\n/)) {
     try {
-      const event = JSON.parse(line) as { type?: string; part?: { type?: string; tokens?: { input?: number; output?: number }; cost?: number; text?: string; modelID?: string; providerID?: string }; text?: string; modelID?: string; providerID?: string };
-      if (!event || typeof event !== "object") continue;
+      const event: unknown = JSON.parse(line);
+      if (!isRecord(event)) continue;
       sawEvents = true;
-      const modelID = event.part?.modelID ?? event.modelID;
-      const providerID = event.part?.providerID ?? event.providerID;
-      if (modelID && providerID) resolvedModel = `${providerID}/${modelID}`;
-      if (event.type === "tool_use" || event.type === "tool" || event.part?.type === "tool") toolCalls += 1;
-      if (event.part?.type === "step-finish" && event.part.tokens) {
-        inputTokens = parseNumber(event.part.tokens.input) ?? inputTokens;
-        outputTokens = parseNumber(event.part.tokens.output) ?? outputTokens;
-        costUsd = parseNumber(event.part.cost) ?? costUsd;
+      const part = isRecord(event.part) ? event.part : undefined;
+      rememberBoundedId(sessionIds, event.sessionID);
+      rememberBoundedId(sessionIds, event.session_id);
+      if (part) {
+        rememberBoundedId(sessionIds, part.sessionID);
+        rememberBoundedId(sessionIds, part.session_id);
       }
-      if (event.type === "text" || event.part?.type === "text") text.push(event.part?.text ?? event.text ?? "");
+      const model = openCodeReportedModel(event, part);
+      if (model) models.add(model);
+      const partType = typeof part?.type === "string" ? part.type : "";
+      if (event.type === "tool_use" || event.type === "tool" || partType === "tool" || partType === "tool-use" || partType === "tool_use") toolCalls += 1;
+      if (partType === "step-finish") {
+        const tokens = isRecord(part?.tokens) ? part.tokens : undefined;
+        if (tokens) {
+          const input = parseNumber(tokens.input);
+          const cache = isRecord(tokens.cache) ? tokens.cache : undefined;
+          const cacheRead = cache ? parseNumber(cache.read) : null;
+          const cacheWrite = cache ? parseNumber(cache.write) : null;
+          if (input !== null) inputTokens = input + (cacheRead ?? 0) + (cacheWrite ?? 0);
+          outputTokens = parseNumber(tokens.output) ?? outputTokens;
+        }
+        if (part) costUsd = parseNumber(part.cost) ?? costUsd;
+      }
+      if (event.type === "text" || partType === "text") {
+        const value = typeof part?.text === "string" ? part.text : typeof event.text === "string" ? event.text : "";
+        text.push(value);
+      }
     } catch { /* Non-JSON process diagnostics are not an agent response. */ }
   }
   const action = tryParseAction(text.join("").trim());
+  const resolvedModel = models.size === 1 ? [...models][0] : undefined;
+  const sessionId = sessionIds.size === 1 ? [...sessionIds][0] : undefined;
   return {
     action,
     usage: { inputTokens, outputTokens, costUsd, coverage: usageCoverage({ inputTokens, outputTokens, costUsd }) },
     toolCalls: sawEvents ? toolCalls : null,
     ...(resolvedModel ? { resolvedModel } : {}),
+    ...(sessionId ? { sessionId } : {}),
     ...(action ? {} : { protocolError: "OpenCode response did not contain one structured action JSON object." }),
+  };
+}
+
+function grokEnvelope(stdout: string): Record<string, unknown> | undefined {
+  const trimmed = stdout.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (isRecord(parsed)) return parsed;
+  } catch { /* A single object is the documented json format; otherwise scan lines. */ }
+  let found: Record<string, unknown> | undefined;
+  for (const line of trimmed.split(/\r?\n/)) {
+    try {
+      const parsed = JSON.parse(line);
+      if (isRecord(parsed) && (parsed.type === "error" || "text" in parsed || "structuredOutput" in parsed || "structured_output" in parsed || "sessionId" in parsed || "stopReason" in parsed)) found = parsed;
+    } catch { /* Non-JSON diagnostics are not an agent response. */ }
+  }
+  return found;
+}
+
+function grokUsage(envelope: Record<string, unknown>): AgentUsage {
+  if (envelope.usage_is_incomplete === true) return emptyUsage();
+  const usage = isRecord(envelope.usage) ? envelope.usage : undefined;
+  const inputBase = usage ? parseNumber(usage.input_tokens) : null;
+  const inputTokens = inputBase === null ? null : inputBase + (usage ? parseNumber(usage.cache_read_input_tokens) ?? 0 : 0) + (usage ? parseNumber(usage.cache_creation_input_tokens) ?? 0 : 0);
+  const outputTokens = usage ? parseNumber(usage.output_tokens) : null;
+  const costUsd = envelope.cost_is_partial === true ? null : parseNumber(envelope.total_cost_usd);
+  return { inputTokens, outputTokens, costUsd, coverage: usageCoverage({ inputTokens, outputTokens, costUsd }) };
+}
+
+function interpretGrok(root: { stdout: string }): InterpreterResult {
+  const envelope = grokEnvelope(root.stdout);
+  if (!envelope) return { usage: emptyUsage(), toolCalls: null, protocolError: "Grok response was not a JSON result." };
+  const usage = grokUsage(envelope);
+  const modelIds = isRecord(envelope.modelUsage) ? Object.keys(envelope.modelUsage).filter((id) => id && id !== "unknown") : [];
+  const resolvedModel = modelIds.length === 1 ? modelIds[0] : undefined;
+  const sessionId = typeof envelope.sessionId === "string" ? envelope.sessionId : typeof envelope.session_id === "string" ? envelope.session_id : undefined;
+  if (envelope.type === "error" || envelope.is_error === true) {
+    const message = typeof envelope.message === "string" ? envelope.message : "Grok reported an error.";
+    return { usage, toolCalls: null, ...(resolvedModel ? { resolvedModel } : {}), ...(sessionId ? { sessionId } : {}), providerError: message };
+  }
+  const action = tryParseAction(envelope.structuredOutput ?? envelope.structured_output ?? envelope.text);
+  const stop = typeof envelope.stopReason === "string" ? envelope.stopReason : "";
+  return {
+    usage,
+    toolCalls: null,
+    ...(resolvedModel ? { resolvedModel } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    ...(action ? { action } : { protocolError: `Grok response did not contain one structured action JSON object${stop ? ` (${stop})` : ""}.` }),
   };
 }
 
 function interpretFor(provider: Provider) {
   if (provider === "codex") return interpretCodex;
   if (provider === "claude") return interpretClaude;
+  if (provider === "grok") return interpretGrok;
   return interpretOpenCode;
 }
 
@@ -247,7 +341,7 @@ export function parseStructuredAction(output: string, provider: Provider): GameA
 
 /** Native structured-output transports receive the schema as CLI arguments, not a second copy in the prompt. */
 export function buildPrompt(observation: GameObservation, provider: Provider): string {
-  const nativeSchema = provider === "claude" || provider === "codex";
+  const nativeSchema = provider === "claude" || provider === "codex" || provider === "grok";
   const body = nativeSchema ? { ...observation, actionSchema: undefined } : observation;
   const contract = nativeSchema
     ? "Return exactly one JSON object in the supplied action schema, with type and payload at the top level. The payload contains only the fields for that action, never another action envelope. Do not include prose or markdown."
@@ -475,10 +569,47 @@ export class OpenCodeAdapter extends CliAgentAdapter {
   }
 }
 
+export class GrokBuildAdapter extends CliAgentAdapter {
+  override readonly isolationQualified = false;
+  override readonly capabilities: AdapterCapabilities = {
+    exactModel: "observable", sessionIdentity: "observable", streamCompletion: "unavailable", toolInventory: "unavailable",
+    toolUse: "unavailable", structuredOutput: "native", usage: "observable", cost: "observable", reasoningRequest: "requested",
+    effectiveReasoning: "unobserved", cancellation: "observable", isolation: "unqualified",
+  };
+  override readonly restrictions = "Grok Build headless single turn with --max-turns 1, web search disabled, subagents disabled, plan mode disabled, and permission-mode dontAsk. The JSON result does not publish a tool inventory, so tool use stays unknown. This is not OS isolation.";
+  protected invocation(observation: GameObservation, workingDirectory: string): Invocation {
+    const reasoning = this.config.reasoning?.trim().toLowerCase();
+    const effortArgs = reasoning && ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(reasoning)
+      ? ["--reasoning-effort", reasoning]
+      : [];
+    return {
+      args: [
+        "--output-format", "json",
+        "--json-schema", JSON.stringify(actionOutputSchema(observation.actionSchema)),
+        "--max-turns", "1",
+        "--disable-web-search",
+        "--no-subagents",
+        "--no-plan",
+        "--permission-mode", "dontAsk",
+        "--verbatim",
+        "--cwd", workingDirectory,
+        "--system-prompt-override", "You are a game-playing agent. Follow the supplied rules and observation. Maximize your game objective. Submit one action that matches the JSON schema. Do not use tools.",
+        ...effortArgs,
+        ...this.getModelArgs(),
+        "--single", buildPrompt(observation, "grok"),
+      ],
+      env: safeEnvironment(),
+      readResponse: (stdout) => stdout,
+      interpret: interpretGrok,
+    };
+  }
+}
+
 export function agentRegistryDefaults() {
   return {
     codex: (config: PlayerConfig) => new CodexCLIAdapter(config),
     claude: (config: PlayerConfig) => new ClaudeCodeAdapter(config),
     opencode: (config: PlayerConfig) => new OpenCodeAdapter(config),
+    grok: (config: PlayerConfig) => new GrokBuildAdapter(config),
   };
 }

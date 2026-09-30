@@ -10,16 +10,17 @@ import { highlightSquares, positionSummary } from "./client/chessView.js";
 import { aggregateUsage } from "./domain/usage.js";
 import { remainingMatchMs } from "./domain/matchTime.js";
 import { ArrowUpRight, BoardMark, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, FlipVertical, RefreshCw, Trophy } from "./components/icons.js";
-import { competitorId, competitorLabel, distinctExplicitModels, explicitModelId } from "./shared.js";
+import { PROVIDERS, competitorId, competitorLabel, distinctExplicitModels, explicitModelId } from "./shared.js";
 import type { AppState, ChessSnapshot, MatchEvent, PublicMatchDetail, PublicSeries, Provider, SeriesPlan, ResearchPlan } from "./shared.js";
 
 const initialFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-const pretty: Record<Provider, string> = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode" };
-const marks: Record<Provider, string> = { codex: "CX", claude: "CC", opencode: "OC" };
+const pretty: Record<Provider, string> = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode", grok: "Grok" };
+const marks: Record<Provider, string> = { codex: "CX", claude: "CC", opencode: "OC", grok: "GK" };
 const reasoningOptions: Record<Provider, string[]> = {
   codex: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   claude: ["none", "low", "medium", "high", "xhigh", "max"],
   opencode: [],
+  grok: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
 };
 const REPLAYABLE = ["finished", "forfeit", "stopped", "error", "interrupted", "paused"];
 const timePresets = [5, 10, 30, 60] as const;
@@ -169,12 +170,12 @@ function App() {
 
   const chooseWhiteProvider = (provider: Provider) => {
     setWhiteProvider(provider);
-    setWhiteModel(state?.recentMatches.flatMap((match) => match.players).find((player) => player.agent.provider === provider && explicitModelId(player.agent.model))?.agent.model ?? "");
+    setWhiteModel(state?.recentMatches.flatMap((match) => match.players).find((player) => player.agent.provider === provider && explicitModelId(player.agent.model))?.agent.model ?? providers.find((item) => item.provider === provider)?.defaultModel ?? "");
     if (!reasoningOptions[provider].includes(whiteReasoning.toLowerCase())) setWhiteReasoning("");
   };
   const chooseBlackProvider = (provider: Provider) => {
     setBlackProvider(provider);
-    setBlackModel(state?.recentMatches.flatMap((match) => match.players).find((player) => player.agent.provider === provider && explicitModelId(player.agent.model))?.agent.model ?? "");
+    setBlackModel(state?.recentMatches.flatMap((match) => match.players).find((player) => player.agent.provider === provider && explicitModelId(player.agent.model))?.agent.model ?? providers.find((item) => item.provider === provider)?.defaultModel ?? "");
     if (!reasoningOptions[provider].includes(blackReasoning.toLowerCase())) setBlackReasoning("");
   };
 
@@ -367,14 +368,16 @@ function App() {
   const activeSeries = seriesList.find((series) => ["ready", "running", "paused"].includes(series.status));
   const researchSetup = viewMode === "series" && seriesPreset === "research";
   const distinctModels = distinctExplicitModels({ model: whiteModel }, { model: blackModel });
+  const bothExplicit = explicitModelId(whiteModel) && explicitModelId(blackModel);
+  const sameExplicitModel = bothExplicit && whiteModel.trim().toLowerCase() === blackModel.trim().toLowerCase();
   const startBlocker = connection !== "live" ? "Waiting for the game server to reconnect." : storageBlocked ? "Saved history is unavailable. Restore storage before starting."
     : !providersChecked || !chosenGame ? "Checking games and local agent CLIs…"
     : !installed(whiteProvider) || !installed(blackProvider) ? "Install the selected agent CLI and sign in to use it."
     : !canCreate && state?.activeMatch ? `A ${state.activeMatch.gameId} match is ${state.activeMatch.status}. Finish or stop it before starting another match.`
     : activeSeries ? `A battle series is ${activeSeries.status}. Finish or stop it before starting another match.`
-    : !(researchSetup ? explicitModelId(whiteModel) && explicitModelId(blackModel) : distinctModels) ? "Enter two explicit, different model IDs. Two CLI defaults or the same model in both seats cannot establish distinct competitors."
+    : !bothExplicit ? "Enter an explicit model ID for each seat. CLI defaults and display placeholders are not accepted."
     : null;
-  const seriesBlocker = startBlocker ?? (researchSetup && (whiteProvider !== "claude" || blackProvider !== "claude") ? "This pilot requires Claude’s reported no-tools inventory. Other CLI profiles remain unqualified." : !researchSetup && !distinctModels ? "Enter two different explicit model IDs." : whiteProvider === "codex" || blackProvider === "codex" ? "Codex tool isolation is not qualified for scored series trials. Choose a qualified no-tools CLI." : null);
+  const seriesBlocker = startBlocker ?? (researchSetup && (whiteProvider !== "claude" || blackProvider !== "claude") ? "This pilot requires Claude’s reported no-tools inventory. Other CLI profiles remain unqualified." : !researchSetup && !distinctModels ? "Enter two different explicit model IDs." : whiteProvider === "codex" || blackProvider === "codex" || whiteProvider === "grok" || blackProvider === "grok" ? "Codex and Grok do not publish a qualified no-tools inventory, so they stay out of scored series." : null);
 
   useEffect(() => {
     if (!currentIsRunning) return;
@@ -638,6 +641,7 @@ function App() {
               </div>
               <div className="inline-note">Game time counts while the match runs, including an active provider request; pause stops its clock. Move timeout is a separate per-request limit. Short presets may stop before a game result. Cost remains a best-effort threshold on reported provider usage.</div>
               {(whiteProvider === blackProvider) && <div className="inline-note">Both sides can use the same CLI with different models.</div>}
+              {viewMode !== "series" && sameExplicitModel && <div className="inline-note">Both seats use the same explicit model. The game can finish. Comparative standings still require two different verified models.</div>}
               {providersChecked && providers.some((entry) => !entry.installed) && <div className="inline-note">Install a supported CLI and sign in before choosing it. Agent Battle uses its existing login.</div>}
               </details>
               <div className="launch-strip">
@@ -861,7 +865,7 @@ function PlayerPicker(props: {
     <div className="provider-field">
       <span className={`provider-mark provider-${props.provider}`} aria-hidden="true">{marks[props.provider]}</span>
       <select id={`${props.color}-provider`} value={props.provider} onChange={(event) => { setCustomModel(false); props.onProvider(event.target.value as Provider); }}>
-        {(["codex", "claude", "opencode"] as Provider[]).map((provider) => {
+        {PROVIDERS.map((provider) => {
           const info = props.providers.find((item) => item.provider === provider);
           return <option value={provider} key={provider}>{pretty[provider]}{!props.loading && info && !info.installed ? " · not installed" : ""}</option>;
         })}

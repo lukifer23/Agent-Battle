@@ -243,6 +243,7 @@ export class MatchController {
         codex: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
         claude: ["none", "low", "medium", "high", "xhigh", "max"],
         opencode: [],
+        grok: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
       };
       if (reasoning && reasoningOptions[config.provider].length && !reasoningOptions[config.provider].includes(reasoning.toLowerCase())) {
         throw new Error(`${config.provider} reasoning must be one of: ${reasoningOptions[config.provider].join(", ")}.`);

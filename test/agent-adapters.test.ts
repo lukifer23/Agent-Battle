@@ -4,7 +4,8 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import { join } from "node:path";
 import { AgentExecutionError, AgentProtocolError } from "../src/domain/agent.js";
-import { ClaudeCodeAdapter, CodexCLIAdapter, OpenCodeAdapter, parseStructuredAction } from "../src/server/adapters.js";
+import { ClaudeCodeAdapter, CodexCLIAdapter, GrokBuildAdapter, OpenCodeAdapter, parseStructuredAction } from "../src/server/adapters.js";
+import { inspectExecutionStream } from "../src/server/executionEvidence.js";
 import { ChessGame } from "../src/games/chess/ChessGame.js";
 
 const action = { type: "move", payload: { move: "e2e4" } };
@@ -18,6 +19,9 @@ test("strict protocol parser accepts only a JSON action envelope", () => {
   assert.deepEqual(parseStructuredAction(JSON.stringify(action), "codex"), action);
   assert.deepEqual(parseStructuredAction(JSON.stringify({ result: JSON.stringify(action) }), "claude"), action);
   assert.deepEqual(parseStructuredAction(`${JSON.stringify({ type: "text", part: { type: "text", text: JSON.stringify(action) } })}\n${JSON.stringify({ type: "step_finish" })}`, "opencode"), action);
+  assert.deepEqual(parseStructuredAction(JSON.stringify({ structuredOutput: action, text: "", stopReason: "end_turn", sessionId: "sess-1", modelUsage: { "grok-4.7": { inputTokens: 3, outputTokens: 1 } }, usage: { input_tokens: 3, cache_read_input_tokens: 1, cache_creation_input_tokens: 0, output_tokens: 1 }, total_cost_usd: 0.01 }), "grok"), action);
+  assert.throws(() => parseStructuredAction(JSON.stringify({ type: "error", message: "auth failed" }), "grok"), (error: unknown) => error instanceof AgentExecutionError && /auth failed/.test(error.message));
+  assert.throws(() => parseStructuredAction(JSON.stringify({ text: "not json", stopReason: "end_turn", usage_is_incomplete: true }), "grok"), AgentProtocolError);
   assert.throws(() => parseStructuredAction("I would like to move e2 to e4.", "codex"), AgentProtocolError);
   assert.throws(() => parseStructuredAction('{"move":"e2e4"}', "codex"), AgentProtocolError);
   assert.throws(() => parseStructuredAction(`${JSON.stringify(action)} extra`, "claude"), AgentProtocolError);
@@ -155,6 +159,133 @@ test("OpenCode adapter selects a dedicated no-tools agent even when user config 
     process.env.PATH = previousPath;
     if (previousCaptureConfig === undefined) delete process.env.BATTLE_TEST_CONFIG;
     else process.env.BATTLE_TEST_CONFIG = previousCaptureConfig;
+    if (previousCaptureArgs === undefined) delete process.env.BATTLE_TEST_ARGS;
+    else process.env.BATTLE_TEST_ARGS = previousCaptureArgs;
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+async function withFakeOpenCode(events: string[], body: () => Promise<void>): Promise<void> {
+  const previousPath = process.env.PATH;
+  const previousCaptureConfig = process.env.BATTLE_TEST_CONFIG;
+  const previousCaptureArgs = process.env.BATTLE_TEST_ARGS;
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-opencode-stream-"));
+  const executable = join(folder, "opencode");
+  const script = `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'opencode test 1.0'; exit 0; fi\nprintf '%s\\n' '${events.join("\n")}'\n`;
+  writeFileSync(executable, script);
+  chmodSync(executable, 0o755);
+  process.env.PATH = `${folder}:/bin:/usr/bin`;
+  process.env.BATTLE_TEST_CONFIG = join(folder, "config.json");
+  process.env.BATTLE_TEST_ARGS = join(folder, "args.txt");
+  try { await body(); }
+  finally {
+    process.env.PATH = previousPath;
+    if (previousCaptureConfig === undefined) delete process.env.BATTLE_TEST_CONFIG;
+    else process.env.BATTLE_TEST_CONFIG = previousCaptureConfig;
+    if (previousCaptureArgs === undefined) delete process.env.BATTLE_TEST_ARGS;
+    else process.env.BATTLE_TEST_ARGS = previousCaptureArgs;
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+test("OpenCode records one sessionID and cache tokens without copying the requested model", async () => {
+  const actionText = JSON.stringify(action);
+  const events = [
+    JSON.stringify({ type: "step_start", sessionID: "ses_one" }),
+    JSON.stringify({ type: "text", sessionID: "ses_one", part: { type: "text", text: actionText } }),
+    JSON.stringify({ type: "tool_use", sessionID: "ses_one", part: { type: "tool" } }),
+    JSON.stringify({ type: "tool_result", sessionID: "ses_one", part: { type: "tool-result" } }),
+    JSON.stringify({ type: "step_finish", sessionID: "ses_one", part: { type: "step-finish", tokens: { input: 100, output: 10, cache: { read: 20, write: 5 } }, cost: 0.001, modelID: "opencode-go/deepseek-v4.1-flash" } }),
+  ];
+  await withFakeOpenCode(events, async () => {
+    const adapter = new OpenCodeAdapter({ provider: "opencode", model: "requested-model", name: "requested" });
+    await adapter.initialize();
+    const reply = await adapter.act(observation, control());
+    assert.deepEqual(reply.action, action);
+    assert.equal(reply.sessionId, "ses_one");
+    assert.equal(reply.resolvedModel, "opencode-go/deepseek-v4.1-flash");
+    assert.equal(reply.toolCalls, 1);
+    assert.equal(reply.usage.inputTokens, 125);
+    assert.equal(reply.usage.outputTokens, 10);
+    assert.equal(reply.usage.costUsd, 0.001);
+    assert.equal(reply.execution?.streamComplete, true);
+    assert.equal(reply.execution?.unknownEvents, false);
+    assert.deepEqual(reply.execution?.modelIds, ["opencode-go/deepseek-v4.1-flash"]);
+    await adapter.shutdown();
+  });
+});
+
+test("OpenCode leaves model and session unknown when the stream does not report one id", async () => {
+  const events = [
+    JSON.stringify({ type: "text", sessionID: "ses_a", part: { type: "text", text: JSON.stringify(action) } }),
+    JSON.stringify({ type: "step_finish", sessionID: "ses_b", part: { type: "step-finish", tokens: { output: 4, cache: { read: 9 } }, cost: 0.002 } }),
+  ];
+  await withFakeOpenCode(events, async () => {
+    const adapter = new OpenCodeAdapter({ provider: "opencode", model: "requested-model", name: "requested" });
+    await adapter.initialize();
+    const reply = await adapter.act(observation, control());
+    assert.equal(reply.sessionId, undefined);
+    assert.equal(reply.resolvedModel, undefined);
+    assert.equal(reply.usage.inputTokens, null);
+    assert.equal(reply.toolCalls, null);
+    assert.equal(reply.execution?.unknownEvents, true);
+    await adapter.shutdown();
+  });
+});
+
+test("OpenCode execution evidence accepts tool_result and a slashed model id", () => {
+  const config = { provider: "opencode" as const, model: "requested-model", name: "requested-model" };
+  const stdout = [
+    JSON.stringify({ type: "step_start", sessionID: "ses_one" }),
+    JSON.stringify({ type: "tool_result", sessionID: "ses_one" }),
+    JSON.stringify({ type: "step_finish", sessionID: "ses_one", part: { type: "step-finish", providerID: "opencode-go", modelID: "deepseek-v4.1-flash" } }),
+  ].join("\n");
+  const evidence = inspectExecutionStream(config, stdout, "test");
+  assert.equal(evidence.streamComplete, true);
+  assert.equal(evidence.unknownEvents, false);
+  assert.deepEqual(evidence.modelIds, ["opencode-go/deepseek-v4.1-flash"]);
+  const conflict = inspectExecutionStream(config, `${JSON.stringify({ type: "text", sessionID: "ses_a" })}\n${JSON.stringify({ type: "step_finish", session_id: "ses_b" })}`, "test");
+  assert.equal(conflict.unknownEvents, true);
+  assert.equal(conflict.streamComplete, true);
+});
+
+test("Grok adapter requests one schema-constrained headless turn and does not resume a session", async () => {
+  const previousPath = process.env.PATH;
+  const previousCaptureArgs = process.env.BATTLE_TEST_ARGS;
+  const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-grok-test-"));
+  const captureArgs = join(folder, "args.txt");
+  const body = JSON.stringify({
+    structuredOutput: action,
+    stopReason: "end_turn",
+    sessionId: "fresh-session",
+    modelUsage: { "grok-4.7": { inputTokens: 4, outputTokens: 2 } },
+    usage: { input_tokens: 4, output_tokens: 2 },
+    total_cost_usd: 0.02,
+  });
+  writeFileSync(join(folder, "grok"), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'grok test 1.0'; exit 0; fi\nprintf '%s\\n' "$@" > "$BATTLE_TEST_ARGS"\nprintf '%s\\n' '${body}'\n`);
+  chmodSync(join(folder, "grok"), 0o755);
+  process.env.PATH = `${folder}:/bin:/usr/bin`;
+  process.env.BATTLE_TEST_ARGS = captureArgs;
+  try {
+    const adapter = new GrokBuildAdapter({ provider: "grok", model: "grok-4.7", reasoning: "low", name: "test" });
+    await adapter.initialize();
+    const reply = await adapter.act(observation, control());
+    assert.deepEqual(reply.action, action);
+    assert.equal(reply.resolvedModel, "grok-4.7");
+    assert.equal(reply.sessionId, "fresh-session");
+    assert.equal(reply.toolCalls, null);
+    assert.equal(reply.usage.inputTokens, 4);
+    assert.equal(reply.usage.costUsd, 0.02);
+    const args = readFileSync(captureArgs, "utf8");
+    assert.match(args, /--max-turns\n1/);
+    assert.match(args, /--json-schema\n/);
+    assert.match(args, /--disable-web-search/);
+    assert.match(args, /--no-subagents/);
+    assert.doesNotMatch(args, /--resume/);
+    assert.match(args, /--reasoning-effort\nlow/);
+    await adapter.shutdown();
+  } finally {
+    process.env.PATH = previousPath;
     if (previousCaptureArgs === undefined) delete process.env.BATTLE_TEST_ARGS;
     else process.env.BATTLE_TEST_ARGS = previousCaptureArgs;
     rmSync(folder, { recursive: true, force: true });

@@ -1,4 +1,4 @@
-export const PROVIDERS = ["codex", "claude", "opencode"] as const;
+export const PROVIDERS = ["codex", "claude", "opencode", "grok"] as const;
 export type Provider = (typeof PROVIDERS)[number];
 export type MatchStatus = "ready" | "running" | "paused" | "finished" | "forfeit" | "stopped" | "error" | "interrupted";
 

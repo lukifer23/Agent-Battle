@@ -91,12 +91,18 @@ test("the API exposes a unified snapshot and rejects untrusted hosts and origins
 
     for (const gameId of ["chess", "hangman", "battleship"]) {
       const ids = gameId === "chess" ? ["white", "black"] : ["player1", "player2"];
-      for (const model of ["", "CLI configured default", "same-model"]) {
+      for (const model of ["", "CLI configured default"]) {
         const players = Object.fromEntries(ids.map((id) => [id, { provider: "claude", model }]));
         const rejected = await probe(port, { method: "POST", path: "/api/matches", headers: { "content-type": "application/json" }, body: JSON.stringify({ gameId, players }) });
-        assert.equal(rejected.status, 400, `${gameId} must reject ambiguous or mirrored competitors`);
-        assert.match(rejected.body, /explicit, different model IDs/);
+        assert.equal(rejected.status, 400, `${gameId} must reject blank and placeholder model IDs`);
+        assert.match(rejected.body, /explicit model ID/);
       }
+      const sameModel = Object.fromEntries(ids.map((id) => [id, { provider: "claude", model: "same-model" }]));
+      const created = await probe(port, { method: "POST", path: "/api/matches", headers: { "content-type": "application/json" }, body: JSON.stringify({ gameId, players: sameModel }) });
+      assert.equal(created.status, 201, `${gameId} accepts the same explicit model in both seats`);
+      const createdId = (JSON.parse(created.body) as { match: { id: string } }).match.id;
+      const stopped = await probe(port, { method: "POST", path: `/api/matches/${createdId}/stop`, headers: { "content-type": "application/json" }, body: "{}" });
+      assert.equal(stopped.status, 200, `${gameId} same-model match must be stopped before the next create`);
     }
 
     const unknown = await probe(port, { path: "/api/not-a-route" });
@@ -232,8 +238,9 @@ test("Hangman HTTP, SSE, events, attempts, exports, persistence and subprocess c
     const player = { provider: "codex", model: "fixture" };
     const secondPlayer = { provider: "codex", model: "fixture-b" };
     const mirror = await probe(port, { path: "/api/matches", method: "POST", body: JSON.stringify({ gameId: "hangman", gameVersion: "independent-lanes-1", players: { player1: player, player2: player }, turnTimeoutSeconds: 30 }), headers: { "content-type": "application/json" } });
-    assert.equal(mirror.status, 400);
-    assert.match(mirror.body, /two explicit, different model IDs/);
+    assert.equal(mirror.status, 201, mirror.body);
+    const mirrorId = (JSON.parse(mirror.body) as { match: { id: string } }).match.id;
+    await request(`/api/matches/${mirrorId}/stop`, {});
     let created;
     let word = "";
     for (let candidate = 0; candidate < 50; candidate++) {

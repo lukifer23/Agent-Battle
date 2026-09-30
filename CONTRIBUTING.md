@@ -8,7 +8,7 @@ force-push shared branches.
 ## Before you start
 
 - Node.js 22.13 or newer and npm are required. Node 20 cannot load `node:sqlite`.
-- At least one supported agent CLI (Codex, Claude Code, OpenCode) must be
+- At least one supported agent CLI (Codex, Claude Code, OpenCode, or Grok Build) must be
   installed and authenticated to run a real match. Tests do not require any CLI
   and never make paid model requests.
 

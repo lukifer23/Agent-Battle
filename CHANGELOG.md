@@ -17,6 +17,9 @@ early development and does not yet follow a released versioning scheme.
 - Publish `observation-contract-v4`: chess `chess-observation-v3` and Battleship `battleship-observation-2` keep a single legal-action list; independent Hangman `hangman-observation-v2` counts ply inside the current lane; Claude and Codex prompts leave `actionSchema` to the CLI schema argument.
 - Record offline seat measurements for the current rules: independent identical policies draw; shared-board frequency versus alphabetical is seat-sensitive; identical Battleship fleets give the first shooter the win. These are harness controls.
 - Verify 190 offline tests on this machine. No paid provider calls.
+- Add a Grok Build casual adapter (`grok --single`, JSON schema, one turn, web search and subagents disabled). It does not qualify for scored series. Report the installed Grok default `grok-4.7` and the model named in the local OpenCode config.
+- Let a casual match start with the same explicit model in both seats, so two configured OpenCode seats can finish a game. Comparative standings and v2 series still require two different explicit models. Record OpenCode `sessionID` and cache read/write tokens from the JSON stream when they are present. A model id that the stream does not report stays unknown.
+- Verify 194 offline tests. One bounded same-model OpenCode shared Hangman finished in 10 requests.
 
 ### Durable SQLite store (2026-09-29)
 

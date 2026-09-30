@@ -6,6 +6,7 @@ const suggestedModels: Record<Provider, readonly string[]> = {
   claude: ["claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
   codex: [],
   opencode: [],
+  grok: ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"],
 };
 
 export function modelChoices(provider: Provider, recent: string[], selected: string): string[] {
