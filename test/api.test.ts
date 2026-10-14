@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import os from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { ChessGame } from "../src/games/chess/ChessGame.js";
 import { openDatabase } from "../src/server/persistence/db.js";
 import type { MatchRecord } from "../src/shared.js";
@@ -47,10 +47,17 @@ function waitForListening(child: ChildProcess, port: number): Promise<void> {
 
 async function startServer(): Promise<{ child: ChildProcess; port: number; folder: string }> {
   const folder = mkdtempSync(join(os.tmpdir(), "agent-battle-api-"));
+  // Creation validates CLI availability even though this test never starts a turn.
+  // Keep the check real and deterministic without depending on an installed agent.
+  const bin = join(folder, "bin");
+  mkdirSync(bin);
+  const fixture = join(bin, "claude");
+  writeFileSync(fixture, `#!${process.execPath}\nif (process.argv.includes('--version')) { console.log('claude fixture'); process.exit(0); } process.exit(99);`);
+  chmodSync(fixture, 0o700);
   const port = 4400 + Math.floor(Math.random() * 400);
   const child = spawn(process.execPath, [tsxBin, "src/server/main.ts"], {
     cwd: projectRoot,
-    env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, NO_COLOR: "1" },
+    env: { ...process.env, PORT: String(port), AGENT_BATTLE_DATA_DIR: folder, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`, NO_COLOR: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   await waitForListening(child, port);
