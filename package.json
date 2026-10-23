@@ -36,7 +36,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.70.1",
-    "vite": "^7.1.4"
+    "vite": "^7.3.7"
   },
   "engines": {
     "node": ">=22.13.0"
